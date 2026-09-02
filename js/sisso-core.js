@@ -38,6 +38,9 @@
   function letterSeries(n) {
     var a = "abcdefghijklmnopqrstuvwxyz";
     if (n <= 26) return a.slice(0, n).split("");
+    if (n > 702) {
+      throw new Error("More than 702 columns are not supported by the letter scheme (a..zz).");
+    }
     var out = a.split("");
     for (var i = 0; i < 26; i++) {
       for (var j = 0; j < 26; j++) {
@@ -352,7 +355,7 @@
   // by letter (excluding the name column) plus the sample names.
   function parseDataFile(text, nameMap) {
     var lines = text.replace(/\r\n?/g, "\n").split("\n");
-    // drop trailing empty line
+    // drop trailing empty lines
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
     var nCols = nameMap.length;
     var cols = {};
@@ -362,6 +365,12 @@
     var names = new Array(lines.length - 1);
     for (var r = 1; r < lines.length; r++) {
       var parts = lines[r].trim().split(/\s+/);
+      if (parts.length !== nCols) {
+        throw new Error(
+          "Data row " + r + " has " + parts.length + " columns, expected " + nCols +
+          ". The file may be corrupted or use a different layout."
+        );
+      }
       names[r - 1] = parts[0];
       for (var c = 1; c < nCols; c++) {
         cols[nameMap[c].new_name][r - 1] = parseFloat(parts[c]);
@@ -383,6 +392,12 @@
         role: i === 0 ? "name" : i === 1 ? "target" : "feature",
       };
     });
+  }
+
+  function makeFeatureGetter(cols, featureSet, rowIndex) {
+    return function (letter) {
+      return featureSet[letter] ? cols[letter][rowIndex] : NaN;
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -455,6 +470,12 @@
     var yTrain = Array.from(train.cols[targetLetter]);
     var yVerify = verify ? Array.from(verify.cols[targetLetter]) : null;
 
+    // The formula evaluator must only ever see the *feature* columns, never the
+    // sample-id or the target property. This prevents a malformed formula from
+    // silently reading the answer it is supposed to predict.
+    var featureSet = {};
+    train.featureLetters.forEach(function (letter) { featureSet[letter] = true; });
+
     models.forEach(function (model) {
       var fn;
       try {
@@ -465,9 +486,7 @@
       }
       var predTrain = new Float64Array(train.n);
       for (var i = 0; i < train.n; i++) {
-        predTrain[i] = fn(function (letter) {
-          return train.cols[letter] ? train.cols[letter][i] : NaN;
-        });
+        predTrain[i] = fn(makeFeatureGetter(train.cols, featureSet, i));
       }
       model.predTrain = predTrain;
       model.metricsTrain = computeMetrics(yTrain, predTrain);
@@ -478,9 +497,7 @@
       if (verify) {
         var predVerify = new Float64Array(verify.n);
         for (var j = 0; j < verify.n; j++) {
-          predVerify[j] = fn(function (letter) {
-            return verify.cols[letter] ? verify.cols[letter][j] : NaN;
-          });
+          predVerify[j] = fn(makeFeatureGetter(verify.cols, featureSet, j));
         }
         model.predVerify = predVerify;
         model.metricsVerify = computeMetrics(yVerify, predVerify);
@@ -519,6 +536,7 @@
     spearman: spearman,
     pearson: pearson,
     parseDataFile: parseDataFile,
+    makeFeatureGetter: makeFeatureGetter,
     runPipeline: runPipeline,
   };
 });

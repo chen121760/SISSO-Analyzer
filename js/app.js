@@ -159,7 +159,6 @@
 
   async function run() {
     var btn = $("#btn-run");
-    var status = $("#status-text");
     btn.disabled = true;
     btn.textContent = I18N.t("analyzing");
 
@@ -281,28 +280,23 @@
     var res = state.result;
     var list = res.models.slice();
     var asc = state.sortAsc;
-    list.sort(function (a, b) {
-      var va, vb;
+
+    // Normalise non-finite metrics to a deterministic endpoint so NaN values
+    // never poison the comparator (which would make sort order unstable).
+    function key(m) {
+      var mt = m.metricsTrain;
       switch (state.sortKey) {
-        case "rank": va = a.rank; vb = b.rank; break;
-        case "rmse":
-          va = a.metricsTrain ? a.metricsTrain.rmse : Infinity;
-          vb = b.metricsTrain ? b.metricsTrain.rmse : Infinity;
-          break;
-        case "maxae":
-          va = a.metricsTrain ? a.metricsTrain.maxae : Infinity;
-          vb = b.metricsTrain ? b.metricsTrain.maxae : Infinity;
-          break;
-        case "r2":
-          va = a.metricsTrain ? a.metricsTrain.r2 : -Infinity;
-          vb = b.metricsTrain ? b.metricsTrain.r2 : -Infinity;
-          break;
-        case "rho":
-          va = a.metricsTrain ? a.metricsTrain.rho : 0;
-          vb = b.metricsTrain ? b.metricsTrain.rho : 0;
-          break;
-        default: va = a.rank; vb = b.rank;
+        case "rank": return m.rank;
+        case "rmse": return (mt && Number.isFinite(mt.rmse)) ? mt.rmse : Infinity;
+        case "maxae": return (mt && Number.isFinite(mt.maxae)) ? mt.maxae : Infinity;
+        case "r2": return (mt && Number.isFinite(mt.r2)) ? mt.r2 : -Infinity;
+        case "rho": return (mt && Number.isFinite(mt.rho)) ? mt.rho : 0;
+        default: return m.rank;
       }
+    }
+
+    list.sort(function (a, b) {
+      var va = key(a), vb = key(b);
       if (va < vb) return asc ? -1 : 1;
       if (va > vb) return asc ? 1 : -1;
       return a.rank - b.rank;
@@ -353,6 +347,8 @@
       ["R² (train)", null, "right"],
       ["ρ (train)", null, "right"],
       ["RMSE (verify)", null, "right"],
+      ["MaxAE (verify)", null, "right"],
+      ["ρ (verify)", null, "right"],
       [I18N.t("colActions"), null, "left"],
     ];
     cols.forEach(function (c) {
@@ -377,6 +373,8 @@
       tr.appendChild(el("td", "num", fmt(m.metricsTrain.r2, 4)));
       tr.appendChild(el("td", "num", fmt(m.metricsTrain.rho, 4)));
       tr.appendChild(el("td", "num", fmt(m.metricsVerify ? m.metricsVerify.rmse : null, 4)));
+      tr.appendChild(el("td", "num", fmt(m.metricsVerify ? m.metricsVerify.maxae : null, 4)));
+      tr.appendChild(el("td", "num", fmt(m.metricsVerify ? m.metricsVerify.rho : null, 4)));
 
       var td = el("td");
       var btn = el("button", "btn btn--secondary btn--sm", I18N.t("view"));
@@ -437,8 +435,8 @@
     svg.classList.add("model-card__thumb");
 
     var allX = [], allY = [];
-    var trainPts = buildPoints(res.train, m.predTrain);
-    var verifyPts = res.verify ? buildPoints(res.verify, m.predVerify) : [];
+    var trainPts = buildPoints(res.train, m.predTrain, "train");
+    var verifyPts = res.verify ? buildPoints(res.verify, m.predVerify, "verify") : [];
     trainPts.concat(verifyPts).forEach(function (p) { allX.push(p[0]); allY.push(p[1]); });
     if (!allX.length) return svg;
 
@@ -487,12 +485,15 @@
     }
   }
 
-  function buildPoints(data, pred) {
+  function buildPoints(data, pred, source) {
     var res = state.result;
     var y = Array.from(data.cols[res.meta.targetLetter]);
     var pts = [];
     for (var i = 0; i < data.n; i++) {
-      pts.push([pred[i], y[i], data.names[i]]);
+      // Skip non-finite points: they cannot be plotted and would poison the
+      // axis-range computation (NaN propagates through Math.min/max).
+      if (!Number.isFinite(pred[i]) || !Number.isFinite(y[i])) continue;
+      pts.push([pred[i], y[i], data.names[i], source, i]);
     }
     return pts;
   }
@@ -527,25 +528,25 @@
   function renderMetricGrid(m) {
     var grid = $("#metric-grid");
     grid.innerHTML = "";
+    var hasVerify = !!m.metricsVerify;
     var rows = [
-      ["RMSE", m.metricsTrain.rmse, m.metricsVerify ? m.metricsVerify.rmse : null],
-      ["MaxAE", m.metricsTrain.maxae, m.metricsVerify ? m.metricsVerify.maxae : null],
-      ["R²", m.metricsTrain.r2, m.metricsVerify ? m.metricsVerify.r2 : null],
-      ["ρ", m.metricsTrain.rho, m.metricsVerify ? m.metricsVerify.rho : null],
+      ["RMSE", m.metricsTrain.rmse, hasVerify ? m.metricsVerify.rmse : null],
+      ["MaxAE", m.metricsTrain.maxae, hasVerify ? m.metricsVerify.maxae : null],
+      ["R²", m.metricsTrain.r2, hasVerify ? m.metricsVerify.r2 : null],
+      ["ρ", m.metricsTrain.rho, hasVerify ? m.metricsVerify.rho : null],
     ];
     rows.forEach(function (r) {
       var card = el("div", "metric-card");
-      card.appendChild(el("div", "metric-card__label", r[0]));
+      card.appendChild(el("div", "metric-card__label", r[0] + " · " + I18N.t("detailTrain")));
       card.appendChild(el("div", "metric-card__value", fmt(r[1], 4)));
       grid.appendChild(card);
+      if (hasVerify) {
+        var vc = el("div", "metric-card");
+        vc.appendChild(el("div", "metric-card__label", r[0] + " · " + I18N.t("detailVerify")));
+        vc.appendChild(el("div", "metric-card__value", fmt(r[2], 4)));
+        grid.appendChild(vc);
+      }
     });
-    // verify summary if present
-    if (m.metricsVerify) {
-      var vc = el("div", "metric-card");
-      vc.appendChild(el("div", "metric-card__label", I18N.t("detailVerify") + " RMSE"));
-      vc.appendChild(el("div", "metric-card__value", fmt(m.metricsVerify.rmse, 4)));
-      grid.appendChild(vc);
-    }
   }
 
   function renderChart(m) {
@@ -554,8 +555,15 @@
     if (state.chart) { state.chart.dispose(); }
     state.chart = echarts.init(dom);
 
-    var trainPts = buildPoints(res.train, m.predTrain);
-    var verifyPts = res.verify ? buildPoints(res.verify, m.predVerify) : [];
+    var trainPts = buildPoints(res.train, m.predTrain, "train");
+    var verifyPts = res.verify ? buildPoints(res.verify, m.predVerify, "verify") : [];
+
+    if (!trainPts.length && !verifyPts.length) {
+      state.chart.setOption({
+        title: { text: I18N.t("emptyChart"), left: "center", top: "middle", textStyle: { fontSize: 14, color: "#64748b" } },
+      });
+      return;
+    }
 
     var trainData = trainPts.map(function (p) {
       return { value: [p[0], p[1]], name: p[2], raw: p };
@@ -661,8 +669,6 @@
         openInspector(params.data.raw);
       }
     });
-
-    window.addEventListener("resize", resizeChart);
   }
 
   function resizeChart() {
@@ -673,19 +679,13 @@
   // Point inspector
   // ---------------------------------------------------------------------------
   function openInspector(point) {
-    // point = [pred, true, sampleName]
+    // point = [pred, true, sampleName, source, rowIndex]
     var res = state.result;
-    var name = point[2];
-    var pred = point[0], truth = point[1];
+    var pred = point[0], truth = point[1], name = point[2];
+    var source = point[3], rowIndex = point[4];
 
-    // find row index by name in train first, then verify
-    var data = res.train;
-    var idx = data.names.indexOf(name);
-    if (idx < 0 && res.verify) {
-      data = res.verify;
-      idx = data.names.indexOf(name);
-    }
-    if (idx < 0) return;
+    var data = source === "verify" && res.verify ? res.verify : res.train;
+    if (rowIndex < 0 || rowIndex >= data.n) return;
 
     $("#inspector-title").textContent = I18N.t("detailPointTitle") + " · " + name;
 
@@ -709,7 +709,7 @@
       if (c.role !== "feature") return;
       var tr = el("tr");
       tr.appendChild(el("td", null, c.original));
-      var val = data.cols[c.letter] ? data.cols[c.letter][idx] : null;
+      var val = data.cols[c.letter] ? data.cols[c.letter][rowIndex] : null;
       tr.appendChild(el("td", "num", val === undefined || Number.isNaN(val) ? "—" : fmt(val, 6)));
       tbody.appendChild(tr);
     });
@@ -888,6 +888,7 @@
   // ---------------------------------------------------------------------------
   function init() {
     bindEvents();
+    window.addEventListener("resize", resizeChart);
     applyI18n();
     renderFileList();
     renderRunButton();

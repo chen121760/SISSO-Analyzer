@@ -102,5 +102,37 @@ for (const m of res.models) {
 console.log(`\nmax |RMSE_train - RMSE_sisso| across ${res.models.length} models: ${maxDev.toExponential(4)}`);
 assert(maxDev < 1e-5, "RMSE_train == RMSE_sisso across all models");
 
+// 8. adversarial: a formula referencing the target column 'b' must NOT leak the
+//    answer — the evaluator getter is restricted to feature letters only.
+{
+  const cols = { b: new Float64Array([12345]), c: new Float64Array([7]) };
+  const featureSet = { c: true };
+  const get = core.makeFeatureGetter(cols, featureSet, 0);
+  assert(Number.isNaN(get("b")), "getter must return NaN for target 'b'");
+  assert(get("c") === 7, "getter must return feature value for 'c'");
+  const leaky = core.compileFormula("(0) + (1)*(b)");
+  assert(Number.isNaN(leaky(get)), "formula using target 'b' evaluates to NaN");
+}
+
+// 9. adversarial: letterSeries must reject >702 columns instead of silently
+//    producing undefined names.
+{
+  let threw = false;
+  try { core.letterSeries(703); } catch (e) { threw = true; }
+  assert(threw, "letterSeries(703) must throw");
+}
+
+// 10. adversarial: malformed data row (wrong column count) must throw.
+{
+  let threw = false;
+  try {
+    core.parseDataFile("h1 h2\nrow1 1 2\nrow2 3\n", [
+      { original_name: "h1", new_name: "a", char_len: 2 },
+      { original_name: "h2", new_name: "b", char_len: 2 },
+    ]);
+  } catch (e) { threw = true; }
+  assert(threw, "parseDataFile with wrong column count must throw");
+}
+
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED"}`);
 process.exit(failures === 0 ? 0 : 1);
