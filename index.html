@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SISSO Viewer</title>
+  <meta name="description" content="Interactive explorer for SISSO regression results" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- Top bar -->
+  <header class="app-bar" role="banner">
+    <div class="app-bar__brand">
+      <svg class="app-bar__logo" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+        <path d="M3 3v18h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="8" cy="15" r="2.2" fill="currentColor"/>
+        <circle cx="13" cy="11" r="2.2" fill="currentColor"/>
+        <circle cx="17" cy="7" r="2.2" fill="currentColor"/>
+      </svg>
+      <span class="app-bar__title" data-i18n="appTitle">SISSO Viewer</span>
+      <span class="app-bar__subtitle" data-i18n="appSubtitle">Interactive explorer for SISSO regression results</span>
+    </div>
+    <div class="app-bar__actions">
+      <button type="button" class="btn btn--ghost" id="btn-reset" hidden data-i18n="reset">Load new results</button>
+      <button
+        type="button"
+        class="btn btn--ghost btn--lang"
+        id="btn-lang"
+        aria-label="Switch language"
+      >中 / EN</button>
+    </div>
+  </header>
+
+  <main id="main" class="main">
+    <!-- Upload view -->
+    <section id="view-upload" class="view view--upload" aria-labelledby="upload-title">
+      <div class="upload-card">
+        <h1 class="upload-card__title" id="upload-title" data-i18n="uploadTitle">Load SISSO results</h1>
+        <div
+          class="dropzone"
+          id="dropzone"
+          role="button"
+          tabindex="0"
+          aria-label="Drop result files here or click to browse"
+        >
+          <svg class="dropzone__icon" viewBox="0 0 24 24" width="40" height="40" aria-hidden="true">
+            <path d="M12 16V4m0 0L7 9m5-5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <p class="dropzone__hint" data-i18n="uploadHint">Drop the result files here, or click to browse. You can also select the whole run folder.</p>
+          <div class="dropzone__actions">
+            <button type="button" class="btn btn--primary" id="btn-browse" data-i18n="browseFiles">Browse files</button>
+            <button type="button" class="btn btn--secondary" id="btn-folder" data-i18n="browseFolder">Select folder</button>
+          </div>
+          <input type="file" id="input-files" multiple hidden />
+          <input type="file" id="input-folder" webkitdirectory hidden />
+        </div>
+
+        <ul class="file-list" id="file-list" aria-live="polite"></ul>
+
+        <p class="upload-card__note" data-i18n="verifyOptionalNote">
+          verify.dat is optional — if omitted, only train metrics are shown.
+        </p>
+
+        <div class="upload-card__run">
+          <button type="button" class="btn btn--primary btn--run" id="btn-run" disabled data-i18n="run">Analyze</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Results view -->
+    <section id="view-results" class="view view--results" hidden aria-label="Results">
+      <div id="warning" class="warning" role="status" hidden></div>
+
+      <div class="kpi-strip" id="kpi-strip" aria-label="Summary metrics"></div>
+
+      <div class="toolbar">
+        <label class="field">
+          <span class="field__label" data-i18n="sortBy">Sort by</span>
+          <select id="sort-key" class="select"></select>
+        </label>
+        <label class="field">
+          <span class="field__label">&#8597;</span>
+          <select id="sort-dir" class="select"></select>
+        </label>
+        <label class="field field--grow">
+          <span class="field__label" data-i18n="topN">Show</span>
+          <input type="number" id="top-n" class="input" min="1" value="100" />
+        </label>
+        <button type="button" class="btn btn--secondary" id="btn-load-all" data-i18n="loadAll">Load all</button>
+        <div class="toolbar__spacer"></div>
+        <div class="segmented" role="group" aria-label="View mode">
+          <button type="button" class="segmented__btn is-active" id="view-table-btn" data-i18n="viewTable">Table</button>
+          <button type="button" class="segmented__btn" id="view-grid-btn" data-i18n="viewGrid">Thumbnails</button>
+        </div>
+        <button type="button" class="btn btn--secondary" id="btn-export" data-i18n="exportCsv">Export CSV</button>
+      </div>
+
+      <p class="count-note" id="count-note" aria-live="polite"></p>
+
+      <div class="models-table-wrap" id="table-wrap"></div>
+      <div class="models-grid" id="grid-wrap" hidden></div>
+
+      <p class="empty-state" id="empty-state" data-i18n="emptyGrid" hidden>No models to display.</p>
+    </section>
+  </main>
+
+  <!-- Detail dialog -->
+  <div class="dialog-backdrop" id="dialog-backdrop" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+      <header class="dialog__header">
+        <h2 class="dialog__title" id="dialog-title"></h2>
+        <button type="button" class="btn btn--ghost btn--icon" id="dialog-close" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </header>
+      <div class="dialog__body">
+        <div class="detail-layout">
+          <div class="detail-info">
+            <div class="formula-block">
+              <div class="formula-block__header">
+                <span class="formula-block__label" data-i18n="detailFormula">Formula</span>
+                <button type="button" class="btn btn--ghost btn--sm" id="btn-copy" data-i18n="detailCopy">Copy formula</button>
+              </div>
+              <pre class="formula-block__code" id="formula-code"></pre>
+            </div>
+            <div class="metric-grid" id="metric-grid"></div>
+          </div>
+          <div class="detail-chart">
+            <div id="chart" class="chart" role="img" aria-label="Predicted vs true scatter plot"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Point inspector (sample feature values) -->
+  <div class="inspector-backdrop" id="inspector-backdrop" hidden>
+    <div class="inspector" role="dialog" aria-modal="true" aria-labelledby="inspector-title">
+      <header class="inspector__header">
+        <h3 class="inspector__title" id="inspector-title" data-i18n="detailPointTitle">Sample</h3>
+        <button type="button" class="btn btn--ghost btn--icon" id="inspector-close" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </header>
+      <div class="inspector__body" id="inspector-body"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="js/echarts.min.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/sisso-core.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

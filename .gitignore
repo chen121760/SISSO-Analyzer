@@ -1,0 +1,13 @@
+# Node / local
+node_modules/
+.DS_Store
+Thumbs.db
+
+# Local test data — never commit SISSO input/output files
+train.dat
+verify.dat
+Models/
+SIS_subspaces/
+SISSO.in
+SISSO.out
+*.dat
