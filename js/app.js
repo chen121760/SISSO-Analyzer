@@ -361,6 +361,8 @@
       box.hidden = !show;
       var empty = $("#recent-empty");
       if (empty) empty.hidden = show;
+      var viewUp = $("#view-upload");
+      if (viewUp) viewUp.classList.toggle("has-recent", show);
       if (!show) return;
       list.innerHTML = "";
       rows.slice(0, 12).forEach(function (rec) {

@@ -227,7 +227,17 @@ html, body {
 @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
 /* ---------- Upload ---------- */
-.view--upload { max-width: 720px; margin: 4vh auto 0; }
+.view--upload { max-width: 780px; margin: 4vh auto 0; }
+.upload-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+/* With saved projects the page becomes a two-column layout (like USPEX-Analyzer):
+   upload panel left, saved-project history right. */
+.view--upload.has-recent { max-width: 1180px; }
+.view--upload.has-recent .upload-layout { grid-template-columns: minmax(0, 1fr) 340px; }
 .upload-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
@@ -236,6 +246,10 @@ html, body {
   box-shadow: var(--shadow-sm);
 }
 .upload-card__title { margin: 0 0 16px; font-family: var(--font-mono); font-size: 22px; color: var(--color-foreground); }
+@media (max-width: 1020px) {
+  .view--upload, .view--upload.has-recent { max-width: 780px; }
+  .view--upload.has-recent .upload-layout { grid-template-columns: minmax(0, 1fr); }
+}
 
 .dropzone {
   border: 2px dashed var(--color-border);
@@ -280,8 +294,14 @@ html, body {
 .upload-card__run { margin-top: 20px; display: flex; }
 .upload-card__run .btn { width: 100%; min-height: 48px; font-size: 15px; }
 
-/* ---------- Saved projects (recent) ---------- */
-.recent { margin-top: 24px; }
+/* ---------- Saved projects (recent) — right-hand panel ---------- */
+.recent {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: var(--shadow-sm);
+}
 .recent__title {
   margin: 0 0 10px;
   font-family: var(--font-mono);
@@ -289,17 +309,16 @@ html, body {
   color: var(--color-foreground);
 }
 .recent__empty { color: var(--color-text-soft); font-size: 13px; margin: 0 0 8px; }
-.recent__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.recent__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 .recent-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  padding: 10px 14px;
+  gap: 10px;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--color-border);
   font-size: 13px;
 }
+.recent-item:last-child { border-bottom: none; }
 .recent-item__name { font-weight: 600; color: var(--color-foreground); }
 .recent-item__meta { color: var(--color-text-soft); font-size: 12px; font-family: var(--font-mono); }
 .recent-item__actions { margin-left: auto; display: flex; gap: 6px; }

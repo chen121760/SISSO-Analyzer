@@ -94,8 +94,9 @@
   <main id="main" class="main">
     <!-- Upload view -->
     <section id="view-upload" class="view view--upload" aria-labelledby="upload-title">
-      <div class="upload-card">
-        <h1 class="upload-card__title" id="upload-title" data-i18n="uploadTitle">Load SISSO results</h1>
+      <div class="upload-layout">
+        <div class="upload-card">
+          <h1 class="upload-card__title" id="upload-title" data-i18n="uploadTitle">Load SISSO results</h1>
         <div
           class="dropzone"
           id="dropzone"
@@ -122,16 +123,17 @@
           verify.dat is optional — if omitted, only train metrics are shown.
         </p>
 
-        <div class="upload-card__run">
-          <button type="button" class="btn btn--primary btn--run" id="btn-run" disabled data-i18n="run">Analyze</button>
+          <div class="upload-card__run">
+            <button type="button" class="btn btn--primary btn--run" id="btn-run" disabled data-i18n="run">Analyze</button>
+          </div>
         </div>
-      </div>
 
-      <section class="recent" id="recent-box" aria-labelledby="recent-title" hidden>
-        <h2 class="recent__title" id="recent-title" data-i18n="recentTitle">Saved projects</h2>
-        <p class="recent__empty" id="recent-empty" hidden data-i18n="recentEmpty"></p>
-        <ul class="recent__list" id="recent-list"></ul>
-      </section>
+        <section class="recent" id="recent-box" aria-labelledby="recent-title" hidden>
+          <h2 class="recent__title" id="recent-title" data-i18n="recentTitle">Saved projects</h2>
+          <p class="recent__empty" id="recent-empty" hidden data-i18n="recentEmpty"></p>
+          <ul class="recent__list" id="recent-list"></ul>
+        </section>
+      </div>
     </section>
 
     <!-- Results view -->
