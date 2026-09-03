@@ -981,6 +981,12 @@
   // Event wiring
   // ---------------------------------------------------------------------------
   function bindEvents() {
+    // Prevent the browser from navigating away if a file is dropped outside
+    // the dropzone (default action for file drops is to open the file).
+    ["dragover", "drop"].forEach(function (ev) {
+      window.addEventListener(ev, function (e) { e.preventDefault(); });
+    });
+
     // upload
     var dz = $("#dropzone");
     $("#btn-browse").addEventListener("click", function (e) {
@@ -1005,24 +1011,42 @@
     ["dragenter", "dragover"].forEach(function (ev) {
       dz.addEventListener(ev, function (e) {
         e.preventDefault();
+        e.stopPropagation();
         dz.classList.add("is-dragover");
       });
     });
     ["dragleave", "drop"].forEach(function (ev) {
       dz.addEventListener(ev, function (e) {
         e.preventDefault();
+        e.stopPropagation();
         dz.classList.remove("is-dragover");
       });
     });
     dz.addEventListener("drop", function (e) {
       var dt = e.dataTransfer;
       if (!dt) return;
-      // Prefer items: they expose directory entries via webkitGetAsEntry, so a
-      // dropped folder is walked recursively. Fall back to files when items are
-      // not available.
-      if (dt.items && dt.items.length && dt.items[0].webkitGetAsEntry) {
+
+      // Detect whether a directory is being dropped. Only in that case do we
+      // need the (async, WebKit-only) webkitGetAsEntry traversal. For plain
+      // files we always prefer dataTransfer.files, which is synchronous and
+      // reliable across browsers — using items/entry for plain files is the
+      // path that silently produced nothing in real drags.
+      var hasDirectory = false;
+      if (dt.items && dt.items.length) {
+        for (var i = 0; i < dt.items.length; i++) {
+          var it = dt.items[i];
+          if (it.kind === "file" && it.webkitGetAsEntry) {
+            try {
+              var entry = it.webkitGetAsEntry();
+              if (entry && entry.isDirectory) { hasDirectory = true; break; }
+            } catch (err) { /* ignore; fall back to files */ }
+          }
+        }
+      }
+
+      if (hasDirectory) {
         ingest(dt.items);
-      } else if (dt.files) {
+      } else if (dt.files && dt.files.length) {
         ingest(dt.files);
       }
     });
