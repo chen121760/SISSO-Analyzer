@@ -1211,13 +1211,13 @@
     var cols = [
       [I18N.t("colRank"), "rank", "left"],
       [I18N.t("colFormula"), "formula", "left"],
-      ["RMSE (train)", null, "right"],
-      ["MaxAE (train)", null, "right"],
-      ["R² (train)", null, "right"],
-      ["ρ (train)", null, "right"],
-      ["RMSE (verify)", null, "right"],
-      ["MaxAE (verify)", null, "right"],
-      ["ρ (verify)", null, "right"],
+      [I18N.t("metricRMSE") + " (" + I18N.t("detailTrain") + ")", null, "right"],
+      [I18N.t("metricMaxAE") + " (" + I18N.t("detailTrain") + ")", null, "right"],
+      [I18N.t("metricR2") + " (" + I18N.t("detailTrain") + ")", null, "right"],
+      [I18N.t("metricRho") + " (" + I18N.t("detailTrain") + ")", null, "right"],
+      [I18N.t("metricRMSE") + " (" + I18N.t("detailVerify") + ")", null, "right"],
+      [I18N.t("metricMaxAE") + " (" + I18N.t("detailVerify") + ")", null, "right"],
+      [I18N.t("metricRho") + " (" + I18N.t("detailVerify") + ")", null, "right"],
       [I18N.t("colActions"), null, "left"],
     ];
     cols.forEach(function (c) {
