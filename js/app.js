@@ -90,6 +90,7 @@
       identity: v("--chart-identity", "#94a3b8"),
       chartText: v("--chart-text", "#475569"),
       chartEmpty: v("--chart-empty", "#64748b"),
+      font: v("--font-body", "sans-serif"),
     };
     return themeColors;
   }
@@ -1024,6 +1025,7 @@
     var option = {
       animation: true,
       color: [C.train, C.verify],
+      textStyle: { fontFamily: C.font },
       tooltip: {
         trigger: "item",
         formatter: function (params) {
