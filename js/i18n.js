@@ -107,6 +107,8 @@
       toolbarView: "View",
       toolbarData: "Data",
       paretoControlsLabel: "Axes & mode",
+      sideSummary: "Run summary",
+      sideView: "View",
 
       // table
       colRank: "Rank",
@@ -249,6 +251,8 @@
       toolbarView: "视图",
       toolbarData: "数据",
       paretoControlsLabel: "坐标轴与模式",
+      sideSummary: "运行概览",
+      sideView: "视图",
 
       colRank: "排名",
       colFormula: "模型公式",

@@ -1034,17 +1034,6 @@
         info.cplxEstimated ? I18N.t("complexityEstimated") : fromIn]);
     }
 
-    // best rho (lowest = most negative correlation, or highest |rho|? show min rho by magnitude)
-    var bestRho = null;
-    res.models.forEach(function (m) {
-      if (m.metricsTrain && Number.isFinite(m.metricsTrain.rho)) {
-        if (bestRho === null || Math.abs(m.metricsTrain.rho) > Math.abs(bestRho)) {
-          bestRho = m.metricsTrain.rho;
-        }
-      }
-    });
-    kpis.push([I18N.t("kpiTopRho"), bestRho === null ? I18N.t("noVerify") : fmt(bestRho, 4)]);
-
     kpis.forEach(function (k) {
       var card = el("div", "kpi");
       card.appendChild(el("div", "kpi__label", k[0]));
