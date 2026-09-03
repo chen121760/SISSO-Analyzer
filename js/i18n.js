@@ -14,7 +14,7 @@
 
       // upload
       uploadTitle: "Load SISSO results",
-      uploadHint: "Drop the result files here, or click to browse. You can also select the whole run folder.",
+      uploadHint: "Drop the result files, a whole folder, or a .zip / .tar.gz archive here — or click to browse.",
       browseFiles: "Browse files",
       browseFolder: "Select folder",
       required: "required",
@@ -112,7 +112,7 @@
       appSubtitle: "SISSO 回归结果的交互式浏览工具",
 
       uploadTitle: "载入 SISSO 结果",
-      uploadHint: "将结果文件拖到这里，或点击浏览。也可以直接选择整个运行目录。",
+      uploadHint: "将结果文件、整个文件夹或 .zip / .tar.gz 压缩包拖到这里，或点击浏览。",
       browseFiles: "浏览文件",
       browseFolder: "选择目录",
       required: "必填",

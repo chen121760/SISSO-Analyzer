@@ -6,8 +6,10 @@ browser. Works offline and deploys directly to GitHub Pages.
 
 ## Features
 
-- **Drop your SISSO output files** (`train.dat`, optional `verify.dat`, `top*D00*`,
-  `top*D00*_coeff`, `SIS_subspaces/Uspace.expressions`) or select the whole run folder.
+- **Flexible upload** — drop the result files, drag an **entire folder**, or drop a
+  **`.zip` / `.tar.gz` / `.tgz` / `.tar` / `.gz`** archive; the app auto-detects and
+  extracts the five SISSO files (`train.dat`, optional `verify.dat`, `top*D00*`,
+  `top*D00*_coeff`, `SIS_subspaces/Uspace.expressions`).
 - **Sortable overview** — rank models by rank, RMSE, MaxAE, R² or Spearman's ρ; show the
   top-N (default 100) or load all.
 - **Table + thumbnail grid** views for quick scanning.
@@ -32,6 +34,11 @@ npx serve sisso-viewer
 ```
 
 Then open http://localhost:8080.
+
+> **Note on `file://`**: opening `index.html` directly by double-clicking works for the
+> core flow (all parsing runs in the browser), but browsers treat `file://` URLs as a
+> unique security origin and may log harmless warnings. For the best experience, serve
+> the folder as above.
 
 ## Deploy to GitHub Pages
 

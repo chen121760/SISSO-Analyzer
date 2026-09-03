@@ -119,6 +119,215 @@
     $("#btn-run").disabled = !hasAllRequired();
   }
 
+  // ---------------------------------------------------------------------------
+  // Archive & folder extraction
+  // ---------------------------------------------------------------------------
+  var ARCHIVE_RE = /\.(zip|tar\.gz|tgz|tar|gz)$/i;
+
+  function isArchive(name) {
+    return ARCHIVE_RE.test(name);
+  }
+
+  // Read a File into a Uint8Array.
+  function fileToBytes(file) {
+    return file.arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
+  }
+
+  // Gunzip a File via the native DecompressionStream (gzip).
+  function gunzipFile(file) {
+    if (typeof DecompressionStream !== "function") {
+      return Promise.reject(new Error("gzip unsupported in this browser"));
+    }
+    try {
+      var ds = new DecompressionStream("gzip");
+      var stream = file.stream().pipeThrough(ds);
+      return new Response(stream).arrayBuffer().then(function (buf) {
+        return new Uint8Array(buf);
+      });
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  // Parse a tar archive (Uint8Array) into [{name, bytes}].
+  // Handles GNU/ustar long-name entries (typeflag "L") and the ustar prefix.
+  function parseTar(data) {
+    var out = [];
+    var pos = 0;
+    var textDecoder = new TextDecoder();
+
+    function cstr(view, off, len) {
+      var end = off;
+      while (end < off + len && view[end] !== 0) end++;
+      return textDecoder.decode(view.subarray(off, end));
+    }
+    function octal(view, off, len) {
+      var s = cstr(view, off, len).trim();
+      return s ? parseInt(s, 8) : 0;
+    }
+
+    var pendingLongName = null;
+    while (pos + 512 <= data.length) {
+      var block = data.subarray(pos, pos + 512);
+      if (block.every(function (b) { return b === 0; })) break;
+
+      var nameField = cstr(block, 0, 100);
+      var size = octal(block, 124, 12);
+      var typeflag = String.fromCharCode(block[156] || 48); // '0' = regular
+      var prefix = cstr(block, 345, 155);
+      var bodyStart = pos + 512;
+
+      if (typeflag === "L") {
+        // GNU long name: the body is the (NUL-terminated) real filename.
+        pendingLongName = cstr(data.subarray(bodyStart, bodyStart + size), 0, size);
+      } else if (typeflag === "0" || typeflag === "\u0000" || typeflag === " " ||
+                 typeflag === "7") {
+        // Regular file (or contiguous file '7' in old GNU tar).
+        var fullName = pendingLongName !== null ? pendingLongName
+          : (prefix ? prefix + "/" : "") + nameField;
+        pendingLongName = null;
+        var content = data.subarray(bodyStart, bodyStart + size);
+        out.push({ name: fullName, bytes: content.slice() });
+      } else {
+        // directory ('5'), symlink ('2'), pax ('x'/'g'), etc. — skip.
+        pendingLongName = null;
+      }
+
+      pos = bodyStart + Math.ceil(size / 512) * 512;
+    }
+    return out;
+  }
+
+  // Expand a single archive file into [{name, file}] (or [] if not an archive).
+  async function expandArchive(file) {
+    var name = file.name.toLowerCase();
+
+    if (name.endsWith(".zip")) {
+      if (typeof window.JSZip !== "function") {
+        throw new Error("zip support (JSZip) not loaded");
+      }
+      var zip = await window.JSZip.loadAsync(file);
+      var out = [];
+      var entries = zip.files;
+      for (var path in entries) {
+        var ze = entries[path];
+        if (ze.dir) continue;
+        var bn = basename(path);
+        if (!bn) continue;
+        var blob = await ze.async("blob");
+        out.push({ name: bn, file: new File([blob], bn) });
+      }
+      return out;
+    }
+
+    if (name.endsWith(".tar.gz") || name.endsWith(".tgz")) {
+      var gunzipped = await gunzipFile(file);
+      return parseTar(gunzipped).map(function (e) {
+        var bn = basename(e.name);
+        return { name: bn, file: new File([e.bytes], bn) };
+      });
+    }
+
+    if (name.endsWith(".tar")) {
+      var bytes = await fileToBytes(file);
+      return parseTar(bytes).map(function (e) {
+        var bn = basename(e.name);
+        return { name: bn, file: new File([e.bytes], bn) };
+      });
+    }
+
+    if (name.endsWith(".gz")) {
+      var gz = await gunzipFile(file);
+      var base = basename(file.name).replace(/\.gz$/i, "");
+      return [{ name: base, file: new File([gz], base) }];
+    }
+
+    return [];
+  }
+
+  // Recursively collect all files from DataTransfer items (supports folders).
+  function itemsToFiles(items) {
+    var results = [];
+    var pending = [];
+
+    function addFile(f) { results.push(f); }
+    function readDir(entry) {
+      return new Promise(function (resolve) {
+        var reader = entry.createReader();
+        var all = [];
+        (function readBatch() {
+          reader.readEntries(function (entries) {
+            if (!entries.length) { resolve(all); return; }
+            all = all.concat(entries);
+            readBatch();
+          }, function () { resolve(all); });
+        })();
+      });
+    }
+    function walk(entry) {
+      return new Promise(function (resolve) {
+        if (entry.isFile) {
+          entry.file(function (f) { addFile(f); resolve(); }, function () { resolve(); });
+        } else if (entry.isDirectory) {
+          readDir(entry).then(function (entries) {
+            var chain = Promise.resolve();
+            entries.forEach(function (e) { chain = chain.then(function () { return walk(e); }); });
+            chain.then(resolve);
+          });
+        } else { resolve(); }
+      });
+    }
+
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+      if (entry) pending.push(walk(entry));
+      else if (item.getAsFile) { var f = item.getAsFile(); if (f) addFile(f); }
+    }
+    return Promise.all(pending).then(function () { return results; });
+  }
+
+  // Accepts: a FileList, an array of File, or a DataTransferItemList.
+  // Expands archives and folders, classifies every file, and updates state.
+  async function ingest(items) {
+    var files = [];
+    if (items instanceof FileList || Array.isArray(items)) {
+      files = Array.prototype.slice.call(items);
+    } else if (items && typeof items.length === "number") {
+      // DataTransferItemList
+      files = await itemsToFiles(items);
+    }
+
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      if (!f) continue;
+      var name = f.webkitRelativePath ? basename(f.webkitRelativePath) : f.name;
+      if (isArchive(name)) {
+        var role = classify(name);
+        // A bare .gz whose basename (sans .gz) matches a role is still handled
+        // by expansion; the expanded entry is classified below.
+        try {
+          var expanded = await expandArchive(f);
+          expanded.forEach(function (e) {
+            var r = classify(e.name);
+            if (r) state.files[r] = { name: e.name, file: e.file };
+          });
+          // If the archive itself already matched a role and expanded nothing,
+          // keep the archive as the role (should not normally happen).
+          if (role && !expanded.length) state.files[role] = { name: name, file: f };
+        } catch (err) {
+          console.error("archive expand failed for " + name + ":", err);
+          toast("Failed to read archive " + name + ": " + err.message);
+        }
+        continue;
+      }
+      var role2 = classify(name);
+      if (role2) state.files[role2] = { name: name, file: f };
+    }
+    renderFileList();
+    renderRunButton();
+  }
+
   function renderFileList() {
     var list = $("#file-list");
     list.innerHTML = "";
@@ -277,6 +486,7 @@
   }
 
   function sortedModels() {
+    if (!state.result) return [];
     var res = state.result;
     var list = res.models.slice();
     var asc = state.sortAsc;
@@ -311,10 +521,11 @@
   }
 
   function renderCount() {
+    if (!state.result) { $("#count-note").textContent = ""; return; }
     var vis = visibleModels();
     $("#count-note").textContent = I18N.format("loadedCount", {
       shown: vis.shown,
-      total: state.result ? state.result.meta.nModels : 0,
+      total: state.result.meta.nModels,
     });
   }
 
@@ -513,10 +724,12 @@
     $("#dialog-title").textContent = I18N.t("detailRank") + " " + m.rank;
     $("#formula-code").textContent = m.formulaOriginal;
     renderMetricGrid(m);
-    renderChart(m);
 
+    // Make the dialog visible BEFORE initialising ECharts: a chart initialised
+    // inside a hidden container gets a 0-height layout and renders squashed.
     $("#dialog-backdrop").hidden = false;
     document.body.style.overflow = "hidden";
+    renderChart(m);
   }
 
   function closeDetail() {
@@ -783,10 +996,10 @@
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("#input-files").click(); }
     });
     $("#input-files").addEventListener("change", function (e) {
-      ingestFiles(e.target.files);
+      ingest(e.target.files);
     });
     $("#input-folder").addEventListener("change", function (e) {
-      ingestFiles(e.target.files);
+      ingest(e.target.files);
     });
 
     ["dragenter", "dragover"].forEach(function (ev) {
@@ -802,8 +1015,15 @@
       });
     });
     dz.addEventListener("drop", function (e) {
-      if (e.dataTransfer && e.dataTransfer.files) {
-        ingestFiles(e.dataTransfer.files);
+      var dt = e.dataTransfer;
+      if (!dt) return;
+      // Prefer items: they expose directory entries via webkitGetAsEntry, so a
+      // dropped folder is walked recursively. Fall back to files when items are
+      // not available.
+      if (dt.items && dt.items.length && dt.items[0].webkitGetAsEntry) {
+        ingest(dt.items);
+      } else if (dt.files) {
+        ingest(dt.files);
       }
     });
 
