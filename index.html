@@ -183,6 +183,11 @@
             <span class="field__label" data-i18n="paretoY">Verify metric (Y)</span>
             <select id="pareto-y" class="select"></select>
           </label>
+          <label class="field" id="pareto-z-field" hidden>
+            <span class="field__label" data-i18n="paretoZ">Third metric (Z)</span>
+            <select id="pareto-z" class="select"></select>
+          </label>
+          <button type="button" class="btn btn--secondary btn--sm" id="pareto-mode-btn">3D</button>
           <span class="pareto__hint" data-i18n="paretoNote">Click a point or row to open that model.</span>
         </div>
         <p class="count-note" id="pareto-count" aria-live="polite"></p>
@@ -254,6 +259,7 @@
   </div>
 
   <script src="js/echarts.min.js"></script>
+  <script src="js/echarts-gl.min.js"></script>
   <script src="js/jszip.min.js"></script>
   <script src="js/i18n.js"></script>
   <script src="js/sisso-core.js"></script>

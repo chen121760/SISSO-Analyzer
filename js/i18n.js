@@ -97,6 +97,9 @@
       paretoRequireVerify: "Pareto view needs verify.dat",
       paretoAll: "All models",
       paretoFront: "Pareto front",
+      paretoZ: "Third metric (Z)",
+      paretoMode2D: "2D",
+      paretoMode3D: "3D",
       exportCsv: "Export CSV",
       exported: "models.csv exported",
 
@@ -231,6 +234,9 @@
       paretoRequireVerify: "Pareto 视图需要 verify.dat",
       paretoAll: "所有模型",
       paretoFront: "Pareto 前沿",
+      paretoZ: "第三指标 (Z)",
+      paretoMode2D: "2D",
+      paretoMode3D: "3D",
       exportCsv: "导出 CSV",
       exported: "已导出 models.csv",
 

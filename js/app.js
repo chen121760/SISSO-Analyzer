@@ -31,6 +31,8 @@
     paretoX: "rmse",    // train metric for the Pareto scatter (x)
     paretoY: "rmse",    // verify metric for the Pareto scatter (y)
     paretoChart: null,  // echarts instance for the Pareto view
+    paretoMode: "2d",   // "2d" | "3d"
+    paretoZ: { metric: "r2", set: "train" },  // third objective (metric + dataset)
   };
 
   // ---------------------------------------------------------------------------
@@ -1072,6 +1074,26 @@
       s.value = pair[1];
     });
 
+    // third Pareto axis (metric + dataset) and 2D/3D toggle
+    var zSel = $("#pareto-z");
+    if (zSel) {
+      zSel.innerHTML = "";
+      PARETO_METRICS.forEach(function (d) {
+        [["train", "detailTrain"], ["verify", "detailVerify"]].forEach(function (s) {
+          var opt = el("option", null, I18N.t(d.label) + " (" + I18N.t(s[1]) + ") " + (d.minimize ? "↓" : "↑"));
+          opt.value = d.key + "|" + s[0];
+          zSel.appendChild(opt);
+        });
+      });
+      zSel.value = state.paretoZ.metric + "|" + state.paretoZ.set;
+    }
+    var zField = $("#pareto-z-field");
+    if (zField) zField.hidden = state.paretoMode !== "3d";
+    var modeBtn = $("#pareto-mode-btn");
+    if (modeBtn) {
+      modeBtn.textContent = state.paretoMode === "2d" ? I18N.t("paretoMode3D") : I18N.t("paretoMode2D");
+    }
+
     // view toggle (pareto only meaningful when a verify set exists)
     var hasVerify = !!(state.result && state.result.verify);
     $("#view-table-btn").classList.toggle("is-active", state.view === "table");
@@ -1429,9 +1451,200 @@
     return { min: lo - pad, max: hi + pad };
   }
 
+  function modelMetric(m, metricKey, set) {
+    var s = set === "verify" ? m.metricsVerify : m.metricsTrain;
+    return s ? s[metricKey] : NaN;
+  }
+
+  function paretoPoints3D() {
+    var res = state.result;
+    var xDef = paretoMetricDef(state.paretoX);
+    var yDef = paretoMetricDef(state.paretoY);
+    var zDef = paretoMetricDef(state.paretoZ.metric);
+    var pts = [];
+    res.models.forEach(function (m) {
+      var x = modelMetric(m, xDef.key, "train");
+      var y = modelMetric(m, yDef.key, "verify");
+      var z = modelMetric(m, zDef.key, state.paretoZ.set);
+      if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+        pts.push({ rank: m.rank, x: x, y: y, z: z, m: m });
+      }
+    });
+    return { xDef: xDef, yDef: yDef, zDef: zDef, pts: pts };
+  }
+
+  function computeParetoFront3D(pts, xDef, yDef, zDef) {
+    var sx = xDef.minimize ? 1 : -1;
+    var sy = yDef.minimize ? 1 : -1;
+    var sz = zDef.minimize ? 1 : -1;
+    function n(p) { return { x: p.x * sx, y: p.y * sy, z: p.z * sz }; }
+    return pts.filter(function (p) {
+      return !pts.some(function (q) {
+        if (q.rank === p.rank) return false;
+        var a = n(p), b = n(q);
+        return b.x <= a.x && b.y <= a.y && b.z <= a.z && (b.x < a.x || b.y < a.y || b.z < a.z);
+      });
+    });
+  }
+
+  function paretoZLabel(zDef, zSet) {
+    return I18N.t(zDef.label) + " (" + I18N.t(zSet === "verify" ? "detailVerify" : "detailTrain") + ") " + (zDef.minimize ? "↓" : "↑");
+  }
+
+  function renderPareto3D() {
+    var computed = paretoPoints3D();
+    var pts = computed.pts, xDef = computed.xDef, yDef = computed.yDef, zDef = computed.zDef;
+    var front = computeParetoFront3D(pts, xDef, yDef, zDef);
+
+    $("#pareto-count").textContent = I18N.format("paretoCount", { n: front.length });
+
+    var dom = $("#pareto-chart");
+    var C = getThemeColors();
+    if (state.paretoChart) { state.paretoChart.dispose(); }
+    state.paretoChart = echarts.init(dom);
+
+    var xb = paretoAxisBounds(pts.map(function (p) { return p.x; }));
+    var yb = paretoAxisBounds(pts.map(function (p) { return p.y; }));
+    var zb = paretoAxisBounds(pts.map(function (p) { return p.z; }));
+
+    var allData = pts.map(function (p) { return { value: [p.x, p.y, p.z], rank: p.rank }; });
+    var frontData = front.map(function (p) { return { value: [p.x, p.y, p.z], rank: p.rank }; });
+    var frontPath = front.slice().sort(function (a, b) { return a.x - b.x; })
+      .map(function (p) { return [p.x, p.y, p.z]; });
+
+    function axis3D(name, b) {
+      return {
+        name: name,
+        type: "value",
+        min: b ? b.min : undefined,
+        max: b ? b.max : undefined,
+        nameTextStyle: { color: C.chartText },
+        axisLabel: { color: C.chartText, formatter: fmtTick },
+        axisLine: { lineStyle: { color: C.axis } },
+        splitLine: { lineStyle: { color: C.grid } },
+      };
+    }
+
+    state.paretoChart.setOption({
+      animation: true,
+      textStyle: { fontFamily: C.font },
+      tooltip: {
+        formatter: function (params) {
+          var d = params.data;
+          if (!d || d.rank == null) return "";
+          return [
+            "<strong>" + I18N.t("detailRank") + " " + d.rank + "</strong>",
+            paretoAxisName(xDef, "detailTrain") + ": " + fmt(d.value[0], 4),
+            paretoAxisName(yDef, "detailVerify") + ": " + fmt(d.value[1], 4),
+            paretoZLabel(zDef, state.paretoZ.set) + ": " + fmt(d.value[2], 4),
+          ].join("<br/>");
+        },
+      },
+      grid3D: {
+        boxWidth: 120,
+        boxDepth: 120,
+        boxHeight: 80,
+        axisPointer: { lineStyle: { color: C.train } },
+        light: {
+          main: { intensity: 1.2, shadow: false },
+          ambient: { intensity: 0.3 },
+        },
+        viewControl: {
+          distance: 220,
+          alpha: 20,
+          beta: 40,
+          panSensitivity: 0,
+          rotateSensitivity: 1,
+          zoomSensitivity: 1,
+        },
+      },
+      xAxis3D: axis3D(paretoAxisName(xDef, "detailTrain"), xb),
+      yAxis3D: axis3D(paretoAxisName(yDef, "detailVerify"), yb),
+      zAxis3D: axis3D(paretoZLabel(zDef, state.paretoZ.set), zb),
+      legend: {
+        data: [I18N.t("paretoAll"), I18N.t("paretoFront")],
+        top: 8,
+        textStyle: { color: C.chartText },
+      },
+      series: [
+        {
+          name: I18N.t("paretoAll"),
+          type: "scatter3D",
+          data: allData,
+          symbolSize: 6,
+          itemStyle: { color: C.textSoft, opacity: 0.55 },
+        },
+        {
+          name: "_frontLine",
+          type: "line3D",
+          data: frontPath,
+          lineStyle: { color: C.train, width: 2 },
+          silent: true,
+        },
+        {
+          name: I18N.t("paretoFront"),
+          type: "scatter3D",
+          data: frontData,
+          symbolSize: 10,
+          itemStyle: { color: C.train, opacity: 1 },
+        },
+      ],
+    });
+
+    state.paretoChart.off("click");
+    state.paretoChart.on("click", function (params) {
+      var rank = params.data && params.data.rank;
+      if (rank != null) openDetail(rank);
+    });
+
+    renderParetoTable3D(front, xDef, yDef, zDef);
+  }
+
+  function renderParetoTable3D(front, xDef, yDef, zDef) {
+    var wrap = $("#pareto-table-wrap");
+    wrap.innerHTML = "";
+    var table = el("table", "models-table");
+    var thead = el("thead");
+    var hr = el("tr");
+    [I18N.t("colRank"), I18N.t("colFormula"),
+     paretoAxisName(xDef, "detailTrain"), paretoAxisName(yDef, "detailVerify"),
+     paretoZLabel(zDef, state.paretoZ.set), I18N.t("colActions")].forEach(function (label, i) {
+      var th = el("th", null, label);
+      if (i >= 2 && i <= 4) th.style.textAlign = "right";
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    var tbody = el("tbody");
+    front.forEach(function (p) {
+      var tr = el("tr");
+      tr.tabIndex = 0;
+      tr.setAttribute("role", "button");
+      tr.appendChild(el("td", "num", String(p.rank)));
+      tr.appendChild(el("td", "formula-cell", p.m.formulaOriginal));
+      tr.appendChild(el("td", "num", fmt(p.x, 4)));
+      tr.appendChild(el("td", "num", fmt(p.y, 4)));
+      tr.appendChild(el("td", "num", fmt(p.z, 4)));
+      var td = el("td");
+      var btn = el("button", "btn btn--secondary btn--sm", I18N.t("view"));
+      btn.type = "button";
+      btn.addEventListener("click", function (e) { e.stopPropagation(); openDetail(p.rank); });
+      td.appendChild(btn);
+      tr.appendChild(td);
+      tr.addEventListener("click", function () { openDetail(p.rank); });
+      tr.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetail(p.rank); }
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+  }
+
   function renderPareto() {
     var res = state.result;
     if (!res || !res.verify) return;
+    if (state.paretoMode === "3d") { renderPareto3D(); return; }
     var computed = paretoPoints();
     var pts = computed.pts, xDef = computed.xDef, yDef = computed.yDef;
     var front = computeParetoFront1(pts, xDef, yDef);
@@ -2034,6 +2247,7 @@
       state.result = null;
       state.projectId = null;
       state.view = "table";
+      state.paretoMode = "2d";
       if (state.paretoChart) { state.paretoChart.dispose(); state.paretoChart = null; }
       $("#view-results").hidden = true;
       $("#view-upload").hidden = false;
@@ -2132,6 +2346,16 @@
     });
     $("#pareto-y").addEventListener("change", function (e) {
       state.paretoY = e.target.value || "rmse";
+      renderPareto();
+    });
+    $("#pareto-z").addEventListener("change", function (e) {
+      var parts = (e.target.value || "r2|train").split("|");
+      state.paretoZ = { metric: parts[0] || "r2", set: parts[1] || "train" };
+      renderPareto();
+    });
+    $("#pareto-mode-btn").addEventListener("click", function () {
+      state.paretoMode = state.paretoMode === "2d" ? "3d" : "2d";
+      renderControls();
       renderPareto();
     });
     $("#btn-export").addEventListener("click", exportCsv);
