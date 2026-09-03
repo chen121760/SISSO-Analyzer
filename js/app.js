@@ -1208,6 +1208,21 @@
     }, { rootMargin: "200px" });
   }
 
+  // One metric row on a thumbnail card: label + train value + verify value.
+  // Train / verify numbers are tinted like the scatter points (blue/amber).
+  function appendMetricLine(container, label, trainValue, verifyValue) {
+    var row = el("div", "metric-line");
+    row.appendChild(el("span", "metric-line__label", label));
+    var vals = el("span", "metric-line__values");
+    vals.appendChild(el("span", "metric-line__val is-train", fmt(trainValue, 3)));
+    if (verifyValue !== undefined) {
+      vals.appendChild(el("span", "metric-line__sep", "/"));
+      vals.appendChild(el("span", "metric-line__val is-verify", fmt(verifyValue, 3)));
+    }
+    row.appendChild(vals);
+    container.appendChild(row);
+  }
+
   function renderGrid() {
     var res = state.result;
     var vis = visibleModels();
@@ -1229,8 +1244,10 @@
       var body = el("div", "model-card__body");
       body.appendChild(el("div", "model-card__title", "Model " + m.rank));
       var metrics = el("div", "model-card__metrics");
-      metrics.appendChild(el("span", null, "RMSE " + fmt(m.metricsTrain.rmse, 3)));
-      metrics.appendChild(el("span", null, "ρ " + fmt(m.metricsTrain.rho, 3)));
+      appendMetricLine(metrics, "RMSE",
+        m.metricsTrain.rmse, m.metricsVerify ? m.metricsVerify.rmse : undefined);
+      appendMetricLine(metrics, "ρ",
+        m.metricsTrain.rho, m.metricsVerify ? m.metricsVerify.rho : undefined);
       body.appendChild(metrics);
       card.appendChild(body);
 
