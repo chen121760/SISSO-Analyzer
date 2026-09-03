@@ -27,6 +27,7 @@
     view: "table",  // "table" | "grid"
     chart: null,    // echarts instance
     currentModel: null,
+    colorKey: "",   // "" = class colors; otherwise a column letter to color by
   };
 
   // ---------------------------------------------------------------------------
@@ -496,6 +497,7 @@
     renderFileList();
     renderControls();
     renderCount();
+    populateColorSelect();
     renderRecentList();
   }
 
@@ -948,6 +950,7 @@
 
     renderKpis();
     renderControls();
+    populateColorSelect();
     renderModels();
   }
 
@@ -1372,6 +1375,35 @@
     });
   }
 
+  // Column the scatter points are currently colored by (target or a feature).
+  function colorSelectCol() {
+    var res = state.result;
+    if (!res || !state.colorKey) return null;
+    for (var i = 0; i < res.columns.length; i++) {
+      var c = res.columns[i];
+      if (c.role !== "name" && c.letter === state.colorKey) return c;
+    }
+    return null;
+  }
+
+  // Fill the "Color by" dropdown with every numeric column (target + features).
+  function populateColorSelect() {
+    var sel = $("#color-key");
+    if (!sel || !state.result) return;
+    if (state.colorKey && !colorSelectCol()) state.colorKey = "";
+    sel.innerHTML = "";
+    var none = el("option", null, I18N.t("colorNone"));
+    none.value = "";
+    sel.appendChild(none);
+    state.result.columns.forEach(function (c) {
+      if (c.role === "name") return;
+      var opt = el("option", null, c.original);
+      opt.value = c.letter;
+      sel.appendChild(opt);
+    });
+    sel.value = state.colorKey || "";
+  }
+
   function renderChart(m) {
     var res = state.result;
     var C = getThemeColors();
@@ -1389,11 +1421,50 @@
       return;
     }
 
+    // Optional color-by-parameter mapping. When active, points are coloured by
+    // the chosen column's value; train/verify remain distinguishable by shape.
+    var colorCol = colorSelectCol();
+    var colorRange = null;
+    var colorMid = null;
+    if (colorCol) {
+      var cvals = [];
+      function pushColorCol(data) {
+        if (!data || !data.cols) return;
+        var col = data.cols[colorCol.letter];
+        if (!col) return;
+        for (var ci = 0; ci < data.n; ci++) {
+          if (col[ci] !== undefined && Number.isFinite(col[ci])) cvals.push(col[ci]);
+        }
+      }
+      pushColorCol(res.train);
+      if (res.verify) pushColorCol(res.verify);
+      if (cvals.length) {
+        var cvLo = Math.min.apply(null, cvals);
+        var cvHi = Math.max.apply(null, cvals);
+        if (cvLo === cvHi) {
+          var cvPad = Math.max(Math.abs(cvLo) * 0.01, 1e-12);
+          cvLo -= cvPad; cvHi += cvPad;
+        }
+        colorRange = { min: cvLo, max: cvHi };
+        colorMid = (cvLo + cvHi) / 2;
+      }
+    }
+    function colorVal(data, row) {
+      if (!colorRange) return null;
+      var col = data.cols ? data.cols[colorCol.letter] : null;
+      var v = col ? col[row] : NaN;
+      return (v !== undefined && Number.isFinite(v)) ? v : colorMid;
+    }
+
     var trainData = trainPts.map(function (p) {
-      return { value: [p[0], p[1]], name: p[2], raw: p };
+      var item = { value: [p[0], p[1]], name: p[2], raw: p };
+      if (colorRange) item.value.push(colorVal(res.train, p[4]));
+      return item;
     });
     var verifyData = verifyPts.map(function (p) {
-      return { value: [p[0], p[1]], name: p[2], raw: p };
+      var item = { value: [p[0], p[1]], name: p[2], raw: p };
+      if (colorRange) item.value.push(colorVal(res.verify, p[4]));
+      return item;
     });
 
     var allX = [], allY = [];
@@ -1410,7 +1481,7 @@
       data: trainData,
       symbol: "circle",
       symbolSize: 9,
-      itemStyle: { color: C.train, opacity: 0.7 },
+      itemStyle: colorRange ? { opacity: 0.85 } : { color: C.train, opacity: 0.7 },
     }];
     if (verifyData.length) {
       series.push({
@@ -1419,7 +1490,7 @@
         data: verifyData,
         symbol: "triangle",
         symbolSize: 11,
-        itemStyle: { color: C.verify, opacity: 0.7 },
+        itemStyle: colorRange ? { opacity: 0.85 } : { color: C.verify, opacity: 0.7 },
       });
     }
     series.push({
@@ -1442,12 +1513,16 @@
           if (params.seriesType === "line") return "";
           var p = params.data;
           var pred = p.value[0], truth = p.value[1];
-          return [
+          var lines = [
             "<strong>" + (p.name || "") + "</strong>",
             I18N.t("detailPredicted") + ": " + fmt(pred, 4),
             I18N.t("detailTrue") + ": " + fmt(truth, 4),
             I18N.t("detailError") + ": " + fmt(pred - truth, 4),
-          ].join("<br/>");
+          ];
+          if (colorRange && p.value && p.value.length > 2) {
+            lines.push(colorCol.original + ": " + fmt(p.value[2], 4));
+          }
+          return lines.join("<br/>");
         },
       },
       legend: {
@@ -1510,6 +1585,24 @@
       },
       series: series,
     };
+    if (colorRange) {
+      option.grid.right = 70;
+      option.visualMap = {
+        type: "continuous",
+        min: colorRange.min,
+        max: colorRange.max,
+        dimension: 2,
+        seriesIndex: verifyData.length ? [0, 1] : [0],
+        calculable: true,
+        orient: "vertical",
+        right: 4,
+        top: "middle",
+        itemHeight: 180,
+        textStyle: { color: C.chartText },
+        formatter: function (v) { return fmtTick(v); },
+        inRange: { color: ["#2563eb", "#06b6d4", "#22c55e", "#facc15", "#ef4444"] },
+      };
+    }
     state.chart.setOption(option);
     state.chart.on("click", function (params) {
       if (params.seriesType === "scatter" && params.data) {
@@ -1771,6 +1864,14 @@
       renderModels();
     });
     $("#btn-export").addEventListener("click", exportCsv);
+
+    // color-by-parameter on the detail scatter plot
+    $("#color-key").addEventListener("change", function (e) {
+      state.colorKey = e.target.value || "";
+      if (state.currentModel && !$("#dialog-backdrop").hidden) {
+        renderChart(state.currentModel);
+      }
+    });
 
     // dialogs
     $("#dialog-close").addEventListener("click", closeDetail);

@@ -125,6 +125,9 @@
       detailEmpty: "Select a model to see its fit plot.",
       detailBack: "Back to list",
       detailExportPng: "Save PNG",
+      colorBy: "Color by",
+      colorNone: "None — set colors",
+      colorHint: "circle = train, triangle = verify",
 
       // errors
       errParse: "Failed to analyze the files.",
@@ -246,6 +249,9 @@
       detailEmpty: "选择一个模型查看其拟合散点图。",
       detailBack: "返回列表",
       detailExportPng: "保存 PNG",
+      colorBy: "按参数着色",
+      colorNone: "无——按集合配色",
+      colorHint: "圆形 = 训练集，三角形 = 验证集",
 
       errParse: "分析文件失败。",
       errNoTrain: "需要 train.dat。",

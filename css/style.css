@@ -522,6 +522,24 @@ table.models-table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .metric-card__value { font-family: var(--font-mono); font-size: 18px; font-weight: 600; color: var(--color-foreground); }
 
 .chart { width: 100%; height: 520px; }
+.select--sm { min-height: 32px; font-size: 13px; }
+
+/* Color-by control above the detail chart */
+.chart-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+.chart-controls__field { display: flex; align-items: center; gap: 8px; }
+.chart-controls__label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-soft);
+}
+#color-key { width: auto; min-width: 160px; max-width: 260px; }
 
 /* ---------- Inspector ---------- */
 .inspector-backdrop {
