@@ -375,7 +375,7 @@
 
   // Restore a saved project: rebuild the raw texts and re-run the pipeline,
   // so every view (table, grid, KPI cards, SISSO.in info) is reproduced.
-  function applyProject(p) {
+  function applyProject(p, silent) {
     if (!p || p.kind !== "sisso-analyzer-project" || !p.files || typeof p.files !== "object") {
       toast(I18N.t("errProject"));
       return;
@@ -396,11 +396,72 @@
     state.projectId = p.id || null;
     try {
       processTexts(roleTexts);
-      toast(I18N.t("loadedOk"));
+      if (!silent) toast(I18N.t("loadedOk"));
     } catch (err) {
       console.error(err);
       toast(I18N.t("errProject") + " " + (err && err.message ? err.message : ""));
     }
+  }
+
+  // Session persistence: remember the active project + UI state so a refresh
+  // brings the user back to the same place instead of the upload page.
+  var SESSION_KEY = "sisso-session";
+  function persistSession() {
+    try {
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify({
+        projectId: state.projectId || null,
+        view: state.view || "table",
+        sortKey: state.sortKey || "rank",
+        sortAsc: !!state.sortAsc,
+        topN: state.topN || 100,
+        loadAll: !!state.loadAll,
+        colorKey: state.colorKey || "",
+        paretoX: state.paretoX || "rmse",
+        paretoY: state.paretoY || "rmse",
+        paretoZ: state.paretoZ || { metric: "r2", set: "train" },
+        paretoMode: state.paretoMode || "2d",
+      }));
+    } catch (e) { /* ignore */ }
+  }
+  function clearSession() {
+    try { window.localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
+  }
+  function restoreSession() {
+    var saved = null;
+    try { saved = JSON.parse(window.localStorage.getItem(SESSION_KEY) || "null"); } catch (e) {}
+    if (!saved || !saved.projectId) return;
+    dbAll().then(function (rows) {
+      var rec = null;
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].id === saved.projectId) { rec = rows[i]; break; }
+      }
+      if (!rec) return;
+      try {
+        applyProject(rec, true);
+        if (!state.result) return;
+        var want = saved.view === "grid" || saved.view === "pareto" ? saved.view : "table";
+        if (want === "pareto" && !state.result.verify) want = "table";
+        state.view = want;
+        state.sortKey = (saved.sortKey || "rank") || "rank";
+        state.sortAsc = saved.sortAsc !== false;
+        state.topN = saved.topN && saved.topN > 0 ? saved.topN : 100;
+        state.loadAll = !!saved.loadAll;
+        state.colorKey = saved.colorKey || "";
+        state.paretoX = saved.paretoX || "rmse";
+        state.paretoY = saved.paretoY || "rmse";
+        state.paretoMode = saved.paretoMode === "3d" ? "3d" : "2d";
+        if (saved.paretoZ && saved.paretoZ.metric) {
+          state.paretoZ = { metric: saved.paretoZ.metric, set: saved.paretoZ.set === "verify" ? "verify" : "train" };
+        }
+        renderControls();
+        populateColorSelect();
+        renderModels();
+        if (state.view === "pareto") renderPareto();
+        persistSession();
+      } catch (err) {
+        console.warn("session restore failed:", err);
+      }
+    }).catch(function () {});
   }
 
   function fmtSavedTime(iso) {
@@ -940,8 +1001,10 @@
     showResults();
 
     // Auto-save into the browser's recent list (like USPEX-Analyzer) — no
-    // manual "Save project" click needed; that button only exports a .json.
+    // manual "Save project" click needed.
     storeProjectLocally();
+    // Remember this project as the active session so a refresh restores it.
+    persistSession();
   }
 
   // ---------------------------------------------------------------------------
@@ -2231,6 +2294,7 @@
       var ctx = $("#app-context");
       if (ctx) ctx.hidden = true;
       setNavState(false);
+      clearSession();
       renderFileList();
       renderRunButton();
       renderRecentList();
@@ -2363,6 +2427,20 @@
         toast(I18N.t("copied"));
       });
     });
+
+    // Persist UI state after any control change/click (view, sort, pareto, …),
+    // so even a mid-session refresh restores the exact screen.
+    document.addEventListener("change", function (e) {
+      if (state.result && e.target && e.target.closest && e.target.closest(".select, .input")) {
+        setTimeout(persistSession, 0);
+      }
+    });
+    document.addEventListener("click", function (e) {
+      if (state.result && e.target && e.target.closest &&
+          e.target.closest(".nav-item, .btn, .segmented__btn")) {
+        setTimeout(persistSession, 0);
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -2391,6 +2469,12 @@
     renderFileList();
     renderRunButton();
     renderRecentList();
+
+    // Remember the current session when leaving the page, and restore the last
+    // session (project + view state) on load so a refresh doesn't lose it.
+    window.addEventListener("beforeunload", persistSession);
+    window.addEventListener("pagehide", persistSession);
+    restoreSession();
   }
 
   if (document.readyState === "loading") {
