@@ -75,6 +75,42 @@
     t._timer = setTimeout(function () { t.hidden = true; }, 3500);
   }
 
+  // Full-screen loading overlay with a spinner (High severity per ui-ux-pro-max:
+  // show feedback for operations > 300ms).
+  function showLoading(textKey) {
+    var overlay = $("#loading-overlay");
+    if (overlay) {
+      $("#loading-text").textContent = I18N.t(textKey || "analyzing");
+      overlay.hidden = false;
+    }
+  }
+  function hideLoading() {
+    var overlay = $("#loading-overlay");
+    if (overlay) overlay.hidden = true;
+  }
+
+  // Attach an inline spinner + disabled state to a button during an async op.
+  function setButtonLoading(btn, isLoading, loadingText) {
+    if (!btn) return;
+    if (isLoading) {
+      btn.disabled = true;
+      btn.classList.add("is-loading");
+      btn.dataset.prevHtml = btn.innerHTML;
+      var spin = document.createElement("span");
+      spin.className = "btn-spinner";
+      spin.setAttribute("aria-hidden", "true");
+      btn.innerHTML = "";
+      btn.appendChild(spin);
+      if (loadingText) btn.appendChild(document.createTextNode(" " + loadingText));
+    } else {
+      btn.classList.remove("is-loading");
+      if (btn.dataset.prevHtml !== undefined) {
+        btn.innerHTML = btn.dataset.prevHtml;
+        delete btn.dataset.prevHtml;
+      }
+    }
+  }
+
   function fmt(v, digits) {
     if (v === null || v === undefined || Number.isNaN(v)) return I18N.t("noVerify");
     if (typeof v !== "number") return v;
@@ -368,8 +404,8 @@
 
   async function run() {
     var btn = $("#btn-run");
-    btn.disabled = true;
-    btn.textContent = I18N.t("analyzing");
+    setButtonLoading(btn, true, I18N.t("analyzing"));
+    showLoading("analyzing");
 
     try {
       var files = {};
@@ -379,7 +415,7 @@
       files.coeffText = await readFileAsText(state.files.coeff.file);
       files.topText = await readFileAsText(state.files.top.file);
 
-      // let the UI paint the "analyzing" state
+      // let the UI paint the "analyzing" state before the synchronous parse
       await new Promise(function (r) { setTimeout(r, 30); });
 
       state.result = Core.runPipeline(files);
@@ -393,7 +429,8 @@
       console.error(err);
       toast(I18N.t("errParse") + " " + (err && err.message ? err.message : ""));
     } finally {
-      btn.textContent = I18N.t("run");
+      setButtonLoading(btn, false);
+      hideLoading();
       renderRunButton();
     }
   }
@@ -529,13 +566,31 @@
     });
   }
 
+  // Render the models view. When the visible set is large (e.g. "load all"),
+  // show a loading overlay and defer the heavy DOM build so the spinner paints
+  // first and the UI does not appear frozen.
+  var renderSeq = 0;
   function renderModels() {
     if (!state.result) return;
-    renderCount();
-    renderTable();
-    renderGrid();
     var vis = visibleModels();
+    var seq = ++renderSeq;
+
+    renderCount();
     $("#empty-state").hidden = vis.shown > 0;
+
+    if (vis.shown > 400) {
+      showLoading("rendering");
+      // Defer to let the overlay/spinner paint before the synchronous DOM build.
+      setTimeout(function () {
+        if (seq !== renderSeq) return; // a newer render superseded this one
+        renderTable();
+        renderGrid();
+        hideLoading();
+      }, 40);
+    } else {
+      renderTable();
+      renderGrid();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -605,20 +660,42 @@
 
   // ---------------------------------------------------------------------------
   // Thumbnail grid (SVG mini scatter, no per-card ECharts instance)
+  // Thumbnails are lazy-rendered on scroll via IntersectionObserver so "load
+  // all" does not freeze the UI building hundreds of SVGs at once.
   // ---------------------------------------------------------------------------
+  var thumbObserver = null;
+
+  function ensureThumbObserver() {
+    if (thumbObserver || typeof IntersectionObserver === "undefined") return;
+    thumbObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        var card = entry.target;
+        var placeholder = card.querySelector(".skeleton");
+        if (!placeholder) { thumbObserver.unobserve(card); return; }
+        placeholder.replaceWith(buildThumb(card.__model));
+        thumbObserver.unobserve(card);
+      });
+    }, { rootMargin: "200px" });
+  }
+
   function renderGrid() {
     var res = state.result;
     var vis = visibleModels();
     var grid = $("#grid-wrap");
     grid.innerHTML = "";
+    ensureThumbObserver();
 
     vis.list.slice(0, vis.shown).forEach(function (m) {
       var card = el("div", "model-card");
       card.tabIndex = 0;
       card.setAttribute("role", "button");
       card.setAttribute("aria-label", I18N.t("detailRank") + " " + m.rank);
+      card.__model = m;
 
-      card.appendChild(buildThumb(m));
+      // Skeleton placeholder first; the actual SVG is drawn when visible.
+      var placeholder = el("div", "model-card__thumb skeleton");
+      card.appendChild(placeholder);
 
       var body = el("div", "model-card__body");
       body.appendChild(el("div", "model-card__title", "Model " + m.rank));
@@ -633,6 +710,12 @@
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetail(m.rank); }
       });
       grid.appendChild(card);
+
+      if (thumbObserver) {
+        thumbObserver.observe(card);
+      } else {
+        placeholder.replaceWith(buildThumb(m));
+      }
     });
   }
 
