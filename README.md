@@ -16,6 +16,8 @@ Pure client-side — nothing is uploaded to a server; all parsing and computatio
   `.zip` / `.tar.gz` / `.tgz` / `.tar` / `.gz` archive (auto-detected and extracted).
 - Sortable overview (rank, RMSE, MaxAE, R², Spearman's ρ) with table and thumbnail grid views.
 - Per-model detail: formula, fit statistics, interactive ECharts scatter plot, and point inspector.
+- **Pareto front** (needs `verify.dat`): pick a train metric (X) and a verify metric (Y), plot all
+  models and the non-dominated front, and click any point/row to open its detail card.
 - Upload the optional `SISSO.in` to show run cards: feature count (`nsf`), descriptor dimension (`desc_dim`) and complexity (`fcomplexity`).
 - Every run is auto-saved to the browser's project history; "Save project" also exports a portable
   `.json` — reload any analysis anytime without re-uploading the run folder.

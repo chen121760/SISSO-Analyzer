@@ -24,10 +24,13 @@
     sortAsc: true,
     topN: 100,
     loadAll: false,
-    view: "table",  // "table" | "grid"
+    view: "table",  // "table" | "grid" | "pareto"
     chart: null,    // echarts instance
     currentModel: null,
     colorKey: "",   // "" = class colors; otherwise a column letter to color by
+    paretoX: "rmse",    // train metric for the Pareto scatter (x)
+    paretoY: "rmse",    // verify metric for the Pareto scatter (y)
+    paretoChart: null,  // echarts instance for the Pareto view
   };
 
   // ---------------------------------------------------------------------------
@@ -114,6 +117,7 @@
     themeColors = null;
     if (!state.result) return;
     if (state.view === "grid") renderGrid();
+    if (state.view === "pareto") renderPareto();
     if (state.currentModel && !$("#dialog-backdrop").hidden) renderChart(state.currentModel);
   }
 
@@ -154,6 +158,20 @@
     { role: "sissoin", i18n: "fileSissoIn", required: false, optional: true,
       match: function (n) { return /^SISSO\.in$/i.test(n); } },
   ];
+
+  // Pareto metrics: label key + whether smaller-is-better.
+  var PARETO_METRICS = [
+    { key: "rmse", label: "sortRMSE", minimize: true },
+    { key: "maxae", label: "sortMaxAE", minimize: true },
+    { key: "r2", label: "sortR2", minimize: false },
+    { key: "rho", label: "sortRho", minimize: false },
+  ];
+  function paretoMetricDef(key) {
+    for (var i = 0; i < PARETO_METRICS.length; i++) {
+      if (PARETO_METRICS[i].key === key) return PARETO_METRICS[i];
+    }
+    return PARETO_METRICS[0];
+  }
 
   // ---------------------------------------------------------------------------
   // SISSO.in parsing (run settings: features / dimension / complexity)
@@ -1040,11 +1058,29 @@
 
     $("#top-n").value = state.topN;
 
-    // view toggle
+    // Pareto axis selects — metric direction is preset (↓ smaller better,
+    // ↑ bigger better).
+    [["#pareto-x", state.paretoX], ["#pareto-y", state.paretoY]].forEach(function (pair) {
+      var s = $(pair[0]);
+      if (!s) return;
+      s.innerHTML = "";
+      PARETO_METRICS.forEach(function (d) {
+        var opt = el("option", null, I18N.t(d.label) + (d.minimize ? " ↓" : " ↑"));
+        opt.value = d.key;
+        s.appendChild(opt);
+      });
+      s.value = pair[1];
+    });
+
+    // view toggle (pareto only meaningful when a verify set exists)
+    var hasVerify = !!(state.result && state.result.verify);
     $("#view-table-btn").classList.toggle("is-active", state.view === "table");
     $("#view-grid-btn").classList.toggle("is-active", state.view === "grid");
+    $("#view-pareto-btn").classList.toggle("is-active", state.view === "pareto");
+    $("#view-pareto-btn").disabled = !hasVerify;
     $("#table-wrap").hidden = state.view !== "table";
     $("#grid-wrap").hidden = state.view !== "grid";
+    $("#pareto-wrap").hidden = state.view !== "pareto";
   }
 
   function sortedModels() {
@@ -1342,6 +1378,180 @@
   // ---------------------------------------------------------------------------
   // Detail dialog
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Pareto front: train metric (x) vs verify metric (y)
+  // ---------------------------------------------------------------------------
+  function paretoPoints() {
+    var res = state.result;
+    var xDef = paretoMetricDef(state.paretoX);
+    var yDef = paretoMetricDef(state.paretoY);
+    var pts = [];
+    res.models.forEach(function (m) {
+      if (!m.metricsTrain || !m.metricsVerify) return;
+      var x = m.metricsTrain[xDef.key];
+      var y = m.metricsVerify[yDef.key];
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      pts.push({ rank: m.rank, x: x, y: y, m: m });
+    });
+    return { xDef: xDef, yDef: yDef, pts: pts };
+  }
+
+  // Non-dominated (Pareto-optimal) set for the chosen "better" directions.
+  function computeParetoFront1(pts, xDef, yDef) {
+    function nx(p) { return xDef.minimize ? p.x : -p.x; }
+    function ny(p) { return yDef.minimize ? p.y : -p.y; }
+    var nonDom = pts.filter(function (p) {
+      return !pts.some(function (q) {
+        if (q.rank === p.rank) return false;
+        return nx(q) <= nx(p) && ny(q) <= ny(p) && (nx(q) < nx(p) || ny(q) < ny(p));
+      });
+    });
+    return nonDom.slice().sort(function (a, b) {
+      return (nx(a) - nx(b)) || (a.rank - b.rank);
+    });
+  }
+
+  function paretoAxisName(def, whichKey) {
+    return I18N.t(def.label) + " (" + I18N.t(whichKey) + ") " + (def.minimize ? "↓" : "↑");
+  }
+
+  function renderPareto() {
+    var res = state.result;
+    if (!res || !res.verify) return;
+    var computed = paretoPoints();
+    var pts = computed.pts, xDef = computed.xDef, yDef = computed.yDef;
+    var front = computeParetoFront1(pts, xDef, yDef);
+
+    $("#pareto-count").textContent = I18N.format("paretoCount", { n: front.length });
+
+    var dom = $("#pareto-chart");
+    var C = getThemeColors();
+    if (state.paretoChart) { state.paretoChart.dispose(); }
+    state.paretoChart = echarts.init(dom);
+
+    var allData = pts.map(function (p) { return { value: [p.x, p.y], rank: p.rank }; });
+    var frontLine = front.map(function (p) { return [p.x, p.y]; });
+    var frontData = front.map(function (p) { return { value: [p.x, p.y], rank: p.rank }; });
+
+    state.paretoChart.setOption({
+      animation: true,
+      textStyle: { fontFamily: C.font },
+      tooltip: {
+        trigger: "item",
+        formatter: function (params) {
+          var d = params.data;
+          if (!d || d.rank == null) return "";
+          return [
+            "<strong>" + I18N.t("detailRank") + " " + d.rank + "</strong>",
+            I18N.t("detailTrain") + " " + I18N.t(xDef.label) + ": " + fmt(d.value[0], 4),
+            I18N.t("detailVerify") + " " + I18N.t(yDef.label) + ": " + fmt(d.value[1], 4),
+          ].join("<br/>");
+        },
+      },
+      legend: {
+        data: [I18N.t("paretoAll"), I18N.t("paretoFront")],
+        top: 8,
+        textStyle: { color: C.chartText },
+      },
+      grid: { left: 70, right: 28, top: 48, bottom: 64 },
+      xAxis: {
+        name: paretoAxisName(xDef, "detailTrain"),
+        type: "value",
+        nameLocation: "middle",
+        nameGap: 28,
+        nameTextStyle: { color: C.chartText },
+        axisLabel: { color: C.chartText, formatter: fmtTick, showMinLabel: false, showMaxLabel: false },
+        axisLine: { lineStyle: { color: C.axis } },
+        splitLine: { lineStyle: { color: C.grid } },
+      },
+      yAxis: {
+        name: paretoAxisName(yDef, "detailVerify"),
+        type: "value",
+        nameLocation: "middle",
+        nameGap: 44,
+        nameTextStyle: { color: C.chartText },
+        axisLabel: { color: C.chartText, formatter: fmtTick, showMinLabel: false, showMaxLabel: false },
+        axisLine: { lineStyle: { color: C.axis } },
+        splitLine: { lineStyle: { color: C.grid } },
+      },
+      dataZoom: [{ type: "inside" }],
+      series: [
+        {
+          name: I18N.t("paretoAll"),
+          type: "scatter",
+          data: allData,
+          symbolSize: 8,
+          itemStyle: { color: C.textSoft, opacity: 0.5 },
+        },
+        {
+          name: "_frontLine",
+          type: "line",
+          data: frontLine,
+          symbol: "none",
+          lineStyle: { color: C.train, width: 2 },
+          silent: true,
+          showSymbol: false,
+          tooltip: { show: false },
+          z: 4,
+        },
+        {
+          name: I18N.t("paretoFront"),
+          type: "scatter",
+          data: frontData,
+          symbol: "circle",
+          symbolSize: 10,
+          itemStyle: { color: C.train, opacity: 0.95 },
+          z: 5,
+        },
+      ],
+    });
+
+    state.paretoChart.off("click");
+    state.paretoChart.on("click", function (params) {
+      if (params.data && params.data.rank != null) openDetail(params.data.rank);
+    });
+
+    // front table
+    var wrap = $("#pareto-table-wrap");
+    wrap.innerHTML = "";
+    var table = el("table", "models-table");
+    var thead = el("thead");
+    var hr = el("tr");
+    [I18N.t("colRank"), I18N.t("colFormula"),
+     paretoAxisName(xDef, "detailTrain"), paretoAxisName(yDef, "detailVerify"),
+     I18N.t("colActions")].forEach(function (label, i) {
+      var th = el("th", null, label);
+      if (i === 2 || i === 3) th.style.textAlign = "right";
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    var tbody = el("tbody");
+    front.forEach(function (p) {
+      var tr = el("tr");
+      tr.tabIndex = 0;
+      tr.setAttribute("role", "button");
+      tr.appendChild(el("td", "num", String(p.rank)));
+      tr.appendChild(el("td", "formula-cell", p.m.formulaOriginal));
+      tr.appendChild(el("td", "num", fmt(p.x, 4)));
+      tr.appendChild(el("td", "num", fmt(p.y, 4)));
+      var td = el("td");
+      var btn = el("button", "btn btn--secondary btn--sm", I18N.t("view"));
+      btn.type = "button";
+      btn.addEventListener("click", function (e) { e.stopPropagation(); openDetail(p.rank); });
+      td.appendChild(btn);
+      tr.appendChild(td);
+      tr.addEventListener("click", function () { openDetail(p.rank); });
+      tr.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetail(p.rank); }
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+  }
+
   function openDetail(rank) {
     var res = state.result;
     var m = null;
@@ -1630,6 +1840,7 @@
 
   function resizeChart() {
     if (state.chart) state.chart.resize();
+    if (state.paretoChart) state.paretoChart.resize();
   }
 
   // ---------------------------------------------------------------------------
@@ -1802,6 +2013,8 @@
       state.texts = {};
       state.result = null;
       state.projectId = null;
+      state.view = "table";
+      if (state.paretoChart) { state.paretoChart.dispose(); state.paretoChart = null; }
       $("#view-results").hidden = true;
       $("#view-upload").hidden = false;
       $("#btn-reset").hidden = true;
@@ -1825,7 +2038,11 @@
     $("#btn-lang").addEventListener("click", function () {
       I18N.setLocale(I18N.getLocale() === "zh" ? "en" : "zh");
       applyI18n();
-      if (state.result) { renderKpis(); renderModels(); }
+      if (state.result) {
+        renderKpis();
+        renderModels();
+        if (state.view === "pareto") renderPareto();
+      }
     });
 
     // theme
@@ -1879,6 +2096,23 @@
       state.view = "grid";
       renderControls();
       renderModels();
+    });
+    $("#view-pareto-btn").addEventListener("click", function () {
+      if (!state.result || !state.result.verify) {
+        toast(I18N.t("paretoRequireVerify"));
+        return;
+      }
+      state.view = "pareto";
+      renderControls();
+      renderPareto();
+    });
+    $("#pareto-x").addEventListener("change", function (e) {
+      state.paretoX = e.target.value || "rmse";
+      renderPareto();
+    });
+    $("#pareto-y").addEventListener("change", function (e) {
+      state.paretoY = e.target.value || "rmse";
+      renderPareto();
     });
     $("#btn-export").addEventListener("click", exportCsv);
 

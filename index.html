@@ -160,6 +160,7 @@
         <div class="segmented" role="group" aria-label="View mode">
           <button type="button" class="segmented__btn is-active" id="view-table-btn" data-i18n="viewTable">Table</button>
           <button type="button" class="segmented__btn" id="view-grid-btn" data-i18n="viewGrid">Thumbnails</button>
+          <button type="button" class="segmented__btn" id="view-pareto-btn" data-i18n="viewPareto">Pareto</button>
         </div>
         <button type="button" class="btn btn--secondary" id="btn-export" data-i18n="exportCsv">Export CSV</button>
         <button type="button" class="btn btn--ghost btn--sm" id="btn-save-project" data-i18n="saveProject">Save project</button>
@@ -171,6 +172,23 @@
 
       <div class="models-table-wrap" id="table-wrap"></div>
       <div class="models-grid" id="grid-wrap" hidden></div>
+
+      <div class="pareto" id="pareto-wrap" hidden>
+        <div class="pareto__controls">
+          <label class="field">
+            <span class="field__label" data-i18n="paretoX">Train metric (X)</span>
+            <select id="pareto-x" class="select"></select>
+          </label>
+          <label class="field">
+            <span class="field__label" data-i18n="paretoY">Verify metric (Y)</span>
+            <select id="pareto-y" class="select"></select>
+          </label>
+          <span class="pareto__hint" data-i18n="paretoNote">Click a point or row to open that model.</span>
+        </div>
+        <p class="count-note" id="pareto-count" aria-live="polite"></p>
+        <div id="pareto-chart" class="chart chart--pareto" role="img" aria-label="Pareto front scatter"></div>
+        <div class="models-table-wrap" id="pareto-table-wrap"></div>
+      </div>
 
       <p class="empty-state" id="empty-state" data-i18n="emptyGrid" hidden>No models to display.</p>
     </section>
