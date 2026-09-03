@@ -102,6 +102,10 @@
       paretoMode3D: "3D",
       exportCsv: "Export CSV",
       exported: "models.csv exported",
+      toolbarSort: "Sort & filter",
+      toolbarView: "View",
+      toolbarData: "Data",
+      paretoControlsLabel: "Axes & mode",
 
       // table
       colRank: "Rank",
@@ -239,6 +243,10 @@
       paretoMode3D: "3D",
       exportCsv: "导出 CSV",
       exported: "已导出 models.csv",
+      toolbarSort: "排序与筛选",
+      toolbarView: "视图",
+      toolbarData: "数据",
+      paretoControlsLabel: "坐标轴与模式",
 
       colRank: "排名",
       colFormula: "模型公式",

@@ -143,29 +143,45 @@
       <div class="kpi-strip" id="kpi-strip" aria-label="Summary metrics"></div>
 
       <div class="toolbar">
-        <label class="field">
-          <span class="field__label" data-i18n="sortBy">Sort by</span>
-          <select id="sort-key" class="select"></select>
-        </label>
-        <label class="field">
-          <span class="field__label">&#8597;</span>
-          <select id="sort-dir" class="select"></select>
-        </label>
-        <label class="field field--grow">
-          <span class="field__label" data-i18n="topN">Show</span>
-          <input type="number" id="top-n" class="input" min="1" value="100" />
-        </label>
-        <button type="button" class="btn btn--secondary" id="btn-load-all" data-i18n="loadAll">Load all</button>
-        <div class="toolbar__spacer"></div>
-        <div class="segmented" role="group" aria-label="View mode">
-          <button type="button" class="segmented__btn is-active" id="view-table-btn" data-i18n="viewTable">Table</button>
-          <button type="button" class="segmented__btn" id="view-grid-btn" data-i18n="viewGrid">Thumbnails</button>
-          <button type="button" class="segmented__btn" id="view-pareto-btn" data-i18n="viewPareto">Pareto</button>
+        <div class="toolbar__group">
+          <span class="toolbar__group-label" data-i18n="toolbarSort">Sort &amp; filter</span>
+          <div class="toolbar__row">
+            <label class="field">
+              <span class="field__label" data-i18n="sortBy">Sort by</span>
+              <select id="sort-key" class="select"></select>
+            </label>
+            <label class="field">
+              <span class="field__label">&#8597;</span>
+              <select id="sort-dir" class="select"></select>
+            </label>
+            <label class="field">
+              <span class="field__label" data-i18n="topN">Show</span>
+              <input type="number" id="top-n" class="input" min="1" value="100" />
+            </label>
+            <button type="button" class="btn btn--secondary" id="btn-load-all" data-i18n="loadAll">Load all</button>
+          </div>
         </div>
-        <button type="button" class="btn btn--secondary" id="btn-export" data-i18n="exportCsv">Export CSV</button>
-        <button type="button" class="btn btn--ghost btn--sm" id="btn-save-project" data-i18n="saveProject">Save project</button>
-        <button type="button" class="btn btn--ghost btn--sm" id="btn-load-project" data-i18n="loadProject">Load project…</button>
-        <input type="file" id="input-project" accept=".json,application/json" hidden />
+
+        <div class="toolbar__group">
+          <span class="toolbar__group-label" data-i18n="toolbarView">View</span>
+          <div class="toolbar__row">
+            <div class="segmented" role="group" aria-label="View mode">
+              <button type="button" class="segmented__btn is-active" id="view-table-btn" data-i18n="viewTable">Table</button>
+              <button type="button" class="segmented__btn" id="view-grid-btn" data-i18n="viewGrid">Thumbnails</button>
+              <button type="button" class="segmented__btn" id="view-pareto-btn" data-i18n="viewPareto">Pareto</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="toolbar__group toolbar__group--actions">
+          <span class="toolbar__group-label" data-i18n="toolbarData">Data</span>
+          <div class="toolbar__row">
+            <button type="button" class="btn btn--secondary btn--sm" id="btn-export" data-i18n="exportCsv">Export CSV</button>
+            <button type="button" class="btn btn--ghost btn--sm" id="btn-save-project" data-i18n="saveProject">Save project</button>
+            <button type="button" class="btn btn--ghost btn--sm" id="btn-load-project" data-i18n="loadProject">Load project…</button>
+            <input type="file" id="input-project" accept=".json,application/json" hidden />
+          </div>
+        </div>
       </div>
 
       <p class="count-note" id="count-note" aria-live="polite"></p>
@@ -175,20 +191,25 @@
 
       <div class="pareto" id="pareto-wrap" hidden>
         <div class="pareto__controls">
-          <label class="field">
-            <span class="field__label" data-i18n="paretoX">Train metric (X)</span>
-            <select id="pareto-x" class="select"></select>
-          </label>
-          <label class="field">
-            <span class="field__label" data-i18n="paretoY">Verify metric (Y)</span>
-            <select id="pareto-y" class="select"></select>
-          </label>
-          <label class="field" id="pareto-z-field" hidden>
-            <span class="field__label" data-i18n="paretoZ">Third metric (Z)</span>
-            <select id="pareto-z" class="select"></select>
-          </label>
-          <button type="button" class="btn btn--secondary btn--sm" id="pareto-mode-btn">3D</button>
-          <span class="pareto__hint" data-i18n="paretoNote">Click a point or row to open that model.</span>
+          <div class="pareto__controls-head">
+            <span class="toolbar__group-label" data-i18n="paretoControlsLabel">Axes &amp; mode</span>
+            <span class="pareto__hint" data-i18n="paretoNote">Click a point or row to open that model.</span>
+          </div>
+          <div class="toolbar__row">
+            <label class="field">
+              <span class="field__label" data-i18n="paretoX">Train metric (X)</span>
+              <select id="pareto-x" class="select"></select>
+            </label>
+            <label class="field">
+              <span class="field__label" data-i18n="paretoY">Verify metric (Y)</span>
+              <select id="pareto-y" class="select"></select>
+            </label>
+            <label class="field" id="pareto-z-field" hidden>
+              <span class="field__label" data-i18n="paretoZ">Third metric (Z)</span>
+              <select id="pareto-z" class="select"></select>
+            </label>
+            <button type="button" class="btn btn--secondary btn--sm" id="pareto-mode-btn">3D</button>
+          </div>
         </div>
         <p class="count-note" id="pareto-count" aria-live="polite"></p>
         <div id="pareto-chart" class="chart chart--pareto" role="img" aria-label="Pareto front scatter"></div>
