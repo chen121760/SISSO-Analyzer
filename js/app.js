@@ -323,14 +323,36 @@
     return name;
   }
 
-  function saveCurrentProject() {
-    var p = makeProjectJson();
-    if (!p) return;
+  // Assign a stable id/display name to a project JSON.
+  function finalizeProject(p) {
+    if (!p) return null;
     if (!p.id) p.id = state.projectId = makeProjectId();
     else state.projectId = p.id;
     p.name = projectTitle(p);
+    return p;
+  }
 
-    // 1) download as a portable .json file (works everywhere)
+  // Store the current analysis into the browser's recent list (IndexedDB).
+  // Mirrors USPEX-Analyzer: every successful upload is auto-saved.
+  function storeProjectLocally() {
+    var p = finalizeProject(makeProjectJson());
+    if (!p) return Promise.resolve(false);
+    return dbPut(p).then(function () {
+      renderRecentList();
+      return true;
+    }).catch(function (err) {
+      console.warn("IndexedDB save failed:", err);
+      renderRecentList();
+      return false;
+    });
+  }
+
+  // Explicit "Save project" = export a portable .json file (plus a local
+  // copy so it also shows up in the recent list).
+  function saveCurrentProject() {
+    var p = finalizeProject(makeProjectJson());
+    if (!p) return;
+
     var downloaded = false;
     try {
       var blob = new Blob([JSON.stringify(p, null, 2)], { type: "application/json" });
@@ -344,15 +366,9 @@
       console.warn("project download failed:", e);
     }
 
-    // 2) keep it in the browser's recent list (IndexedDB). Failures are
-    //    reported instead of being silently swallowed.
-    dbPut(p).then(function () {
-      renderRecentList();
-      toast(I18N.t("savedOk"));
-    }).catch(function (err) {
-      console.warn("IndexedDB save failed:", err);
-      renderRecentList();
-      toast(downloaded ? I18N.t("savedFileOnly") : I18N.t("errProject"));
+    storeProjectLocally().then(function (stored) {
+      if (stored) toast(I18N.t("savedOk"));
+      else toast(downloaded ? I18N.t("savedFileOnly") : I18N.t("errProject"));
     });
   }
 
@@ -907,6 +923,10 @@
     state.topN = 100;
 
     showResults();
+
+    // Auto-save into the browser's recent list (like USPEX-Analyzer) — no
+    // manual "Save project" click needed; that button only exports a .json.
+    storeProjectLocally();
   }
 
   // ---------------------------------------------------------------------------
