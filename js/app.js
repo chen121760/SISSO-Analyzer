@@ -373,45 +373,6 @@
     });
   }
 
-  // Explicit "Save project" = export a portable .json file (plus a local
-  // copy so it also shows up in the recent list).
-  function saveCurrentProject() {
-    var p = finalizeProject(makeProjectJson());
-    if (!p) return;
-
-    var downloaded = false;
-    try {
-      var blob = new Blob([JSON.stringify(p, null, 2)], { type: "application/json" });
-      var a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = (p.name.replace(/[^\w\u4e00-\u9fa5-]+/g, "_") || "sisso_project") + ".sisso.json";
-      a.click();
-      setTimeout(function () { URL.revokeObjectURL(a.href); }, 0);
-      downloaded = true;
-    } catch (e) {
-      console.warn("project download failed:", e);
-    }
-
-    storeProjectLocally().then(function (stored) {
-      if (stored) toast(I18N.t("savedOk"));
-      else toast(downloaded ? I18N.t("savedFileOnly") : I18N.t("errProject"));
-    });
-  }
-
-  function loadProjectFile(file) {
-    var fr = new FileReader();
-    fr.onload = function () {
-      try {
-        applyProject(JSON.parse(fr.result));
-      } catch (err) {
-        console.error(err);
-        toast(I18N.t("errProject"));
-      }
-    };
-    fr.onerror = function () { toast(I18N.t("errProject")); };
-    fr.readAsText(file);
-  }
-
   // Restore a saved project: rebuild the raw texts and re-run the pipeline,
   // so every view (table, grid, KPI cards, SISSO.in info) is reproduced.
   function applyProject(p) {
@@ -1124,6 +1085,12 @@
     $("#table-wrap").hidden = state.view !== "table";
     $("#grid-wrap").hidden = state.view !== "grid";
     $("#pareto-wrap").hidden = state.view !== "pareto";
+    // Sort/filter toolbar and the "showing N of M" note only make sense for the
+    // table/grid views — Pareto always plots every model.
+    var resToolbar = document.querySelector("#view-results .toolbar");
+    if (resToolbar) resToolbar.hidden = state.view === "pareto";
+    var countNote = $("#count-note");
+    if (countNote) countNote.hidden = state.view === "pareto";
   }
 
   function sortedModels() {
@@ -2276,17 +2243,6 @@
       renderFileList();
       renderRunButton();
       renderRecentList();
-    });
-
-    // project save / load
-    $("#btn-save-project").addEventListener("click", saveCurrentProject);
-    $("#btn-load-project").addEventListener("click", function () {
-      $("#input-project").click();
-    });
-    $("#input-project").addEventListener("change", function (e) {
-      var f = e.target.files && e.target.files[0];
-      if (f) loadProjectFile(f);
-      e.target.value = "";
     });
 
     // language
