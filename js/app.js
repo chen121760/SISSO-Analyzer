@@ -16,8 +16,10 @@
   // State
   // ---------------------------------------------------------------------------
   var state = {
-    files: {},      // role -> {name, text}
+    files: {},      // role -> {name, file}
+    texts: {},      // role -> raw text (captured at analyze time)
     result: null,   // pipeline result
+    projectId: null,
     sortKey: "rank",
     sortAsc: true,
     topN: 100,
@@ -148,7 +150,246 @@
       match: function (n) { return /top.*D00.*_coeff/i.test(n); } },
     { role: "top", i18n: "fileTop", required: true, optional: false,
       match: function (n) { return /^top.*D00/i.test(n) && !/_coeff/i.test(n); } },
+    { role: "sissoin", i18n: "fileSissoIn", required: false, optional: true,
+      match: function (n) { return /^SISSO\.in$/i.test(n); } },
   ];
+
+  // ---------------------------------------------------------------------------
+  // SISSO.in parsing (run settings: features / dimension / complexity)
+  // ---------------------------------------------------------------------------
+  function parseSissoIn(text) {
+    var out = { nsample: null, nsf: null, descDim: null, fcomplexity: null, ptype: null };
+    var lines = String(text).split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var bang = line.indexOf("!");
+      var core = (bang >= 0 ? line.slice(0, bang) : line).trim();
+      if (!core) continue;
+      var eq = core.indexOf("=");
+      if (eq < 1) continue;
+      var key = core.slice(0, eq).trim().toLowerCase();
+      var val = core.slice(eq + 1).trim();
+      var nums = (val.match(/[+-]?\d+(?:\.\d+)?/g) || []).map(Number);
+      if (!nums.length) continue;
+      switch (key) {
+        case "nsample": out.nsample = nums[0]; break;
+        case "nsf": out.nsf = nums[0]; break;
+        case "desc_dim": out.descDim = nums[0]; break;
+        case "fcomplexity": out.fcomplexity = nums[0]; break;
+        case "ptype": out.ptype = nums[0]; break;
+      }
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Project persistence (mirrors USPEX-Analyzer): JSON export/import + recent
+  // projects stored in IndexedDB.
+  // ---------------------------------------------------------------------------
+  var DB_NAME = "sisso-analyzer";
+  var DB_STORE = "projects";
+
+  function makeProjectId() {
+    return "proj_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7);
+  }
+
+  function dbOpen() {
+    return new Promise(function (resolve, reject) {
+      if (!window.indexedDB) { reject(new Error("indexedDB unavailable")); return; }
+      var req = window.indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains(DB_STORE)) {
+          db.createObjectStore(DB_STORE, { keyPath: "id" });
+        }
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+  function dbPut(rec) {
+    return dbOpen().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(DB_STORE, "readwrite");
+        tx.objectStore(DB_STORE).put(rec);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+  function dbAll() {
+    return dbOpen().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var req = db.transaction(DB_STORE, "readonly").objectStore(DB_STORE).getAll();
+        req.onsuccess = function () {
+          var rows = req.result || [];
+          rows.sort(function (a, b) { return String(b.savedAt).localeCompare(String(a.savedAt)); });
+          resolve(rows);
+        };
+        req.onerror = function () { reject(req.error); };
+      });
+    });
+  }
+  function dbDelete(id) {
+    return dbOpen().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(DB_STORE, "readwrite");
+        tx.objectStore(DB_STORE).delete(id);
+        tx.oncomplete = function () { resolve(); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  function defaultRoleFileName(role) {
+    var names = { train: "train.dat", verify: "verify.dat", uspace: "Uspace.expressions",
+      coeff: "top1D00_coeff", top: "top1D00", sissoin: "SISSO.in" };
+    return names[role] || (role + ".txt");
+  }
+
+  function makeProjectJson() {
+    var res = state.result;
+    if (!res) return null;
+    var files = {};
+    FILE_ROLES.forEach(function (r) {
+      var t = state.texts[r.role];
+      if (t === undefined || t === null) return;
+      var name = state.files[r.role] ? state.files[r.role].name : defaultRoleFileName(r.role);
+      files[r.role] = { name: name, text: t };
+    });
+    var info = res.meta.sissoIn || null;
+    return {
+      version: 1,
+      kind: "sisso-analyzer-project",
+      id: state.projectId || null,
+      savedAt: new Date().toISOString(),
+      targetName: res.meta.targetName || "",
+      nModels: res.meta.nModels || 0,
+      nTrain: res.meta.nTrain || 0,
+      nFeatures: res.meta.nFeatures || 0,
+      dim: info && info.descDim !== null ? info.descDim : null,
+      files: files,
+    };
+  }
+
+  function projectTitle(p) {
+    var name = p && p.targetName ? p.targetName : "SISSO project";
+    if (p && p.dim !== null && p.dim !== undefined) name += " (" + p.dim + "D)";
+    return name;
+  }
+
+  function saveCurrentProject() {
+    var p = makeProjectJson();
+    if (!p) return;
+    if (!p.id) p.id = state.projectId = makeProjectId();
+    else state.projectId = p.id;
+    p.name = projectTitle(p);
+
+    // 1) download as a portable .json file
+    try {
+      var blob = new Blob([JSON.stringify(p, null, 2)], { type: "application/json" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = (p.name.replace(/[^\w\u4e00-\u9fa5-]+/g, "_") || "sisso_project") + ".sisso.json";
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 0);
+    } catch (e) { /* still try to store locally */ }
+
+    // 2) keep it in the browser's recent list (IndexedDB)
+    dbPut(p).then(renderRecentList).catch(function () {});
+    toast(I18N.t("savedOk"));
+  }
+
+  function loadProjectFile(file) {
+    var fr = new FileReader();
+    fr.onload = function () {
+      try {
+        applyProject(JSON.parse(fr.result));
+      } catch (err) {
+        console.error(err);
+        toast(I18N.t("errProject"));
+      }
+    };
+    fr.onerror = function () { toast(I18N.t("errProject")); };
+    fr.readAsText(file);
+  }
+
+  // Restore a saved project: rebuild the raw texts and re-run the pipeline,
+  // so every view (table, grid, KPI cards, SISSO.in info) is reproduced.
+  function applyProject(p) {
+    if (!p || p.kind !== "sisso-analyzer-project" || !p.files || typeof p.files !== "object") {
+      toast(I18N.t("errProject"));
+      return;
+    }
+    var roleTexts = {};
+    var ok = true;
+    FILE_ROLES.forEach(function (r) {
+      var rec = p.files[r.role];
+      if (rec && typeof rec.text === "string") {
+        roleTexts[r.role] = rec.text;
+        state.files[r.role] = { name: rec.name || defaultRoleFileName(r.role), file: null };
+      }
+    });
+    ["train", "uspace", "coeff", "top"].forEach(function (need) {
+      if (roleTexts[need] === undefined) ok = false;
+    });
+    if (!ok) { toast(I18N.t("errProject")); return; }
+    state.projectId = p.id || null;
+    try {
+      processTexts(roleTexts);
+      toast(I18N.t("loadedOk"));
+    } catch (err) {
+      console.error(err);
+      toast(I18N.t("errProject") + " " + (err && err.message ? err.message : ""));
+    }
+  }
+
+  function fmtSavedTime(iso) {
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return "";
+      return d.toLocaleString();
+    } catch (e) { return ""; }
+  }
+
+  function renderRecentList() {
+    dbAll().then(function (rows) {
+      var box = $("#recent-box");
+      var list = $("#recent-list");
+      if (!box || !list) return;
+      var show = !!(rows && rows.length);
+      box.hidden = !show;
+      var empty = $("#recent-empty");
+      if (empty) empty.hidden = show;
+      if (!show) return;
+      list.innerHTML = "";
+      rows.slice(0, 12).forEach(function (rec) {
+        var li = el("li", "recent-item");
+        var wrap = el("div");
+        wrap.appendChild(el("div", "recent-item__name", rec.name || rec.targetName || "SISSO project"));
+        var metaText = I18N.format("recentMeta", {
+          n: rec.nModels != null ? rec.nModels : "-",
+          time: fmtSavedTime(rec.savedAt),
+        });
+        wrap.appendChild(el("div", "recent-item__meta", metaText));
+        li.appendChild(wrap);
+
+        var actions = el("div", "recent-item__actions");
+        var open = el("button", "btn btn--secondary", I18N.t("recentOpen"));
+        open.type = "button";
+        open.addEventListener("click", function () { applyProject(rec); });
+        var del = el("button", "btn btn--ghost", I18N.t("recentDelete"));
+        del.type = "button";
+        del.addEventListener("click", function () {
+          dbDelete(rec.id).then(renderRecentList).catch(function () {});
+        });
+        actions.appendChild(open);
+        actions.appendChild(del);
+        li.appendChild(actions);
+        list.appendChild(li);
+      });
+    }).catch(function () { /* IndexedDB unavailable — hide the panel */ });
+  }
 
   // ---------------------------------------------------------------------------
   // DOM helpers
@@ -181,6 +422,7 @@
     renderFileList();
     renderControls();
     renderCount();
+    renderRecentList();
   }
 
   function toast(msg) {
@@ -534,23 +776,21 @@
     showLoading("analyzing");
 
     try {
-      var files = {};
-      files.trainText = await readFileAsText(state.files.train.file);
-      if (state.files.verify) files.verifyText = await readFileAsText(state.files.verify.file);
-      files.uspaceText = await readFileAsText(state.files.uspace.file);
-      files.coeffText = await readFileAsText(state.files.coeff.file);
-      files.topText = await readFileAsText(state.files.top.file);
+      var roleTexts = {};
+      roleTexts.train = await readFileAsText(state.files.train.file);
+      roleTexts.uspace = await readFileAsText(state.files.uspace.file);
+      roleTexts.coeff = await readFileAsText(state.files.coeff.file);
+      roleTexts.top = await readFileAsText(state.files.top.file);
+      if (state.files.verify) roleTexts.verify = await readFileAsText(state.files.verify.file);
+      if (state.files.sissoin) roleTexts.sissoin = await readFileAsText(state.files.sissoin.file);
+
+      // a fresh analyze run starts a brand-new project identity
+      state.projectId = null;
 
       // let the UI paint the "analyzing" state before the synchronous parse
       await new Promise(function (r) { setTimeout(r, 30); });
 
-      state.result = Core.runPipeline(files);
-      state.sortKey = "rank";
-      state.sortAsc = true;
-      state.loadAll = false;
-      state.topN = 100;
-
-      showResults();
+      processTexts(roleTexts);
     } catch (err) {
       console.error(err);
       toast(I18N.t("errParse") + " " + (err && err.message ? err.message : ""));
@@ -559,6 +799,33 @@
       hideLoading();
       renderRunButton();
     }
+  }
+
+  // Shared analysis entry point used by a fresh upload (run) and by loading a
+  // saved project. roleTexts: { train, uspace, coeff, top, verify?, sissoin? }.
+  function processTexts(roleTexts) {
+    var files = {};
+    files.trainText = roleTexts.train;
+    files.uspaceText = roleTexts.uspace;
+    files.coeffText = roleTexts.coeff;
+    files.topText = roleTexts.top;
+    if (roleTexts.verify !== undefined) files.verifyText = roleTexts.verify;
+
+    // keep the raw texts so the project can be saved / re-exported later
+    state.texts = {};
+    FILE_ROLES.forEach(function (r) {
+      if (roleTexts[r.role] !== undefined) state.texts[r.role] = roleTexts[r.role];
+    });
+
+    state.result = Core.runPipeline(files);
+    state.result.meta.sissoIn =
+      roleTexts.sissoin !== undefined ? parseSissoIn(roleTexts.sissoin) : null;
+    state.sortKey = "rank";
+    state.sortAsc = true;
+    state.loadAll = false;
+    state.topN = 100;
+
+    showResults();
   }
 
   // ---------------------------------------------------------------------------
@@ -587,12 +854,24 @@
     var res = state.result;
     var strip = $("#kpi-strip");
     strip.innerHTML = "";
+    var info = res.meta.sissoIn || null;
+    var fromIn = I18N.t("projectFromSissoIn");
     var kpis = [
       [I18N.t("kpiModels"), res.meta.nModels],
       [I18N.t("kpiTrain"), res.meta.nTrain],
       [I18N.t("kpiVerify"), res.meta.nVerify || I18N.t("noVerify")],
-      [I18N.t("kpiFeatures"), res.meta.nFeatures],
     ];
+    // Number of features: prefer SISSO.in's nsf when the file was uploaded,
+    // otherwise fall back to the column count of train.dat.
+    if (info && info.nsf !== null) {
+      kpis.push([I18N.t("kpiFeatures"), info.nsf, fromIn]);
+    } else {
+      kpis.push([I18N.t("kpiFeatures"), res.meta.nFeatures]);
+    }
+    // Dimension & complexity come from SISSO.in (desc_dim / fcomplexity).
+    if (info && info.descDim !== null) kpis.push([I18N.t("kpiDim"), info.descDim, fromIn]);
+    if (info && info.fcomplexity !== null) kpis.push([I18N.t("kpiComplexity"), info.fcomplexity, fromIn]);
+
     // best rho (lowest = most negative correlation, or highest |rho|? show min rho by magnitude)
     var bestRho = null;
     res.models.forEach(function (m) {
@@ -608,6 +887,7 @@
       var card = el("div", "kpi");
       card.appendChild(el("div", "kpi__label", k[0]));
       card.appendChild(el("div", "kpi__value", String(k[1])));
+      if (k[2]) card.title = k[2];
       strip.appendChild(card);
     });
   }
@@ -1302,12 +1582,25 @@
     $("#btn-run").addEventListener("click", run);
     $("#btn-reset").addEventListener("click", function () {
       state.files = {};
+      state.texts = {};
       state.result = null;
+      state.projectId = null;
       $("#view-results").hidden = true;
       $("#view-upload").hidden = false;
       $("#btn-reset").hidden = true;
       renderFileList();
       renderRunButton();
+    });
+
+    // project save / load
+    $("#btn-save-project").addEventListener("click", saveCurrentProject);
+    $("#btn-load-project").addEventListener("click", function () {
+      $("#input-project").click();
+    });
+    $("#input-project").addEventListener("change", function (e) {
+      var f = e.target.files && e.target.files[0];
+      if (f) loadProjectFile(f);
+      e.target.value = "";
     });
 
     // language
@@ -1423,6 +1716,7 @@
     applyI18n();
     renderFileList();
     renderRunButton();
+    renderRecentList();
   }
 
   if (document.readyState === "loading") {

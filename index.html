@@ -126,6 +126,12 @@
           <button type="button" class="btn btn--primary btn--run" id="btn-run" disabled data-i18n="run">Analyze</button>
         </div>
       </div>
+
+      <section class="recent" id="recent-box" aria-labelledby="recent-title" hidden>
+        <h2 class="recent__title" id="recent-title" data-i18n="recentTitle">Saved projects</h2>
+        <p class="recent__empty" id="recent-empty" hidden data-i18n="recentEmpty"></p>
+        <ul class="recent__list" id="recent-list"></ul>
+      </section>
     </section>
 
     <!-- Results view -->
@@ -154,6 +160,9 @@
           <button type="button" class="segmented__btn" id="view-grid-btn" data-i18n="viewGrid">Thumbnails</button>
         </div>
         <button type="button" class="btn btn--secondary" id="btn-export" data-i18n="exportCsv">Export CSV</button>
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-save-project" data-i18n="saveProject">Save project</button>
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-load-project" data-i18n="loadProject">Load project…</button>
+        <input type="file" id="input-project" accept=".json,application/json" hidden />
       </div>
 
       <p class="count-note" id="count-note" aria-live="polite"></p>

@@ -36,6 +36,7 @@
       fileTop: "top-D file (top*D00*)",
       fileCoeff: "coefficient file (*_coeff)",
       fileUspace: "Uspace.expressions",
+      fileSissoIn: "SISSO.in (run settings)",
       missingFiles: "Missing required files:",
       verifyOptionalNote: "verify.dat is optional — if omitted, only train metrics are shown.",
       run: "Analyze",
@@ -46,6 +47,19 @@
       stepEvaluating: "Evaluating {n} models…",
       reset: "Load new results",
 
+      // project save / load
+      saveProject: "Save project",
+      loadProject: "Load project…",
+      savedOk: "Project saved",
+      loadedOk: "Project loaded",
+      errProject: "Invalid or unsupported project file",
+      recentTitle: "Saved projects",
+      recentEmpty: "No saved projects yet — open results and click “Save project” to keep them here.",
+      recentOpen: "Open",
+      recentDelete: "Delete",
+      recentMeta: "{n} models · {time}",
+      projectFromSissoIn: "from SISSO.in",
+
       // status
       inSampleWarning:
         "verify.dat is identical to train.dat — verify metrics are in-sample, not out-of-sample.",
@@ -55,6 +69,8 @@
       kpiTrain: "Train samples",
       kpiVerify: "Verify samples",
       kpiFeatures: "Features",
+      kpiDim: "Dimension",
+      kpiComplexity: "Complexity",
       kpiTopRho: "Best ρ",
 
       // controls
@@ -145,6 +161,7 @@
       fileTop: "top-D 文件（top*D00*）",
       fileCoeff: "系数文件（*_coeff）",
       fileUspace: "Uspace.expressions",
+      fileSissoIn: "SISSO.in（运行设置）",
       missingFiles: "缺少必填文件：",
       verifyOptionalNote: "verify.dat 为可选——若省略，只展示训练集指标。",
       run: "开始分析",
@@ -155,6 +172,18 @@
       stepEvaluating: "正在评估 {n} 个模型…",
       reset: "载入新结果",
 
+      saveProject: "保存项目",
+      loadProject: "载入项目…",
+      savedOk: "项目已保存",
+      loadedOk: "项目已载入",
+      errProject: "无效或不受支持的项目文件",
+      recentTitle: "已保存的项目",
+      recentEmpty: "还没有保存的项目——先分析结果，再点“保存项目”即可存到这里。",
+      recentOpen: "打开",
+      recentDelete: "删除",
+      recentMeta: "{n} 个模型 · {time}",
+      projectFromSissoIn: "来自 SISSO.in",
+
       inSampleWarning:
         "verify.dat 与 train.dat 完全相同——verify 指标为样本内结果，并非留出验证。",
 
@@ -162,6 +191,8 @@
       kpiTrain: "训练样本",
       kpiVerify: "验证样本",
       kpiFeatures: "特征数",
+      kpiDim: "维度",
+      kpiComplexity: "复杂度",
       kpiTopRho: "最佳 ρ",
 
       sortBy: "排序依据",

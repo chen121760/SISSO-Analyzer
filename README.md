@@ -16,6 +16,8 @@ Pure client-side — nothing is uploaded to a server; all parsing and computatio
   `.zip` / `.tar.gz` / `.tgz` / `.tar` / `.gz` archive (auto-detected and extracted).
 - Sortable overview (rank, RMSE, MaxAE, R², Spearman's ρ) with table and thumbnail grid views.
 - Per-model detail: formula, fit statistics, interactive ECharts scatter plot, and point inspector.
+- Upload the optional `SISSO.in` to show run cards: feature count (`nsf`), descriptor dimension (`desc_dim`) and complexity (`fcomplexity`).
+- Save the whole analysis as a project (JSON download or browser history) and reload it anytime — no need to re-upload the run folder.
 - CSV export, English / Chinese UI, and light / dark theme.
 
 ## Run locally
