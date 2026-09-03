@@ -472,10 +472,18 @@
         var li = el("li", "recent-item");
         var wrap = el("div");
         wrap.appendChild(el("div", "recent-item__name", rec.targetName || rec.name || "SISSO project"));
+        // Backward-compatible summary: derive dimension/complexity/features from
+        // the stored SISSO.in when an older record does not carry these fields.
+        var sissoRec = rec.files && rec.files.sissoin ? rec.files.sissoin : null;
+        var sinfo = (sissoRec && typeof sissoRec.text === "string") ? parseSissoIn(sissoRec.text) : null;
+        var dim = rec.dim != null ? rec.dim : (sinfo && sinfo.descDim != null ? sinfo.descDim : null);
+        var cplx = rec.complexity != null ? rec.complexity : (sinfo && sinfo.fcomplexity != null ? sinfo.fcomplexity : null);
+        var feat = rec.features != null ? rec.features
+          : (sinfo && sinfo.nsf != null ? sinfo.nsf : (rec.nFeatures != null ? rec.nFeatures : null));
         var summaryParts = [];
-        if (rec.dim !== null && rec.dim !== undefined) summaryParts.push(rec.dim + "D");
-        if (rec.complexity !== null && rec.complexity !== undefined) summaryParts.push("C" + rec.complexity);
-        if (rec.features !== null && rec.features !== undefined) summaryParts.push(rec.features + " " + I18N.t("kpiFeatures"));
+        if (dim !== null && dim !== undefined) summaryParts.push(dim + "D");
+        if (cplx !== null && cplx !== undefined) summaryParts.push("C" + cplx);
+        if (feat !== null && feat !== undefined) summaryParts.push(feat + " " + I18N.t("kpiFeatures"));
         summaryParts.push(I18N.format("recentMeta", {
           n: rec.nModels != null ? rec.nModels : "-",
           time: fmtSavedTime(rec.savedAt),
