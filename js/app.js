@@ -603,16 +603,25 @@
   }
 
   function renderControls() {
-    // sort key options
+    // Sort key options: rank, then each metric on the train set and (when a
+    // verify set exists) on the verify set too. Note: ρ = Spearman's ρ.
     var keySel = $("#sort-key");
     keySel.innerHTML = "";
-    var opts = [
-      ["rank", I18N.t("sortRank")],
-      ["rmse", I18N.t("sortRMSE")],
-      ["maxae", I18N.t("sortMaxAE")],
-      ["r2", I18N.t("sortR2")],
-      ["rho", I18N.t("sortRho")],
+    var hasVerify = !!(state.result && state.result.verify);
+    var metricDefs = [
+      ["rmse", "sortRMSE"],
+      ["maxae", "sortMaxAE"],
+      ["r2", "sortR2"],
+      ["rho", "sortRho"],
     ];
+    var opts = [["rank", I18N.t("sortRank")]];
+    metricDefs.forEach(function (m) {
+      var label = I18N.t(m[1]);
+      opts.push([m[0] + "-train", label + " (" + I18N.t("detailTrain") + ")"]);
+      if (hasVerify) {
+        opts.push([m[0] + "-verify", label + " (" + I18N.t("detailVerify") + ")"]);
+      }
+    });
     opts.forEach(function (o) {
       var opt = el("option", null, o[1]);
       opt.value = o[0];
@@ -643,17 +652,21 @@
     var res = state.result;
     var list = res.models.slice();
     var asc = state.sortAsc;
+    // sortKey format: "rank" or "<metric>-<train|verify>", e.g. "rmse-verify".
+    var sk = state.sortKey.split("-");
+    var metric = sk[0];
+    var isVerify = sk[1] === "verify";
 
     // Normalise non-finite metrics to a deterministic endpoint so NaN values
     // never poison the comparator (which would make sort order unstable).
     function key(m) {
-      var mt = m.metricsTrain;
-      switch (state.sortKey) {
-        case "rank": return m.rank;
-        case "rmse": return (mt && Number.isFinite(mt.rmse)) ? mt.rmse : Infinity;
-        case "maxae": return (mt && Number.isFinite(mt.maxae)) ? mt.maxae : Infinity;
-        case "r2": return (mt && Number.isFinite(mt.r2)) ? mt.r2 : -Infinity;
-        case "rho": return (mt && Number.isFinite(mt.rho)) ? mt.rho : 0;
+      if (metric === "rank") return m.rank;
+      var ms = isVerify ? (m.metricsVerify || null) : m.metricsTrain;
+      switch (metric) {
+        case "rmse": return (ms && Number.isFinite(ms.rmse)) ? ms.rmse : Infinity;
+        case "maxae": return (ms && Number.isFinite(ms.maxae)) ? ms.maxae : Infinity;
+        case "r2": return (ms && Number.isFinite(ms.r2)) ? ms.r2 : -Infinity;
+        case "rho": return (ms && Number.isFinite(ms.rho)) ? ms.rho : 0;
         default: return m.rank;
       }
     }
