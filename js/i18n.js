@@ -12,6 +12,18 @@
       appTitle: "SISSO-Analyzer",
       appSubtitle: "Interactive analyzer for SISSO regression results",
 
+      // theme
+      themeLight: "Light theme",
+      themeDark: "Dark theme",
+      themeSystem: "Follow system theme",
+
+      // cite & author
+      citeTitle: "Cite SISSO",
+      citeIntro: "If this tool helps your research, please cite SISSO:",
+      citeCopy: "Copy citation",
+      citeCopied: "Copied",
+      contactAuthor: "Contact author",
+
       // upload
       uploadTitle: "Load SISSO results",
       uploadHint: "Drop the result files, a whole folder, or a .zip / .tar.gz archive here — or click to browse.",
@@ -111,6 +123,16 @@
     zh: {
       appTitle: "SISSO-Analyzer",
       appSubtitle: "SISSO 回归结果的交互式分析工具",
+
+      themeLight: "浅色主题",
+      themeDark: "深色主题",
+      themeSystem: "跟随系统主题",
+
+      citeTitle: "引用 SISSO",
+      citeIntro: "如果本工具对您的研究有帮助，请引用 SISSO：",
+      citeCopy: "复制引用",
+      citeCopied: "已复制",
+      contactAuthor: "联系作者",
 
       uploadTitle: "载入 SISSO 结果",
       uploadHint: "将结果文件、整个文件夹或 .zip / .tar.gz 压缩包拖到这里，或点击浏览。",

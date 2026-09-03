@@ -16,6 +16,14 @@
 
   --color-train: #1e40af;
   --color-verify: #d97706;
+  --color-primary-hover: #17378f;
+
+  /* ECharts / thumbnail SVG palette (kept theme-aware) */
+  --chart-axis: #cbd5e1;
+  --chart-grid: #e2e8f0;
+  --chart-identity: #94a3b8;
+  --chart-text: #475569;
+  --chart-empty: #64748b;
 
   --font-body: "Fira Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Fira Code", ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -27,6 +35,54 @@
   --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.18);
   --transition: 160ms ease;
   --appbar-h: 60px;
+}
+
+/* ---------- Dark theme ---------- */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-primary: #60a5fa;
+  --color-on-primary: #0b1220;
+  --color-secondary: #3b82f6;
+  --color-accent: #f59e0b;
+  --color-background: #0b1220;
+  --color-surface: #111c2e;
+  --color-foreground: #e2e8f0;
+  --color-muted: #1e293b;
+  --color-border: #2b3a55;
+  --color-destructive: #f87171;
+  --color-ring: #60a5fa;
+  --color-text: #e2e8f0;
+  --color-text-soft: #94a3b8;
+
+  --color-train: #60a5fa;
+  --color-verify: #f59e0b;
+  --color-primary-hover: #3b82f6;
+
+  --chart-axis: #475569;
+  --chart-grid: #1e293b;
+  --chart-identity: #64748b;
+  --chart-text: #94a3b8;
+  --chart-empty: #94a3b8;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+[data-theme="dark"] .warning {
+  background: #33250a;
+  border-color: #b45309;
+  color: #fcd34d;
+}
+
+[data-theme="dark"] .toast {
+  background: #1e293b;
+  color: #f1f5f9;
+}
+
+[data-theme="dark"] .loading-overlay {
+  background: rgba(11, 18, 32, 0.72);
 }
 
 * { box-sizing: border-box; }
@@ -59,6 +115,7 @@ html, body {
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
+  text-decoration: none;
   transition: background var(--transition), border-color var(--transition),
     box-shadow var(--transition), color var(--transition);
   white-space: nowrap;
@@ -76,7 +133,7 @@ html, body {
   background: var(--color-primary);
   color: var(--color-on-primary);
 }
-.btn--primary:hover:not(:disabled) { background: #17378f; }
+.btn--primary:hover:not(:disabled) { background: var(--color-primary-hover); }
 
 .btn--secondary {
   background: var(--color-surface);
@@ -119,6 +176,50 @@ html, body {
 }
 .app-bar__subtitle { color: var(--color-text-soft); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-bar__actions { display: flex; align-items: center; gap: 8px; }
+
+/* ---------- Cite popover ---------- */
+.cite { position: relative; }
+.cite__popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(460px, calc(100vw - 32px));
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 16px;
+  z-index: 150;
+}
+.cite__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.cite__title { font-size: 14px; font-weight: 600; color: var(--color-foreground); }
+.cite__intro { margin: 0 0 10px; font-size: 12px; color: var(--color-text-soft); }
+.cite__ref {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-text);
+  background: var(--color-background);
+  border-left: 3px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+}
+.cite__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--color-primary);
+  text-decoration: none;
+}
+.cite__link:hover { text-decoration: underline; }
 
 /* ---------- Layout ---------- */
 .main { max-width: 1280px; margin: 0 auto; padding: 24px 20px 64px; }

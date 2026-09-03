@@ -27,6 +27,115 @@
     currentModel: null,
   };
 
+  // ---------------------------------------------------------------------------
+  // Theme (system / light / dark) + citation data
+  // ---------------------------------------------------------------------------
+  var THEME_STORAGE = "sisso-theme";
+  var CITATION_TEXT =
+    "R. Ouyang, S. Curtarolo, E. Ahmetcik, M. Scheffler, and L. M. Ghiringhelli, " +
+    "Phys. Rev. Mater. 2, 083802 (2018).";
+
+  var ICON_MONITOR =
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
+    '<rect x="2" y="3" width="20" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<path d="M8 21h8M12 17v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+    "</svg>";
+  var ICON_SUN =
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
+    '<circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+    "</svg>";
+  var ICON_MOON =
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
+    '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+    "</svg>";
+
+  var theme = { preference: "system", resolved: "light" };
+  var themeColors = null;
+
+  function resolveTheme(pref) {
+    if (pref === "light" || pref === "dark") return pref;
+    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      return "dark";
+    }
+    return "light";
+  }
+
+  function nextThemePreference(pref, resolved) {
+    if (pref === "system") return resolved === "dark" ? "light" : "dark";
+    if (pref === "light") return "dark";
+    return "system";
+  }
+
+  function themeTitleKey() {
+    if (theme.preference === "light") return "themeLight";
+    if (theme.preference === "dark") return "themeDark";
+    return "themeSystem";
+  }
+
+  function getThemeColors() {
+    if (themeColors) return themeColors;
+    var cs = window.getComputedStyle(document.documentElement);
+    function v(name, fallback) {
+      var s = cs.getPropertyValue(name);
+      return (s && s.trim()) || fallback;
+    }
+    themeColors = {
+      train: v("--color-train", "#1e40af"),
+      verify: v("--color-verify", "#d97706"),
+      text: v("--color-text", "#0f172a"),
+      textSoft: v("--color-text-soft", "#475569"),
+      axis: v("--chart-axis", "#cbd5e1"),
+      grid: v("--chart-grid", "#e2e8f0"),
+      identity: v("--chart-identity", "#94a3b8"),
+      chartText: v("--chart-text", "#475569"),
+      chartEmpty: v("--chart-empty", "#64748b"),
+    };
+    return themeColors;
+  }
+
+  function updateThemeButton() {
+    var btn = $("#btn-theme");
+    if (!btn) return;
+    var icon = ICON_MONITOR;
+    if (theme.preference === "light") icon = ICON_MOON;
+    else if (theme.preference === "dark") icon = ICON_SUN;
+    btn.innerHTML = icon;
+    var label = I18N.t(themeTitleKey());
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
+
+  function refreshThemeDependentUI() {
+    themeColors = null;
+    if (!state.result) return;
+    if (state.view === "grid") renderGrid();
+    if (state.currentModel && !$("#dialog-backdrop").hidden) renderChart(state.currentModel);
+  }
+
+  function applyTheme() {
+    theme.resolved = resolveTheme(theme.preference);
+    document.documentElement.setAttribute("data-theme", theme.resolved);
+    updateThemeButton();
+    refreshThemeDependentUI();
+  }
+
+  function cycleTheme() {
+    theme.preference = nextThemePreference(theme.preference, theme.resolved);
+    try {
+      window.localStorage && window.localStorage.setItem(THEME_STORAGE, theme.preference);
+    } catch (e) { /* ignore */ }
+    applyTheme();
+  }
+
+  function setCiteOpen(open) {
+    var popover = $("#cite-popover");
+    if (!popover) return;
+    popover.hidden = !open;
+    var btn = $("#btn-cite");
+    if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
   var FILE_ROLES = [
     { role: "train", i18n: "fileTrain", required: true, optional: false,
       match: function (n) { return /^train\.dat$/i.test(n); } },
@@ -55,7 +164,13 @@
     document.querySelectorAll("[data-i18n]").forEach(function (node) {
       node.textContent = I18N.t(node.getAttribute("data-i18n"));
     });
+    document.querySelectorAll("[data-i18n-title]").forEach(function (node) {
+      var label = I18N.t(node.getAttribute("data-i18n-title"));
+      node.setAttribute("title", label);
+      node.setAttribute("aria-label", label);
+    });
     document.documentElement.lang = I18N.getLocale() === "zh" ? "zh" : "en";
+    updateThemeButton();
     refreshDynamicLabels();
   }
 
@@ -721,6 +836,7 @@
 
   function buildThumb(m) {
     var res = state.result;
+    var C = getThemeColors();
     var W = 230, H = 150, pad = 16;
     var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 " + W + " " + H);
@@ -747,12 +863,12 @@
     var line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     line.setAttribute("x1", sx(lo)); line.setAttribute("y1", sy(lo));
     line.setAttribute("x2", sx(hi)); line.setAttribute("y2", sy(hi));
-    line.setAttribute("stroke", "#94a3b8"); line.setAttribute("stroke-dasharray", "3 3");
+    line.setAttribute("stroke", C.identity); line.setAttribute("stroke-dasharray", "3 3");
     line.setAttribute("stroke-width", "1");
     svg.appendChild(line);
 
-    drawPts(svg, trainPts, "#1e40af", "circle", sx, sy);
-    drawPts(svg, verifyPts, "#d97706", "triangle", sx, sy);
+    drawPts(svg, trainPts, C.train, "circle", sx, sy);
+    drawPts(svg, verifyPts, C.verify, "triangle", sx, sy);
 
     return svg;
   }
@@ -847,6 +963,7 @@
 
   function renderChart(m) {
     var res = state.result;
+    var C = getThemeColors();
     var dom = $("#chart");
     if (state.chart) { state.chart.dispose(); }
     state.chart = echarts.init(dom);
@@ -856,7 +973,7 @@
 
     if (!trainPts.length && !verifyPts.length) {
       state.chart.setOption({
-        title: { text: I18N.t("emptyChart"), left: "center", top: "middle", textStyle: { fontSize: 14, color: "#64748b" } },
+        title: { text: I18N.t("emptyChart"), left: "center", top: "middle", textStyle: { fontSize: 14, color: C.chartEmpty } },
       });
       return;
     }
@@ -882,7 +999,7 @@
       data: trainData,
       symbol: "circle",
       symbolSize: 9,
-      itemStyle: { color: "#1e40af", opacity: 0.7 },
+      itemStyle: { color: C.train, opacity: 0.7 },
     }];
     if (verifyData.length) {
       series.push({
@@ -891,7 +1008,7 @@
         data: verifyData,
         symbol: "triangle",
         symbolSize: 11,
-        itemStyle: { color: "#d97706", opacity: 0.7 },
+        itemStyle: { color: C.verify, opacity: 0.7 },
       });
     }
     series.push({
@@ -899,14 +1016,14 @@
       type: "line",
       data: [[lo, lo], [hi, hi]],
       symbol: "none",
-      lineStyle: { color: "#94a3b8", type: "dashed", width: 1 },
+      lineStyle: { color: C.identity, type: "dashed", width: 1 },
       silent: true,
       tooltip: { show: false },
     });
 
     var option = {
       animation: true,
-      color: ["#1e40af", "#d97706"],
+      color: [C.train, C.verify],
       tooltip: {
         trigger: "item",
         formatter: function (params) {
@@ -924,6 +1041,7 @@
       legend: {
         data: [I18N.t("detailTrain"), I18N.t("detailVerify"), I18N.t("detailIdentity")],
         top: 8,
+        textStyle: { color: C.chartText },
       },
       grid: { left: 56, right: 24, top: 48, bottom: 64 },
       xAxis: {
@@ -933,8 +1051,10 @@
         max: hi,
         nameLocation: "middle",
         nameGap: 28,
-        axisLine: { lineStyle: { color: "#cbd5e1" } },
-        splitLine: { lineStyle: { color: "#e2e8f0" } },
+        nameTextStyle: { color: C.chartText },
+        axisLabel: { color: C.chartText },
+        axisLine: { lineStyle: { color: C.axis } },
+        splitLine: { lineStyle: { color: C.grid } },
       },
       yAxis: {
         name: I18N.t("detailTrue"),
@@ -943,8 +1063,10 @@
         max: hi,
         nameLocation: "middle",
         nameGap: 40,
-        axisLine: { lineStyle: { color: "#cbd5e1" } },
-        splitLine: { lineStyle: { color: "#e2e8f0" } },
+        nameTextStyle: { color: C.chartText },
+        axisLabel: { color: C.chartText },
+        axisLine: { lineStyle: { color: C.axis } },
+        splitLine: { lineStyle: { color: C.grid } },
       },
       dataZoom: [
         { type: "inside" },
@@ -1153,6 +1275,29 @@
       if (state.result) { renderKpis(); renderModels(); }
     });
 
+    // theme
+    $("#btn-theme").addEventListener("click", cycleTheme);
+
+    // cite popover
+    $("#btn-cite").addEventListener("click", function (e) {
+      e.stopPropagation();
+      setCiteOpen($("#cite-popover").hidden);
+    });
+    document.addEventListener("click", function (e) {
+      var popover = $("#cite-popover");
+      if (popover.hidden) return;
+      var cite = $("#cite");
+      if (cite && !cite.contains(e.target)) setCiteOpen(false);
+    });
+    $("#btn-cite-copy").addEventListener("click", function () {
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText(CITATION_TEXT).then(function () {
+        var btn = $("#btn-cite-copy");
+        btn.textContent = I18N.t("citeCopied");
+        setTimeout(function () { btn.textContent = I18N.t("citeCopy"); }, 2000);
+      });
+    });
+
     // controls
     $("#sort-key").addEventListener("change", function (e) {
       state.sortKey = e.target.value;
@@ -1197,6 +1342,7 @@
       if (e.key === "Escape") {
         if (!$("#inspector-backdrop").hidden) closeInspector();
         else if (!$("#dialog-backdrop").hidden) closeDetail();
+        else if (!$("#cite-popover").hidden) setCiteOpen(false);
       }
     });
 
@@ -1216,6 +1362,22 @@
   function init() {
     bindEvents();
     window.addEventListener("resize", resizeChart);
+
+    // Restore the theme preference and follow the OS theme when set to "system".
+    try {
+      var p = window.localStorage && window.localStorage.getItem(THEME_STORAGE);
+      theme.preference = p === "light" || p === "dark" ? p : "system";
+    } catch (e) { /* ignore */ }
+    applyTheme();
+    if (window.matchMedia) {
+      var mq = window.matchMedia("(prefers-color-scheme: dark)");
+      var onSystemTheme = function () {
+        if (theme.preference === "system") applyTheme();
+      };
+      if (mq.addEventListener) mq.addEventListener("change", onSystemTheme);
+      else if (mq.addListener) mq.addListener(onSystemTheme);
+    }
+
     applyI18n();
     renderFileList();
     renderRunButton();
