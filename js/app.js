@@ -1415,6 +1415,20 @@
     return I18N.t(def.label) + " (" + I18N.t(whichKey) + ") " + (def.minimize ? "↓" : "↑");
   }
 
+  // Axis range that follows the actual data (with a little breathing room),
+  // instead of ECharts' forced-zero auto range.
+  function paretoAxisBounds(vals) {
+    var lo = Math.min.apply(null, vals);
+    var hi = Math.max.apply(null, vals);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+    if (lo === hi) {
+      var d = Math.abs(hi) * 0.05 || 1;
+      lo -= d; hi += d;
+    }
+    var pad = (hi - lo) * 0.05;
+    return { min: lo - pad, max: hi + pad };
+  }
+
   function renderPareto() {
     var res = state.result;
     if (!res || !res.verify) return;
@@ -1432,6 +1446,8 @@
     var allData = pts.map(function (p) { return { value: [p.x, p.y], rank: p.rank }; });
     var frontLine = front.map(function (p) { return [p.x, p.y]; });
     var frontData = front.map(function (p) { return { value: [p.x, p.y], rank: p.rank }; });
+    var xb = paretoAxisBounds(pts.map(function (p) { return p.x; }));
+    var yb = paretoAxisBounds(pts.map(function (p) { return p.y; }));
 
     state.paretoChart.setOption({
       animation: true,
@@ -1457,20 +1473,24 @@
       xAxis: {
         name: paretoAxisName(xDef, "detailTrain"),
         type: "value",
+        min: xb ? xb.min : undefined,
+        max: xb ? xb.max : undefined,
         nameLocation: "middle",
         nameGap: 28,
         nameTextStyle: { color: C.chartText },
-        axisLabel: { color: C.chartText, formatter: fmtTick, showMinLabel: false, showMaxLabel: false },
+        axisLabel: { color: C.chartText, formatter: fmtTick },
         axisLine: { lineStyle: { color: C.axis } },
         splitLine: { lineStyle: { color: C.grid } },
       },
       yAxis: {
         name: paretoAxisName(yDef, "detailVerify"),
         type: "value",
+        min: yb ? yb.min : undefined,
+        max: yb ? yb.max : undefined,
         nameLocation: "middle",
         nameGap: 44,
         nameTextStyle: { color: C.chartText },
-        axisLabel: { color: C.chartText, formatter: fmtTick, showMinLabel: false, showMaxLabel: false },
+        axisLabel: { color: C.chartText, formatter: fmtTick },
         axisLine: { lineStyle: { color: C.axis } },
         splitLine: { lineStyle: { color: C.grid } },
       },
