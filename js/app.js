@@ -451,12 +451,17 @@
       var list = $("#recent-list");
       if (!box || !list) return;
       var show = !!(rows && rows.length);
-      box.hidden = !show;
+      // Always show the panel so users know where saved projects live; an empty
+      // state explains what's going on instead of silently hiding everything.
+      box.hidden = false;
       var empty = $("#recent-empty");
-      if (empty) empty.hidden = show;
+      if (empty) {
+        empty.hidden = show;
+        if (!show) empty.textContent = I18N.t("recentEmpty");
+      }
       var viewUp = $("#view-upload");
       if (viewUp) viewUp.classList.toggle("has-recent", show);
-      if (!show) return;
+      if (!show) { list.innerHTML = ""; return; }
       list.innerHTML = "";
       rows.slice(0, 12).forEach(function (rec) {
         var li = el("li", "recent-item");
@@ -483,7 +488,17 @@
         li.appendChild(actions);
         list.appendChild(li);
       });
-    }).catch(function () { /* IndexedDB unavailable — hide the panel */ });
+    }).catch(function () {
+      // IndexedDB unavailable — show an explicit message instead of hiding the panel.
+      var box = $("#recent-box");
+      var empty = $("#recent-empty");
+      if (box) box.hidden = false;
+      if (empty) { empty.hidden = false; empty.textContent = I18N.t("recentUnavailable"); }
+      var list = $("#recent-list");
+      if (list) list.innerHTML = "";
+      var viewUp = $("#view-upload");
+      if (viewUp) viewUp.classList.remove("has-recent");
+    });
   }
 
   // ---------------------------------------------------------------------------
