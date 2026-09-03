@@ -21,172 +21,165 @@
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
-  <!-- Top bar -->
-  <header class="app-bar" role="banner">
-    <div class="app-bar__brand">
-      <svg class="app-bar__logo" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
-        <path d="M3 3v18h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-        <circle cx="8" cy="15" r="2.2" fill="currentColor"/>
-        <circle cx="13" cy="11" r="2.2" fill="currentColor"/>
-        <circle cx="17" cy="7" r="2.2" fill="currentColor"/>
-      </svg>
-      <span class="app-bar__title" data-i18n="appTitle">SISSO-Analyzer</span>
-      <span class="app-bar__subtitle" data-i18n="appSubtitle">Interactive explorer for SISSO regression results</span>
-    </div>
-    <div class="app-bar__actions">
-      <button type="button" class="btn btn--ghost" id="btn-reset" hidden data-i18n="reset">Load new results</button>
-      <button
-        type="button"
-        class="btn btn--ghost btn--lang"
-        id="btn-lang"
-        aria-label="Switch language"
-      >中 / EN</button>
-      <button
-        type="button"
-        class="btn btn--ghost btn--icon"
-        id="btn-theme"
-        aria-label="Switch theme"
-      ></button>
-      <div class="cite" id="cite">
-        <button
-          type="button"
-          class="btn btn--ghost btn--icon"
-          id="btn-cite"
-          data-i18n-title="citeTitle"
-          aria-label="Cite SISSO"
-          aria-expanded="false"
-        >
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <div class="shell">
+    <!-- Left full-height navigation (USPEX-Analyzer style) -->
+    <aside class="shell__nav" aria-label="Main navigation">
+      <div class="shell__brand">
+        <svg class="shell__logo" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+          <path d="M3 3v18h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="8" cy="15" r="2.2" fill="currentColor"/>
+          <circle cx="13" cy="11" r="2.2" fill="currentColor"/>
+          <circle cx="17" cy="7" r="2.2" fill="currentColor"/>
+        </svg>
+        <span class="shell__brand-name" data-i18n="appTitle">SISSO-Analyzer</span>
+      </div>
+
+      <div class="nav-summary" id="kpi-strip" aria-label="Run summary"></div>
+
+      <nav class="nav-menu" aria-label="Pages">
+        <button type="button" class="nav-item is-active" id="btn-nav-home">
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+            <path d="M3 10.5 12 3l9 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M5 9.5V21h14V9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
+          <span data-i18n="navHome">Load results</span>
         </button>
-        <div class="cite__popover" id="cite-popover" hidden role="dialog" aria-label="Cite SISSO">
-          <div class="cite__header">
-            <span class="cite__title" data-i18n="citeTitle">Cite SISSO</span>
-            <button type="button" class="btn btn--ghost btn--sm" id="btn-cite-copy" data-i18n="citeCopy">Copy citation</button>
+        <div class="nav-sep" aria-hidden="true"></div>
+        <button type="button" class="nav-item" id="view-table-btn" disabled>
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+            <path d="M3 10h18M9 4v16" fill="none" stroke="currentColor" stroke-width="2"/>
+          </svg>
+          <span data-i18n="viewTable">Table</span>
+        </button>
+        <button type="button" class="nav-item" id="view-grid-btn" disabled>
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+            <circle cx="8.5" cy="8.5" r="1.6" fill="currentColor"/>
+            <path d="M21 15l-5-5L5 21" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+          </svg>
+          <span data-i18n="viewGrid">Thumbnails</span>
+        </button>
+        <button type="button" class="nav-item" id="view-pareto-btn" disabled>
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+            <path d="M4 19h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M6 19V9M11 19V5M16 19v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <span data-i18n="viewPareto">Pareto</span>
+        </button>
+      </nav>
+    </aside>
+
+    <div class="shell__main">
+      <!-- Top bar -->
+      <header class="app-bar" role="banner">
+        <div class="app-bar__context" id="app-context" hidden></div>
+        <div class="app-bar__spacer"></div>
+        <div class="app-bar__actions">
+          <button type="button" class="btn btn--ghost" id="btn-reset" hidden data-i18n="reset">Load new results</button>
+          <button
+            type="button"
+            class="btn btn--ghost btn--lang"
+            id="btn-lang"
+            aria-label="Switch language"
+          >中 / EN</button>
+          <button
+            type="button"
+            class="btn btn--ghost btn--icon"
+            id="btn-theme"
+            aria-label="Switch theme"
+          ></button>
+          <div class="cite" id="cite">
+            <button
+              type="button"
+              class="btn btn--ghost btn--icon"
+              id="btn-cite"
+              data-i18n-title="citeTitle"
+              aria-label="Cite SISSO"
+              aria-expanded="false"
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <div class="cite__popover" id="cite-popover" hidden role="dialog" aria-label="Cite SISSO">
+              <div class="cite__header">
+                <span class="cite__title" data-i18n="citeTitle">Cite SISSO</span>
+                <button type="button" class="btn btn--ghost btn--sm" id="btn-cite-copy" data-i18n="citeCopy">Copy citation</button>
+              </div>
+              <p class="cite__intro" data-i18n="citeIntro">If this tool helps your research, please cite SISSO:</p>
+              <blockquote class="cite__ref" id="cite-ref">
+                R. Ouyang, S. Curtarolo, E. Ahmetcik, M. Scheffler, and L. M. Ghiringhelli, Phys. Rev. Mater. 2, 083802 (2018).
+              </blockquote>
+              <a class="cite__link" href="https://github.com/rouyang2017/SISSO" target="_blank" rel="noopener noreferrer">
+                SISSO →
+              </a>
+            </div>
           </div>
-          <p class="cite__intro" data-i18n="citeIntro">If this tool helps your research, please cite SISSO:</p>
-          <blockquote class="cite__ref" id="cite-ref">
-            R. Ouyang, S. Curtarolo, E. Ahmetcik, M. Scheffler, and L. M. Ghiringhelli, Phys. Rev. Mater. 2, 083802 (2018).
-          </blockquote>
-          <a class="cite__link" href="https://github.com/rouyang2017/SISSO" target="_blank" rel="noopener noreferrer">
-            SISSO →
+          <a
+            class="btn btn--ghost btn--icon"
+            href="https://chen121760.github.io/"
+            target="_blank"
+            rel="noopener noreferrer"
+            data-i18n-title="contactAuthor"
+            aria-label="Contact author"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="12" cy="7" r="4" fill="none" stroke="currentColor" stroke-width="2"/>
+            </svg>
           </a>
         </div>
-      </div>
-      <a
-        class="btn btn--ghost btn--icon"
-        href="https://chen121760.github.io/"
-        target="_blank"
-        rel="noopener noreferrer"
-        data-i18n-title="contactAuthor"
-        aria-label="Contact author"
-      >
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          <circle cx="12" cy="7" r="4" fill="none" stroke="currentColor" stroke-width="2"/>
-        </svg>
-      </a>
-    </div>
-  </header>
+      </header>
 
-  <main id="main" class="main">
-    <!-- Upload view -->
-    <section id="view-upload" class="view view--upload" aria-labelledby="upload-title">
-      <div class="upload-layout">
-        <div class="upload-card">
-          <h1 class="upload-card__title" id="upload-title" data-i18n="uploadTitle">Load SISSO results</h1>
-        <div
-          class="dropzone"
-          id="dropzone"
-          role="button"
-          tabindex="0"
-          aria-label="Drop result files here or click to browse"
-        >
-          <svg class="dropzone__icon" viewBox="0 0 24 24" width="40" height="40" aria-hidden="true">
-            <path d="M12 16V4m0 0L7 9m5-5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-          <p class="dropzone__hint" data-i18n="uploadHint">Drop the result files here, or click to browse. You can also select the whole run folder.</p>
-          <div class="dropzone__actions">
-            <button type="button" class="btn btn--primary" id="btn-browse" data-i18n="browseFiles">Browse files</button>
-            <button type="button" class="btn btn--secondary" id="btn-folder" data-i18n="browseFolder">Select folder</button>
+      <main id="main" class="main">
+        <!-- Upload view -->
+        <section id="view-upload" class="view view--upload" aria-labelledby="upload-title">
+          <div class="upload-layout">
+            <div class="upload-card">
+              <h1 class="upload-card__title" id="upload-title" data-i18n="uploadTitle">Load SISSO results</h1>
+              <div
+                class="dropzone"
+                id="dropzone"
+                role="button"
+                tabindex="0"
+                aria-label="Drop result files here or click to browse"
+              >
+                <svg class="dropzone__icon" viewBox="0 0 24 24" width="40" height="40" aria-hidden="true">
+                  <path d="M12 16V4m0 0L7 9m5-5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                <p class="dropzone__hint" data-i18n="uploadHint">Drop the result files here, or click to browse. You can also select the whole run folder.</p>
+                <div class="dropzone__actions">
+                  <button type="button" class="btn btn--primary" id="btn-browse" data-i18n="browseFiles">Browse files</button>
+                  <button type="button" class="btn btn--secondary" id="btn-folder" data-i18n="browseFolder">Select folder</button>
+                </div>
+                <input type="file" id="input-files" multiple hidden />
+                <input type="file" id="input-folder" webkitdirectory hidden />
+              </div>
+
+              <ul class="file-list" id="file-list" aria-live="polite"></ul>
+
+              <p class="upload-card__note" data-i18n="verifyOptionalNote">
+                verify.dat is optional — if omitted, only train metrics are shown.
+              </p>
+
+              <div class="upload-card__run">
+                <button type="button" class="btn btn--primary btn--run" id="btn-run" disabled data-i18n="run">Analyze</button>
+              </div>
+            </div>
+
+            <section class="recent" id="recent-box" aria-labelledby="recent-title" hidden>
+              <h2 class="recent__title" id="recent-title" data-i18n="recentTitle">Saved projects</h2>
+              <p class="recent__empty" id="recent-empty" hidden data-i18n="recentEmpty"></p>
+              <ul class="recent__list" id="recent-list"></ul>
+            </section>
           </div>
-          <input type="file" id="input-files" multiple hidden />
-          <input type="file" id="input-folder" webkitdirectory hidden />
-        </div>
-
-        <ul class="file-list" id="file-list" aria-live="polite"></ul>
-
-        <p class="upload-card__note" data-i18n="verifyOptionalNote">
-          verify.dat is optional — if omitted, only train metrics are shown.
-        </p>
-
-          <div class="upload-card__run">
-            <button type="button" class="btn btn--primary btn--run" id="btn-run" disabled data-i18n="run">Analyze</button>
-          </div>
-        </div>
-
-        <section class="recent" id="recent-box" aria-labelledby="recent-title" hidden>
-          <h2 class="recent__title" id="recent-title" data-i18n="recentTitle">Saved projects</h2>
-          <p class="recent__empty" id="recent-empty" hidden data-i18n="recentEmpty"></p>
-          <ul class="recent__list" id="recent-list"></ul>
         </section>
-      </div>
-    </section>
 
-    <!-- Results view -->
-    <section id="view-results" class="view view--results" hidden aria-label="Results">
-      <div class="results">
-        <aside class="results__side" aria-label="Results sidebar">
-          <div class="side-card">
-            <h2 class="side-card__title" data-i18n="sideSummary">Run summary</h2>
-            <div class="side-kpis" id="kpi-strip" aria-label="Run summary"></div>
-          </div>
-          <div class="side-card">
-            <h2 class="side-card__title" data-i18n="sideView">View</h2>
-            <nav class="side-nav" aria-label="View mode">
-              <button type="button" class="side-nav__btn is-active" id="view-table-btn">
-                <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
-                  <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
-                  <path d="M3 10h18M9 4v16" fill="none" stroke="currentColor" stroke-width="2"/>
-                </svg>
-                <span data-i18n="viewTable">Table</span>
-              </button>
-              <button type="button" class="side-nav__btn" id="view-grid-btn">
-                <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
-                  <rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
-                  <circle cx="8.5" cy="8.5" r="1.6" fill="currentColor"/>
-                  <path d="M21 15l-5-5L5 21" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
-                </svg>
-                <span data-i18n="viewGrid">Thumbnails</span>
-              </button>
-              <button type="button" class="side-nav__btn" id="view-pareto-btn">
-                <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
-                  <path d="M4 19h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                  <path d="M6 19V9M11 19V5M16 19v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                </svg>
-                <span data-i18n="viewPareto">Pareto</span>
-              </button>
-            </nav>
-          </div>
-
-          <div class="side-card">
-            <h2 class="side-card__title" data-i18n="toolbarData">Data</h2>
-            <nav class="side-nav">
-              <button type="button" class="side-nav__btn" id="btn-export">
-                <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
-                  <path d="M12 3v12m0 0l-4-4m4 4l4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="M4 17v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                </svg>
-                <span data-i18n="exportCsv">Export CSV</span>
-              </button>
-            </nav>
-          </div>
-        </aside>
-
-        <div class="results__main">
+        <!-- Results view -->
+        <section id="view-results" class="view view--results" hidden aria-label="Results">
           <div id="warning" class="warning" role="status" hidden></div>
 
           <div class="toolbar">
@@ -243,10 +236,10 @@
           </div>
 
           <p class="empty-state" id="empty-state" data-i18n="emptyGrid" hidden>No models to display.</p>
-        </div>
-      </div>
-    </section>
-  </main>
+        </section>
+      </main>
+    </div>
+  </div>
 
   <!-- Detail dialog -->
   <div class="dialog-backdrop" id="dialog-backdrop" hidden>

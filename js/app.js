@@ -947,12 +947,40 @@
   // ---------------------------------------------------------------------------
   // Results rendering
   // ---------------------------------------------------------------------------
+  // Left-nav state: upload ("Load results") vs. loaded run + sub-views.
+  function setNavState(hasResults) {
+    var t = $("#view-table-btn"), g = $("#view-grid-btn"), p = $("#view-pareto-btn");
+    var home = $("#btn-nav-home");
+    if (hasResults) {
+      document.body.classList.add("has-results");
+      if (home) home.classList.remove("is-active");
+      if (t) t.disabled = false;
+      if (g) g.disabled = false;
+      if (p) p.disabled = false; // verify gating happens in renderControls
+    } else {
+      document.body.classList.remove("has-results");
+      if (home) home.classList.add("is-active");
+      [t, g, p].forEach(function (b) {
+        if (b) { b.disabled = true; b.classList.remove("is-active"); }
+      });
+    }
+  }
+
   function showResults() {
     $("#view-upload").hidden = true;
     $("#view-results").hidden = false;
     $("#btn-reset").hidden = false;
+    setNavState(true);
 
     var res = state.result;
+    var ctx = $("#app-context");
+    if (ctx) {
+      var label = res.meta.targetName || "";
+      if (res.meta.sissoIn && res.meta.sissoIn.descDim !== null) label += " · " + res.meta.sissoIn.descDim + "D";
+      ctx.textContent = label;
+      ctx.hidden = !label;
+    }
+
     if (res.meta.validationNote === "in-sample") {
       var w = $("#warning");
       w.textContent = I18N.t("inSampleWarning");
@@ -2114,46 +2142,6 @@
   }
 
   // ---------------------------------------------------------------------------
-  // CSV export
-  // ---------------------------------------------------------------------------
-  function exportCsv() {
-    var res = state.result;
-    var vis = visibleModels();
-    var header = [
-      "rank", "formula", "feature_ids",
-      "RMSE_sisso", "MaxAE_sisso",
-      "RMSE_train", "MaxAE_train", "R2_train", "rho_train",
-      "RMSE_verify", "MaxAE_verify", "R2_verify", "rho_verify",
-    ];
-    var lines = [header.join(",")];
-    vis.list.slice(0, vis.shown).forEach(function (m) {
-      var row = [
-        m.rank,
-        '"' + m.formulaOriginal.replace(/"/g, '""') + '"',
-        '"' + m.featureIds.join(" ") + '"',
-        m.rmseSisso,
-        m.maxaeSisso,
-        m.metricsTrain.rmse,
-        m.metricsTrain.maxae,
-        m.metricsTrain.r2,
-        m.metricsTrain.rho,
-        m.metricsVerify ? m.metricsVerify.rmse : "",
-        m.metricsVerify ? m.metricsVerify.maxae : "",
-        m.metricsVerify ? m.metricsVerify.r2 : "",
-        m.metricsVerify ? m.metricsVerify.rho : "",
-      ];
-      lines.push(row.join(","));
-    });
-    var blob = new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "models.csv";
-    a.click();
-    URL.revokeObjectURL(a.href);
-    toast(I18N.t("exported"));
-  }
-
-  // ---------------------------------------------------------------------------
   // Event wiring
   // ---------------------------------------------------------------------------
   function bindEvents() {
@@ -2227,7 +2215,7 @@
       }
     });
 
-    // run / reset
+    // run / reset / home nav
     $("#btn-run").addEventListener("click", run);
     $("#btn-reset").addEventListener("click", function () {
       state.files = {};
@@ -2240,9 +2228,15 @@
       $("#view-results").hidden = true;
       $("#view-upload").hidden = false;
       $("#btn-reset").hidden = true;
+      var ctx = $("#app-context");
+      if (ctx) ctx.hidden = true;
+      setNavState(false);
       renderFileList();
       renderRunButton();
       renderRecentList();
+    });
+    $("#btn-nav-home").addEventListener("click", function () {
+      if (state.result) $("#btn-reset").click();
     });
 
     // language
@@ -2335,7 +2329,6 @@
       renderControls();
       renderPareto();
     });
-    $("#btn-export").addEventListener("click", exportCsv);
 
     // color-by-parameter on the detail scatter plot
     $("#color-key").addEventListener("change", function (e) {

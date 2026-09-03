@@ -22,7 +22,7 @@ Pure client-side — nothing is uploaded to a server; all parsing and computatio
 - Upload the optional `SISSO.in` to show run cards: feature count (`nsf`), descriptor dimension (`desc_dim`) and complexity (`fcomplexity`).
 - Every run is auto-saved to the browser's project history and can be reopened anytime — no
   need to re-upload the run folder.
-- CSV export, English / Chinese UI, and light / dark theme.
+- English / Chinese UI, light / dark theme, and a left-navigation shell layout (USPEX-Analyzer style).
 
 ## Run locally
 

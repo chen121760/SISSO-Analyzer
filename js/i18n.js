@@ -46,6 +46,7 @@
       stepParsing: "Parsing SISSO outputs…",
       stepEvaluating: "Evaluating {n} models…",
       reset: "Load new results",
+      navHome: "Load results",
 
       // project save / load
       saveProject: "Save project",
@@ -194,6 +195,7 @@
       stepParsing: "正在解析 SISSO 输出…",
       stepEvaluating: "正在评估 {n} 个模型…",
       reset: "载入新结果",
+      navHome: "载入结果",
 
       saveProject: "保存项目",
       loadProject: "载入项目…",
