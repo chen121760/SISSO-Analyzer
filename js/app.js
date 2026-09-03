@@ -330,7 +330,8 @@
     else state.projectId = p.id;
     p.name = projectTitle(p);
 
-    // 1) download as a portable .json file
+    // 1) download as a portable .json file (works everywhere)
+    var downloaded = false;
     try {
       var blob = new Blob([JSON.stringify(p, null, 2)], { type: "application/json" });
       var a = document.createElement("a");
@@ -338,11 +339,21 @@
       a.download = (p.name.replace(/[^\w\u4e00-\u9fa5-]+/g, "_") || "sisso_project") + ".sisso.json";
       a.click();
       setTimeout(function () { URL.revokeObjectURL(a.href); }, 0);
-    } catch (e) { /* still try to store locally */ }
+      downloaded = true;
+    } catch (e) {
+      console.warn("project download failed:", e);
+    }
 
-    // 2) keep it in the browser's recent list (IndexedDB)
-    dbPut(p).then(renderRecentList).catch(function () {});
-    toast(I18N.t("savedOk"));
+    // 2) keep it in the browser's recent list (IndexedDB). Failures are
+    //    reported instead of being silently swallowed.
+    dbPut(p).then(function () {
+      renderRecentList();
+      toast(I18N.t("savedOk"));
+    }).catch(function (err) {
+      console.warn("IndexedDB save failed:", err);
+      renderRecentList();
+      toast(downloaded ? I18N.t("savedFileOnly") : I18N.t("errProject"));
+    });
   }
 
   function loadProjectFile(file) {
@@ -1666,6 +1677,7 @@
       $("#btn-reset").hidden = true;
       renderFileList();
       renderRunButton();
+      renderRecentList();
     });
 
     // project save / load
