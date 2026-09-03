@@ -334,13 +334,18 @@
       nTrain: res.meta.nTrain || 0,
       nFeatures: res.meta.nFeatures || 0,
       dim: info && info.descDim !== null ? info.descDim : null,
+      complexity: info && info.fcomplexity !== null ? info.fcomplexity : null,
+      features: (info && info.nsf !== null ? info.nsf : res.meta.nFeatures) || 0,
       files: files,
     };
   }
 
   function projectTitle(p) {
     var name = p && p.targetName ? p.targetName : "SISSO project";
-    if (p && p.dim !== null && p.dim !== undefined) name += " (" + p.dim + "D)";
+    var tag = [];
+    if (p && p.dim !== null && p.dim !== undefined) tag.push(p.dim + "D");
+    if (p && p.complexity !== null && p.complexity !== undefined) tag.push("C" + p.complexity);
+    if (tag.length) name += " (" + tag.join(" ") + ")";
     return name;
   }
 
@@ -466,12 +471,16 @@
       rows.slice(0, 12).forEach(function (rec) {
         var li = el("li", "recent-item");
         var wrap = el("div");
-        wrap.appendChild(el("div", "recent-item__name", rec.name || rec.targetName || "SISSO project"));
-        var metaText = I18N.format("recentMeta", {
+        wrap.appendChild(el("div", "recent-item__name", rec.targetName || rec.name || "SISSO project"));
+        var summaryParts = [];
+        if (rec.dim !== null && rec.dim !== undefined) summaryParts.push(rec.dim + "D");
+        if (rec.complexity !== null && rec.complexity !== undefined) summaryParts.push("C" + rec.complexity);
+        if (rec.features !== null && rec.features !== undefined) summaryParts.push(rec.features + " " + I18N.t("kpiFeatures"));
+        summaryParts.push(I18N.format("recentMeta", {
           n: rec.nModels != null ? rec.nModels : "-",
           time: fmtSavedTime(rec.savedAt),
-        });
-        wrap.appendChild(el("div", "recent-item__meta", metaText));
+        }));
+        wrap.appendChild(el("div", "recent-item__meta", summaryParts.join(" · ")));
         li.appendChild(wrap);
 
         var actions = el("div", "recent-item__actions");
