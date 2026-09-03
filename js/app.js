@@ -244,22 +244,6 @@
     return s === "-0" ? "0" : s;
   }
 
-  // Snap [lo, hi] outward to round boundaries (≈5 nice intervals) so the ticks
-  // at the four corners of the plot read clean values (-8, -4, 0, …) instead
-  // of full-precision floats.
-  function niceAxisBounds(lo, hi) {
-    var span = hi - lo;
-    if (!(span > 0) || !Number.isFinite(span)) return { min: lo, max: hi };
-    var mag = Math.pow(10, Math.floor(Math.log10(span / 5)));
-    var norm = (span / 5) / mag;
-    var nice = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
-    var step = nice * mag;
-    return {
-      min: Math.floor(lo / step - 1e-9) * step,
-      max: Math.ceil(hi / step + 1e-9) * step,
-    };
-  }
-
   // ---------------------------------------------------------------------------
   // File classification
   // ---------------------------------------------------------------------------
@@ -1032,7 +1016,6 @@
     if (lo === hi) { lo -= 1; hi += 1; }
     var padSpan = (hi - lo) * 0.06;
     lo -= padSpan; hi += padSpan;
-    var bounds = niceAxisBounds(lo, hi);
 
     var series = [{
       name: I18N.t("detailTrain"),
@@ -1089,24 +1072,24 @@
       xAxis: {
         name: I18N.t("detailPredicted"),
         type: "value",
-        min: bounds.min,
-        max: bounds.max,
+        min: lo,
+        max: hi,
         nameLocation: "middle",
         nameGap: 28,
         nameTextStyle: { color: C.chartText },
-        axisLabel: { color: C.chartText, formatter: fmtTick },
+        axisLabel: { color: C.chartText, formatter: fmtTick, showMinLabel: false, showMaxLabel: false },
         axisLine: { lineStyle: { color: C.axis } },
         splitLine: { lineStyle: { color: C.grid } },
       },
       yAxis: {
         name: I18N.t("detailTrue"),
         type: "value",
-        min: bounds.min,
-        max: bounds.max,
+        min: lo,
+        max: hi,
         nameLocation: "middle",
         nameGap: 40,
         nameTextStyle: { color: C.chartText },
-        axisLabel: { color: C.chartText, formatter: fmtTick },
+        axisLabel: { color: C.chartText, formatter: fmtTick, showMinLabel: false, showMaxLabel: false },
         axisLine: { lineStyle: { color: C.axis } },
         splitLine: { lineStyle: { color: C.grid } },
       },
