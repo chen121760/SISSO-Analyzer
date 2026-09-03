@@ -1,6 +1,6 @@
-# SISSO Viewer
+# SISSO-Analyzer
 
-Interactive web explorer for [SISSO](https://github.com/rouyang2017/SISSO) regression results.
+Interactive web analyzer for [SISSO](https://github.com/rouyang2017/SISSO) regression results.
 Pure client-side — nothing is uploaded to a server; all parsing and computation runs in the
 browser. Works offline and deploys directly to GitHub Pages.
 
@@ -27,10 +27,10 @@ No build step. Serve the folder with any static server:
 
 ```bash
 # Python
-python -m http.server 8080 --directory sisso-viewer
+python -m http.server 8080 --directory sisso-analyzer
 
 # Node
-npx serve sisso-viewer
+npx serve sisso-analyzer
 ```
 
 Then open http://localhost:8080.
@@ -42,9 +42,9 @@ Then open http://localhost:8080.
 
 ## Deploy to GitHub Pages
 
-1. Push the `sisso-viewer/` folder to a GitHub repository.
+1. Push the `sisso-analyzer/` folder to a GitHub repository.
 2. In the repo, enable GitHub Pages and point it at the branch / folder that contains
-   `index.html` (for example, the repo root if you push the contents of `sisso-viewer/`
+   `index.html` (for example, the repo root if you push the contents of `sisso-analyzer/`
    directly, or use `/docs`).
 
 Because the app is 100% static, it needs no backend.

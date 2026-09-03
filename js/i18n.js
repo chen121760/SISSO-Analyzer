@@ -9,8 +9,8 @@
 
   var strings = {
     en: {
-      appTitle: "SISSO Viewer",
-      appSubtitle: "Interactive explorer for SISSO regression results",
+      appTitle: "SISSO-Analyzer",
+      appSubtitle: "Interactive analyzer for SISSO regression results",
 
       // upload
       uploadTitle: "Load SISSO results",
@@ -108,8 +108,8 @@
       closeDialog: "Close",
     },
     zh: {
-      appTitle: "SISSO 结果查看器",
-      appSubtitle: "SISSO 回归结果的交互式浏览工具",
+      appTitle: "SISSO-Analyzer",
+      appSubtitle: "SISSO 回归结果的交互式分析工具",
 
       uploadTitle: "载入 SISSO 结果",
       uploadHint: "将结果文件、整个文件夹或 .zip / .tar.gz 压缩包拖到这里，或点击浏览。",

@@ -1,5 +1,5 @@
 /*
- * app.js — SISSO Viewer UI.
+ * app.js — SISSO-Analyzer UI.
  *
  * Flow: upload files -> classify into roles -> run SissoCore.runPipeline ->
  * render KPI strip + sortable table + thumbnail grid -> detail dialog with an
@@ -869,7 +869,7 @@
       ],
       toolbox: {
         feature: {
-          saveAsImage: { title: I18N.t("detailExportPng"), name: "sisso_model_" + m.rank },
+          saveAsImage: { title: I18N.t("detailExportPng"), name: "sisso_analyzer_model_" + m.rank },
         },
         right: 12,
         top: 4,
