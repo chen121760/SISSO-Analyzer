@@ -59,6 +59,7 @@
       recentDelete: "Delete",
       recentMeta: "{n} models · {time}",
       projectFromSissoIn: "from SISSO.in",
+      complexityEstimated: "estimated from model features",
 
       // status
       inSampleWarning:
@@ -183,6 +184,7 @@
       recentDelete: "删除",
       recentMeta: "{n} 个模型 · {time}",
       projectFromSissoIn: "来自 SISSO.in",
+      complexityEstimated: "按模型特征估算",
 
       inSampleWarning:
         "verify.dat 与 train.dat 完全相同——verify 指标为样本内结果，并非留出验证。",

@@ -161,25 +161,70 @@
     var out = { nsample: null, nsf: null, descDim: null, fcomplexity: null, ptype: null };
     var lines = String(text).split(/\r?\n/);
     for (var i = 0; i < lines.length; i++) {
+      // strip comments: '!' (Fortran style) and '#' / '//' as tolerated extras
       var line = lines[i];
-      var bang = line.indexOf("!");
-      var core = (bang >= 0 ? line.slice(0, bang) : line).trim();
+      var cut = line.length;
+      var b1 = line.indexOf("!");
+      var b2 = line.indexOf("#");
+      if (b1 >= 0 && b1 < cut) cut = b1;
+      if (b2 >= 0 && b2 < cut) cut = b2;
+      var core = line.slice(0, cut).trim();
       if (!core) continue;
       var eq = core.indexOf("=");
       if (eq < 1) continue;
-      var key = core.slice(0, eq).trim().toLowerCase();
+      var key = core.slice(0, eq).trim().toLowerCase().replace(/^[^a-z0-9]+/, "");
       var val = core.slice(eq + 1).trim();
-      var nums = (val.match(/[+-]?\d+(?:\.\d+)?/g) || []).map(Number);
+      // accept numbers that may sit inside parens / comma lists / trailing ';'
+      var nums = (val.match(/[+-]?\d+(?:\.\d+)?(?:[de][+-]?\d+)?/gi) || [])
+        .map(function (s) { return parseFloat(s.replace(/[de]/i, "e")); });
       if (!nums.length) continue;
+      // SISSO renamed its keywords over versions, so accept the common aliases.
       switch (key) {
-        case "nsample": out.nsample = nums[0]; break;
-        case "nsf": out.nsf = nums[0]; break;
-        case "desc_dim": out.descDim = nums[0]; break;
-        case "fcomplexity": out.fcomplexity = nums[0]; break;
-        case "ptype": out.ptype = nums[0]; break;
+        case "nsample": case "n_sample": case "nsamples": case "nsets":
+          out.nsample = nums[0]; break;
+        case "nsf": case "n_features": case "nsf_":
+          out.nsf = nums[0]; break;
+        case "desc_dim": case "dimension": case "descriptor_dim":
+          out.descDim = nums[0]; break;
+        case "fcomplexity": case "maxcomplexity": case "complexity": case "n_rung":
+          out.fcomplexity = nums[0]; break;
+        case "ptype":
+          out.ptype = nums[0]; break;
       }
     }
     return out;
+  }
+
+  // Complexity fallback: when SISSO.in did not provide fcomplexity, estimate the
+  // feature-space complexity as the largest number of operators found in the
+  // Uspace expressions actually used by the top models.
+  function estimateMaxComplexity(uspaceText, usedIds) {
+    if (!uspaceText || !usedIds || !usedIds.size) return null;
+    var lines = String(uspaceText).split(/\r?\n/);
+    var maxC = null;
+    for (var i = 0; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      var id = i + 1;
+      if (!usedIds.has(id)) continue;
+      var idx = lines[i].indexOf("SIS_score");
+      var expr = (idx >= 0 ? lines[i].slice(0, idx) : lines[i]).trim();
+      var ops = expr.match(/(?:\bexp\b|\bsqrt\b|\bcbrt\b|\blog\b|\babs\b)|[+\-*/^]/g);
+      var c = ops ? ops.length : 0;
+      // a leading unary minus is not a binary operator
+      if (expr.charAt(0) === "-") c = Math.max(0, c - 1);
+      if (maxC === null || c > maxC) maxC = c;
+    }
+    return maxC;
+  }
+
+  function collectUsedFeatureIds(result) {
+    var set = new Set();
+    if (result && result.models) {
+      result.models.forEach(function (m) {
+        (m.featureIds || []).forEach(function (fid) { set.add(fid); });
+      });
+    }
+    return set;
   }
 
   // ---------------------------------------------------------------------------
@@ -820,8 +865,31 @@
     });
 
     state.result = Core.runPipeline(files);
-    state.result.meta.sissoIn =
-      roleTexts.sissoin !== undefined ? parseSissoIn(roleTexts.sissoin) : null;
+
+    // Enrich the run metadata with SISSO.in settings, with safe fallbacks so
+    // the dimension / complexity cards still show when SISSO.in is missing or
+    // uses an older keyword:
+    //  - dimension  <- desc_dim (SISSO.in), else from the top file name (top2D00)
+    //  - complexity <- fcomplexity (SISSO.in), else estimated from the used
+    //                  Uspace feature expressions (# of operators)
+    var info = roleTexts.sissoin !== undefined ? parseSissoIn(roleTexts.sissoin) : null;
+    if (!info) {
+      info = { nsample: null, nsf: null, descDim: null, fcomplexity: null, ptype: null };
+    }
+    var topName = state.files.top ? String(state.files.top.name) : "";
+    var mDim = /^top\s*(\d+)\s*D/i.exec(topName);
+    if (info.descDim === null && mDim) {
+      info.descDim = parseInt(mDim[1], 10);
+      info.descDimFromName = true;
+    }
+    if (info.fcomplexity === null) {
+      var est = estimateMaxComplexity(roleTexts.uspace, collectUsedFeatureIds(state.result));
+      if (est !== null) {
+        info.fcomplexity = est;
+        info.cplxEstimated = true;
+      }
+    }
+    state.result.meta.sissoIn = info;
     state.sortKey = "rank";
     state.sortAsc = true;
     state.loadAll = false;
@@ -870,9 +938,15 @@
     } else {
       kpis.push([I18N.t("kpiFeatures"), res.meta.nFeatures]);
     }
-    // Dimension & complexity come from SISSO.in (desc_dim / fcomplexity).
-    if (info && info.descDim !== null) kpis.push([I18N.t("kpiDim"), info.descDim, fromIn]);
-    if (info && info.fcomplexity !== null) kpis.push([I18N.t("kpiComplexity"), info.fcomplexity, fromIn]);
+    // Dimension & complexity: SISSO.in (desc_dim / fcomplexity) when available,
+    // with fallbacks from the top-file name and the used feature expressions.
+    if (info && info.descDim !== null) {
+      kpis.push([I18N.t("kpiDim"), info.descDim, info.descDimFromName ? "" : fromIn]);
+    }
+    if (info && info.fcomplexity !== null) {
+      kpis.push([I18N.t("kpiComplexity"), info.fcomplexity,
+        info.cplxEstimated ? I18N.t("complexityEstimated") : fromIn]);
+    }
 
     // best rho (lowest = most negative correlation, or highest |rho|? show min rho by magnitude)
     var bestRho = null;
