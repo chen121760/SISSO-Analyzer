@@ -11,3 +11,6 @@ SIS_subspaces/
 SISSO.in
 SISSO.out
 *.dat
+
+# Local SISSO run instances (example output folders kept outside the repo)
+dontUpdate/
