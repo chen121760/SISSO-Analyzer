@@ -351,6 +351,32 @@ html, body {
 .upload-card__run { margin-top: 22px; display: flex; }
 .upload-card__run .btn { width: 100%; min-height: 46px; font-size: 15px; font-weight: 700; letter-spacing: 0.02em; }
 
+/* Example-model banner at the top of the upload card (above the dropzone) */
+.upload-card__demo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 22px;
+  padding: 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--color-secondary) 24%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--color-secondary) 7%, var(--color-surface));
+}
+.demo__icon { color: var(--color-secondary); flex-shrink: 0; }
+.demo__title {
+  margin: 0;
+  flex: 1 1 auto;
+  font-weight: 650;
+  font-size: 15px;
+  color: var(--color-foreground);
+}
+.demo__btn { flex-shrink: 0; }
+@media (max-width: 640px) {
+  .upload-card__demo { flex-wrap: wrap; }
+  .demo__title { flex-basis: calc(100% - 32px); }
+  .demo__btn { width: 100%; }
+}
+
 /* ---------- Saved projects (recent) — right-hand panel ---------- */
 .recent {
   background: var(--color-surface);

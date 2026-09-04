@@ -692,6 +692,51 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Built-in example demo ("try the model" without any upload)
+  // ---------------------------------------------------------------------------
+  // DEMO_DATA (js/demo-data.js) holds the sanitized example run as strings;
+  // we rebuild File objects and feed them through the exact upload pipeline so
+  // a demo behaves like a real analysis (auto-saved to recent projects too).
+  var DEMO_DEFS = [
+    { role: "train", key: "train", file: "train.dat" },
+    { role: "verify", key: "verify", file: "verify.dat" },
+    { role: "uspace", key: "uspace", file: "Uspace.expressions" },
+    { role: "top", key: "top", file: "top0232_D001" },
+    { role: "coeff", key: "coeff", file: "top0232_D001_coeff" },
+    { role: "sissoin", key: "sissoin", file: "SISSO.in" },
+    { role: "sissoout", key: "sissoout", file: "SISSO.out" },
+  ];
+
+  function loadDemo() {
+    var data = window.DEMO_DATA;
+    if (!data) { toast(I18N.t("demoErr")); return; }
+    var btn = $("#btn-demo");
+    if (btn) setButtonLoading(btn, true, I18N.t("demoLoading"));
+    // Let the spinner paint before the (synchronous-heavy) analysis starts.
+    setTimeout(function () {
+      try {
+        state.files = {};
+        DEMO_DEFS.forEach(function (def) {
+          if (data[def.key] === undefined) return;
+          state.files[def.role] = {
+            name: def.file,
+            file: new File([data[def.key]], def.file, { type: "text/plain" }),
+          };
+        });
+        renderFileList();
+        renderRunButton();
+        run().then(function () {
+          if (btn) setButtonLoading(btn, false);
+        });
+      } catch (err) {
+        console.error(err);
+        toast(I18N.t("demoErr"));
+        if (btn) setButtonLoading(btn, false);
+      }
+    }, 30);
+  }
+
+  // ---------------------------------------------------------------------------
   // Archive & folder extraction
   // ---------------------------------------------------------------------------
   var ARCHIVE_RE = /\.(zip|tar\.gz|tgz|tar|gz)$/i;
@@ -3212,6 +3257,13 @@
 
     // run / reset / home nav
     $("#btn-run").addEventListener("click", run);
+    $("#btn-demo").addEventListener("click", loadDemo);
+    // If the demo payload is missing (e.g. deployment without demo-data.js),
+    // hide the demo strip so no dead button is shown.
+    if (!window.DEMO_DATA) {
+      var demoPanel = $("#demo-panel");
+      if (demoPanel) demoPanel.hidden = true;
+    }
     $("#btn-reset").addEventListener("click", function () {
       state.files = {};
       state.texts = {};

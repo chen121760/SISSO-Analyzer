@@ -43,6 +43,12 @@
       run: "Analyze",
       analyzing: "Analyzing…",
       rendering: "Rendering models…",
+
+      // example demo (built-in run, no upload needed)
+      demoTitle: "No data handy? Try the example model",
+      demoBtn: "Load example model",
+      demoLoading: "Loading…",
+      demoErr: "The example model could not be loaded.",
       stepReading: "Reading files…",
       stepParsing: "Parsing SISSO outputs…",
       stepEvaluating: "Evaluating {n} models…",
@@ -243,6 +249,12 @@
       run: "开始分析",
       analyzing: "分析中…",
       rendering: "正在渲染模型…",
+
+      // example demo (内置示例运行，无需上传)
+      demoTitle: "没有自己的数据？一键试试示例模型",
+      demoBtn: "载入示例模型",
+      demoLoading: "载入中…",
+      demoErr: "示例模型载入失败。",
       stepReading: "正在读取文件…",
       stepParsing: "正在解析 SISSO 输出…",
       stepEvaluating: "正在评估 {n} 个模型…",

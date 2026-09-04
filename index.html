@@ -145,6 +145,16 @@
             <div class="upload-card">
               <h1 class="upload-card__title" id="upload-title" data-i18n="uploadTitle">Load SISSO results</h1>
               <p class="upload-card__subtitle" data-i18n="appSubtitle">Interactive analyzer for SISSO regression results</p>
+
+              <div class="upload-card__demo" id="demo-panel">
+                <svg class="demo__icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path d="M12 2 14.4 9.6 22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                  <circle cx="19" cy="4.5" r="1.4" fill="currentColor"/>
+                </svg>
+                <p class="demo__title" id="demo-title" data-i18n="demoTitle">No data handy? Try the example model</p>
+                <button type="button" class="btn btn--secondary demo__btn" id="btn-demo" data-i18n="demoBtn">Load example model</button>
+              </div>
+
               <div
                 class="dropzone"
                 id="dropzone"
@@ -332,6 +342,7 @@
   <script src="js/jszip.min.js"></script>
   <script src="js/i18n.js"></script>
   <script src="js/sisso-core.js"></script>
+  <script src="js/demo-data.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
