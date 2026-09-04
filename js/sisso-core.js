@@ -347,6 +347,71 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Unit (dimension) matrix — parsed from SISSO.out
+  //
+  // SISSO.out prints a block titled "Unit of input primary feature, each
+  // represented by a row vector:" followed by one row per input feature (in
+  // train.dat column order). Each row is a unit vector over the user-defined
+  // unit basis declared via funit= in SISSO.in. Features sharing the same
+  // vector share the same dimension ("the same class"); an all-zero vector
+  // means dimensionless.
+  // ---------------------------------------------------------------------------
+
+  var UNIT_BLOCK_RE = /Unit of input primary feature[\s\S]*?each represented by a row vector:\s*\n([\s\S]*?)(?=\n\s*[A-Za-z])/i;
+
+  function parseUnitMatrix(text) {
+    if (!text) return null;
+    var m = UNIT_BLOCK_RE.exec(String(text));
+    if (!m) return null;
+    var rows = [];
+    var block = m[1];
+    var lines = block.split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var t = lines[i].trim();
+      if (!t) continue;
+      var parts = t.split(/\s+/);
+      var row = [];
+      var ok = parts.length >= 1;
+      for (var j = 0; j < parts.length; j++) {
+        var v = parseFloat(parts[j]);
+        if (!isFinite(v)) { ok = false; break; }
+        row.push(v);
+      }
+      if (!ok || !row.length) break; // end of the numeric block
+      rows.push(row);
+    }
+    if (!rows.length) return null;
+    // All rows must share the same length (number of unit basis vectors).
+    var n = rows[0].length;
+    for (var k = 1; k < rows.length; k++) {
+      if (rows[k].length !== n) return null;
+    }
+    return rows;
+  }
+
+  // Group matrix rows by identical unit vector (rounded to 1e-6). Returns
+  // groups in order of first appearance: { key, vector, rows: [featureIndex] }.
+  function groupUnitRows(rows) {
+    var groups = [];
+    var byKey = {};
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var key = row.map(function (v) { return Math.round(v * 1e6); }).join(",");
+      if (!byKey[key]) {
+        byKey[key] = {
+          key: key,
+          vector: row.slice(),
+          rows: [],
+          dimensionless: row.every(function (v) { return Math.abs(v) < 1e-9; }),
+        };
+        groups.push(byKey[key]);
+      }
+      byKey[key].rows.push(i);
+    }
+    return groups;
+  }
+
+  // ---------------------------------------------------------------------------
   // Data file parsing
   // ---------------------------------------------------------------------------
 
@@ -538,5 +603,7 @@
     parseDataFile: parseDataFile,
     makeFeatureGetter: makeFeatureGetter,
     runPipeline: runPipeline,
+    parseUnitMatrix: parseUnitMatrix,
+    groupUnitRows: groupUnitRows,
   };
 });

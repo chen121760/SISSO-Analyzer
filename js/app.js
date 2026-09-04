@@ -24,7 +24,7 @@
     sortAsc: true,
     topN: 100,
     loadAll: false,
-    view: "table",  // "table" | "grid" | "pareto"
+    view: "table",  // "table" | "grid" | "pareto" | "units"
     chart: null,    // echarts instance
     currentModel: null,
     colorKey: "",   // "" = class colors; otherwise a column letter to color by
@@ -33,7 +33,21 @@
     paretoChart: null,  // echarts instance for the Pareto view
     paretoMode: "2d",   // "2d" | "3d"
     paretoZ: { metric: "r2", set: "train" },  // third objective (metric + dataset)
+    // table configuration (persisted)
+    hiddenCols: {},   // column id -> true when hidden from the table
+    // filters (per analysis; reset when a new run is analysed)
+    filter: {
+      active: false,
+      includeMode: "any",     // "any" | "only": model must contain at least one
+                              // included feature ("any") or only included ones
+                              // ("only")
+      include: null,          // Set<featureName> kept in the formula
+      exclude: null,          // Set<featureName> forbidden from the formula
+      numeric: {},            // column id -> { min: number|null, max: number|null }
+    },
   };
+
+  var COLS_PREF_KEY = "sisso-table-cols";
 
   // ---------------------------------------------------------------------------
   // Theme (system / light / dark) + citation data
@@ -159,6 +173,8 @@
       match: function (n) { return /^top.*D00/i.test(n) && !/_coeff/i.test(n); } },
     { role: "sissoin", i18n: "fileSissoIn", required: false, optional: true,
       match: function (n) { return /^SISSO\.in$/i.test(n); } },
+    { role: "sissoout", i18n: "fileSissoOut", required: false, optional: true,
+      match: function (n) { return /^SISSO\.out$/i.test(n); } },
   ];
 
   // Pareto metrics: label key + whether smaller-is-better.
@@ -309,7 +325,7 @@
 
   function defaultRoleFileName(role) {
     var names = { train: "train.dat", verify: "verify.dat", uspace: "Uspace.expressions",
-      coeff: "top1D00_coeff", top: "top1D00", sissoin: "SISSO.in" };
+      coeff: "top1D00_coeff", top: "top1D00", sissoin: "SISSO.in", sissoout: "SISSO.out" };
     return names[role] || (role + ".txt");
   }
 
@@ -439,8 +455,9 @@
       try {
         applyProject(rec, true);
         if (!state.result) return;
-        var want = saved.view === "grid" || saved.view === "pareto" ? saved.view : "table";
+        var want = saved.view === "grid" || saved.view === "pareto" || saved.view === "units" ? saved.view : "table";
         if (want === "pareto" && !state.result.verify) want = "table";
+        if (want === "units" && !(state.result.meta && state.result.meta.units)) want = "table";
         state.view = want;
         state.sortKey = (saved.sortKey || "rank") || "rank";
         state.sortAsc = saved.sortAsc !== false;
@@ -457,6 +474,7 @@
         populateColorSelect();
         renderModels();
         if (state.view === "pareto") renderPareto();
+        if (state.view === "units") renderUnits();
         persistSession();
       } catch (err) {
         console.warn("session restore failed:", err);
@@ -909,8 +927,83 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Pipeline run
+  // Unit (dimension) matrix — group train.dat features by their unit vector
   // ---------------------------------------------------------------------------
+  // unitRows: one row per feature column (train.dat order after name+target).
+  // featureNames: the original column names in the same order.
+  function buildUnitInfo(unitRows, featureNames) {
+    var nBasis = unitRows.length ? unitRows[0].length : 0;
+    var groups = Core.groupUnitRows(unitRows);
+
+    // Stable ordering: non-dimensionless groups keep first-appearance order
+    // (= funit basis order); the dimensionless (all-zero) group goes last.
+    var ordered = [];
+    var dimless = null;
+    groups.forEach(function (g) {
+      if (g.dimensionless) dimless = g;
+      else ordered.push(g);
+    });
+    if (dimless) ordered.push(dimless);
+
+    var nameToGroup = {};   // feature name -> group index
+    var groupMeta = ordered.map(function (g, gi) {
+      var members = g.rows.map(function (r) { return featureNames[r]; });
+      members.forEach(function (name) { nameToGroup[name] = gi; });
+      // Display range in 1-based feature numbering (matches SISSO.in funit).
+      var first = g.rows[0] + 1, last = g.rows[g.rows.length - 1] + 1;
+      return {
+        idx: gi,
+        vector: g.vector.slice(),
+        dimensionless: g.dimensionless,
+        n: g.rows.length,
+        first: first,
+        last: last,
+        rangeText: first === last ? String(first) : (first + "–" + last),
+        members: members,
+      };
+    });
+    return {
+      nBasis: nBasis,
+      groups: groupMeta,
+      nameToGroup: nameToGroup,
+    };
+  }
+
+  // Colour the feature-name tokens inside a model formula according to their
+  // dimension group. Falls back to plain text when no unit info exists.
+  var FORMULA_TOKEN_RE = /([A-Za-z_][A-Za-z0-9_]*)/g;
+  function colorizeFormula(text) {
+    if (!text) return document.createTextNode("");
+    var frag = document.createDocumentFragment();
+    var units = state.result && state.result.meta && state.result.meta.units;
+    var map = units ? units.nameToGroup : null;
+    var last = 0;
+    FORMULA_TOKEN_RE.lastIndex = 0;
+    var m;
+    while ((m = FORMULA_TOKEN_RE.exec(text)) !== null) {
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      var token = m[1];
+      if (map && Object.prototype.hasOwnProperty.call(map, token)) {
+        var span = document.createElement("span");
+        span.className = "unit-token unit-g" + map[token];
+        span.textContent = token;
+        span.title = units.groups[map[token]].dimensionless ? "dimensionless" : "unit group " + (map[token] + 1);
+        frag.appendChild(span);
+      } else {
+        frag.appendChild(document.createTextNode(token));
+      }
+      last = m.index + token.length;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    return frag;
+  }
+
+  function setFormulaContent(node, text) {
+    if (!node) return;
+    node.textContent = "";
+    node.appendChild(colorizeFormula(text));
+  }
+
   function readFileAsText(file) {
     return new Promise(function (resolve, reject) {
       var fr = new FileReader();
@@ -933,6 +1026,7 @@
       roleTexts.top = await readFileAsText(state.files.top.file);
       if (state.files.verify) roleTexts.verify = await readFileAsText(state.files.verify.file);
       if (state.files.sissoin) roleTexts.sissoin = await readFileAsText(state.files.sissoin.file);
+      if (state.files.sissoout) roleTexts.sissoout = await readFileAsText(state.files.sissoout.file);
 
       // a fresh analyze run starts a brand-new project identity
       state.projectId = null;
@@ -969,6 +1063,29 @@
 
     state.result = Core.runPipeline(files);
 
+    // Parse the unit (dimension) matrix from SISSO.out, when provided, and map
+    // every train.dat feature column to its dimension group. Rows of the unit
+    // matrix are in train.dat feature-column order (column 1 == the first
+    // feature after name + target), matching how SISSO.in's funit=(...) ranges
+    // are written. Uspace expressions use the original feature names, so we key
+    // by name to colour model formulas.
+    var unitInfo = null;
+    if (roleTexts.sissoout !== undefined) {
+      var unitRows = Core.parseUnitMatrix(roleTexts.sissoout);
+      if (unitRows) {
+        var featureNames = Core.readHeaderNames(roleTexts.train).slice(2);
+        unitInfo = buildUnitInfo(unitRows, featureNames);
+      }
+    }
+    state.result.meta.units = unitInfo;
+
+    // A fresh analysis starts with no filter and the default sort.
+    state.filter = newEmptyFilter();
+    state.sortKey = "rank";
+    state.sortAsc = true;
+    state.loadAll = false;
+    state.topN = 100;
+
     // Enrich the run metadata with SISSO.in settings, with safe fallbacks so
     // the dimension / complexity cards still show when SISSO.in is missing or
     // uses an older keyword:
@@ -993,10 +1110,6 @@
       }
     }
     state.result.meta.sissoIn = info;
-    state.sortKey = "rank";
-    state.sortAsc = true;
-    state.loadAll = false;
-    state.topN = 100;
 
     showResults();
 
@@ -1012,7 +1125,7 @@
   // ---------------------------------------------------------------------------
   // Left-nav state: upload ("Load results") vs. loaded run + sub-views.
   function setNavState(hasResults) {
-    var t = $("#view-table-btn"), g = $("#view-grid-btn"), p = $("#view-pareto-btn");
+    var t = $("#view-table-btn"), g = $("#view-grid-btn"), p = $("#view-pareto-btn"), u = $("#view-units-btn");
     var home = $("#btn-nav-home");
     if (hasResults) {
       document.body.classList.add("has-results");
@@ -1020,10 +1133,11 @@
       if (t) t.disabled = false;
       if (g) g.disabled = false;
       if (p) p.disabled = false; // verify gating happens in renderControls
+      if (u) u.disabled = false; // unit gating happens in renderControls
     } else {
       document.body.classList.remove("has-results");
       if (home) home.classList.add("is-active");
-      [t, g, p].forEach(function (b) {
+      [t, g, p, u].forEach(function (b) {
         if (b) { b.disabled = true; b.classList.remove("is-active"); }
       });
     }
@@ -1055,6 +1169,7 @@
     renderKpis();
     renderControls();
     populateColorSelect();
+    renderFilterSummary();
     renderModels();
   }
 
@@ -1095,43 +1210,112 @@
     });
   }
 
-  function renderControls() {
-    // Sort key options: rank, then each metric on the train set and (when a
-    // verify set exists) on the verify set too. Note: ρ = Spearman's ρ.
-    var keySel = $("#sort-key");
-    keySel.innerHTML = "";
+  // ---------------------------------------------------------------------------
+  // Table columns — a single description drives the header, cell rendering,
+  // column management, numeric filters and column-header sorting.
+  //   id        stable column id, also used as the sort key ("rmse-train")
+  //   label()   dynamic i18n label (called with no args)
+  //   numeric   true => value comes from model metrics, numeric filterable
+  //   metric    metrics key (rmse/maxae/r2/rho) — undefined for rank/formula
+  //   dataset   "train" | "verify" — undefined for rank/formula
+  //   get(m)    returns the raw value of the column for a model
+  // ---------------------------------------------------------------------------
+  var COL_METRICS = [
+    { metric: "rmse", labelKey: "metricRMSE" },
+    { metric: "maxae", labelKey: "metricMaxAE" },
+    { metric: "r2", labelKey: "metricR2" },
+    { metric: "rho", labelKey: "metricRho" },
+  ];
+
+  function metricValue(m, metric, dataset) {
+    var ms = dataset === "verify" ? (m.metricsVerify || null) : (m.metricsTrain || null);
+    return ms ? ms[metric] : null;
+  }
+
+  function buildTableColumns() {
     var hasVerify = !!(state.result && state.result.verify);
-    var metricDefs = [
-      ["rmse", "sortRMSE"],
-      ["maxae", "sortMaxAE"],
-      ["r2", "sortR2"],
-      ["rho", "sortRho"],
+    var cols = [
+      { id: "rank", label: function () { return I18N.t("colRank"); }, numeric: false, get: function (m) { return m.rank; } },
+      { id: "formula", label: function () { return I18N.t("colFormula"); }, numeric: false, get: function (m) { return m.formulaOriginal; } },
     ];
-    var opts = [["rank", I18N.t("sortRank")]];
-    metricDefs.forEach(function (m) {
-      var label = I18N.t(m[1]);
-      opts.push([m[0] + "-train", label + " (" + I18N.t("detailTrain") + ")"]);
+    COL_METRICS.forEach(function (d) {
+      cols.push({
+        id: d.metric + "-train", label: function () { return I18N.t(d.labelKey) + " (" + I18N.t("detailTrain") + ")"; },
+        numeric: true, metric: d.metric, dataset: "train",
+        get: function (m) { return metricValue(m, d.metric, "train"); },
+      });
       if (hasVerify) {
-        opts.push([m[0] + "-verify", label + " (" + I18N.t("detailVerify") + ")"]);
+        cols.push({
+          id: d.metric + "-verify", label: function () { return I18N.t(d.labelKey) + " (" + I18N.t("detailVerify") + ")"; },
+          numeric: true, metric: d.metric, dataset: "verify",
+          get: function (m) { return metricValue(m, d.metric, "verify"); },
+        });
       }
     });
-    opts.forEach(function (o) {
-      var opt = el("option", null, o[1]);
-      opt.value = o[0];
-      if (o[0] === state.sortKey) opt.selected = true;
-      keySel.appendChild(opt);
+    cols.push({
+      id: "actions", label: function () { return I18N.t("colActions"); }, numeric: false, get: function () { return null; },
     });
+    return cols;
+  }
 
-    var dirSel = $("#sort-dir");
-    dirSel.innerHTML = "";
-    [["asc", I18N.t("asc")], ["desc", I18N.t("desc")]].forEach(function (o) {
-      var opt = el("option", null, o[1]);
-      opt.value = o[0];
-      if ((o[0] === "asc") === state.sortAsc) opt.selected = true;
-      dirSel.appendChild(opt);
+  // Columns the user has hidden (state.hiddenCols, persisted). "actions" is
+  // structural and can never be hidden.
+  function visibleTableColumns() {
+    return buildTableColumns().filter(function (c) {
+      return c.id === "actions" || !state.hiddenCols[c.id];
     });
+  }
 
-    $("#top-n").value = state.topN;
+  // Resolve a column id ("rmse-train") back to a definition (used by numeric
+  // filters, which are keyed by the same ids).
+  function tableColumnById(id) {
+    var cols = buildTableColumns();
+    for (var i = 0; i < cols.length; i++) if (cols[i].id === id) return cols[i];
+    return null;
+  }
+
+  // Load all <-> Top N toggle: "Load all" renders every filtered model, and
+  // toggling back restores the default window (state.topN).
+  function syncLoadAllButton() {
+    var btn = $("#btn-load-all");
+    if (!btn) return;
+    btn.textContent = state.loadAll ? I18N.t("loadTop") : I18N.t("loadAll");
+    btn.title = state.loadAll ? I18N.t("loadTopTitle") : I18N.t("loadAllTitle");
+  }
+
+  // Grid view has no column headers, so the toolbar sort control is the
+  // sorting surface there; table view keeps header-click sorting and hides
+  // this duplicate. Both write the same state.sortKey / state.sortAsc, so a
+  // sort started in either view is preserved when switching.
+  function syncGridSortUI() {
+    var keySel = $("#grid-sort-key");
+    if (!keySel || !state.result) return;
+    keySel.innerHTML = "";
+    buildTableColumns().forEach(function (c) {
+      if (c.id !== "rank" && !c.numeric) return;
+      var o = el("option", null, c.label());
+      o.value = c.id;
+      keySel.appendChild(o);
+    });
+    // Never let the UI point at a key that has no option (e.g. a verify sort
+    // restored from a session without verify data) — fall back to rank.
+    if (!keySel.querySelector('option[value="' + state.sortKey + '"]')) {
+      state.sortKey = "rank";
+      state.sortAsc = true;
+    }
+    keySel.value = state.sortKey;
+    var dirBtn = $("#grid-sort-dir");
+    if (dirBtn) {
+      dirBtn.textContent = state.sortAsc ? "▲" : "▼";
+      dirBtn.title = I18N.t("sortDir");
+      dirBtn.setAttribute("aria-label", I18N.t("sortDir") + (state.sortAsc ? " ▲" : " ▼"));
+    }
+  }
+
+  function renderControls() {
+    // Sorting is column-header driven (click a header to sort); no dropdowns.
+    var hasVerify = !!(state.result && state.result.verify);
+    syncLoadAllButton();
 
     // Pareto axis selects — metric direction is preset (↓ smaller better,
     // ↑ bigger better).
@@ -1172,22 +1356,145 @@
     $("#view-table-btn").classList.toggle("is-active", state.view === "table");
     $("#view-grid-btn").classList.toggle("is-active", state.view === "grid");
     $("#view-pareto-btn").classList.toggle("is-active", state.view === "pareto");
+    $("#view-units-btn").classList.toggle("is-active", state.view === "units");
     $("#view-pareto-btn").disabled = !hasVerify;
+    var res = state.result;
+    var hasUnits = !!(res && res.meta && res.meta.units);
+    $("#view-units-btn").disabled = !hasUnits;
     $("#table-wrap").hidden = state.view !== "table";
     $("#grid-wrap").hidden = state.view !== "grid";
     $("#pareto-wrap").hidden = state.view !== "pareto";
-    // Sort/filter toolbar and the "showing N of M" note only make sense for the
-    // table/grid views — Pareto always plots every model.
+    $("#units-wrap").hidden = state.view !== "units";
+    // The Filter control is meaningful in the list views *and* on the Pareto
+    // scatter (filtered models become faint "ghosts" that never join the front);
+    // the Load-all toggle and "showing N of M" note are list-view only. Units
+    // is its own layout and shows none of this chrome.
+    var showListChrome = state.view === "table" || state.view === "grid";
+    var showFilterChrome = showListChrome || state.view === "pareto";
     var resToolbar = document.querySelector("#view-results .toolbar");
-    if (resToolbar) resToolbar.hidden = state.view === "pareto";
+    if (resToolbar) resToolbar.hidden = !showFilterChrome;
     var countNote = $("#count-note");
-    if (countNote) countNote.hidden = state.view === "pareto";
+    if (countNote) countNote.hidden = !showListChrome;
+    var loadAllRow = $("#load-all-row");
+    if (loadAllRow) loadAllRow.hidden = !showListChrome;
+
+    // View-aware toolbar controls:
+    //  - thumbnails: sorting via the toolbar (no headers to click)
+    //  - table:      sorting via headers, and Columns applies only here
+    var sortField = $("#grid-sort-field");
+    if (sortField) sortField.hidden = state.view !== "grid";
+    var colsAnchor = $("#cols-anchor");
+    if (colsAnchor) colsAnchor.hidden = state.view !== "table";
+    syncGridSortUI();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Model query pipeline: all models -> filter -> sort -> visible slice.
+  // Table and grid both consume visibleModels(), so filters apply to both.
+  // ---------------------------------------------------------------------------
+
+  // Which unit groups does a model's formula use? Scans the formula tokens
+  // against the unit name->group map (same map that colours the tokens).
+  var _groupCache = new WeakMap();
+  function modelUnitGroups(m) {
+    var units = state.result && state.result.meta && state.result.meta.units;
+    if (!units || !units.nameToGroup) return null;
+    var cached = _groupCache.get(m);
+    if (cached) return cached;
+    var map = units.nameToGroup;
+    var set = new Set();
+    var text = m.formulaOriginal || "";
+    FORMULA_TOKEN_RE.lastIndex = 0;
+    var tok;
+    while ((tok = FORMULA_TOKEN_RE.exec(text)) !== null) {
+      var g = map[tok[1]];
+      if (g !== undefined) set.add(g);
+    }
+    var arr = Array.from(set).sort(function (a, b) { return a - b; });
+    _groupCache.set(m, arr);
+    return arr;
+  }
+
+  function newEmptyFilter() {
+    return { active: false, includeMode: "any", include: null, exclude: null, numeric: {} };
+  }
+
+  // Which features does a model formula use? Same token scan + name map that
+  // colours formulas; cached per model object.
+  var _featCache = new WeakMap();
+  function modelFeatures(m) {
+    var units = state.result && state.result.meta && state.result.meta.units;
+    if (!units || !units.nameToGroup) return null;
+    var cached = _featCache.get(m);
+    if (cached) return cached;
+    var map = units.nameToGroup;
+    var arr = [];
+    var text = m.formulaOriginal || "";
+    FORMULA_TOKEN_RE.lastIndex = 0;
+    var tok;
+    while ((tok = FORMULA_TOKEN_RE.exec(text)) !== null) {
+      if (Object.prototype.hasOwnProperty.call(map, tok[1]) && arr.indexOf(tok[1]) < 0) arr.push(tok[1]);
+    }
+    _featCache.set(m, arr);
+    return arr;
+  }
+
+  // Numeric / text constraints keyed by column id: { "<colId>": {min,max} }.
+  function filterNumericMatch(m) {
+    var f = state.filter;
+    for (var colId in f.numeric) {
+      if (!Object.prototype.hasOwnProperty.call(f.numeric, colId)) continue;
+      var cond = f.numeric[colId];
+      if (!cond || (cond.min == null && cond.max == null)) continue;
+      var col = tableColumnById(colId);
+      if (!col || !col.get) continue;
+      var v = col.get(m);
+      if (v === null || v === undefined || !Number.isFinite(v)) return false; // "—" never matches a range
+      if (cond.min != null && v < cond.min) return false;
+      if (cond.max != null && v > cond.max) return false;
+    }
+    return true;
+  }
+
+  // Feature-level include/exclude filter:
+  //   exclude: the formula must not contain any excluded feature.
+  //   include (mode "any"):  it must contain at least one included feature.
+  //   include (mode "only"): every feature in it must be included.
+  // When the unit map is unavailable (no SISSO.out) feature filters are inert.
+  function filterFeatureMatch(m) {
+    var f = state.filter;
+    if (!f.include && !f.exclude) return true;
+    var feats = modelFeatures(m);
+    if (!feats || !feats.length) return true; // unknown unit space: not filterable
+    if (f.exclude && f.exclude.size) {
+      for (var i = 0; i < feats.length; i++) if (f.exclude.has(feats[i])) return false;
+    }
+    if (f.include && f.include.size) {
+      if (f.includeMode === "only") {
+        for (var j = 0; j < feats.length; j++) if (!f.include.has(feats[j])) return false;
+      } else {
+        var hit = false;
+        for (var k = 0; k < feats.length; k++) if (f.include.has(feats[k])) { hit = true; break; }
+        if (!hit) return false;
+      }
+    }
+    return true;
+  }
+
+  function modelPassesFilter(m) {
+    if (!state.filter.active) return true;
+    return filterNumericMatch(m) && filterFeatureMatch(m);
+  }
+
+  function filteredModels() {
+    if (!state.result) return [];
+    if (!state.filter.active) return state.result.models.slice();
+    return state.result.models.filter(modelPassesFilter);
   }
 
   function sortedModels() {
     if (!state.result) return [];
-    var res = state.result;
-    var list = res.models.slice();
+    var list = filteredModels();
     var asc = state.sortAsc;
     // sortKey format: "rank" or "<metric>-<train|verify>", e.g. "rmse-verify".
     var sk = state.sortKey.split("-");
@@ -1220,16 +1527,24 @@
   function visibleModels() {
     var list = sortedModels();
     var n = state.loadAll ? list.length : Math.min(state.topN, list.length);
-    return { list: list, shown: n };
+    return { list: list, total: list.length, shown: n };
   }
 
   function renderCount() {
     if (!state.result) { $("#count-note").textContent = ""; return; }
     var vis = visibleModels();
-    $("#count-note").textContent = I18N.format("loadedCount", {
-      shown: vis.shown,
-      total: state.result.meta.nModels,
-    });
+    if (state.filter.active) {
+      $("#count-note").textContent = I18N.format("loadedFilteredCount", {
+        shown: vis.shown,
+        total: vis.total,
+        all: state.result.meta.nModels,
+      });
+    } else {
+      $("#count-note").textContent = I18N.format("loadedCount", {
+        shown: vis.shown,
+        total: vis.total,
+      });
+    }
   }
 
   // Render the models view. When the visible set is large (e.g. "load all"),
@@ -1263,7 +1578,6 @@
   // Table
   // ---------------------------------------------------------------------------
   function renderTable() {
-    var res = state.result;
     var vis = visibleModels();
     var wrap = $("#table-wrap");
     wrap.innerHTML = "";
@@ -1271,21 +1585,36 @@
     var table = el("table", "models-table");
     var thead = el("thead");
     var hr = el("tr");
-    var cols = [
-      [I18N.t("colRank"), "rank", "left"],
-      [I18N.t("colFormula"), "formula", "left"],
-      [I18N.t("metricRMSE") + " (" + I18N.t("detailTrain") + ")", null, "right"],
-      [I18N.t("metricMaxAE") + " (" + I18N.t("detailTrain") + ")", null, "right"],
-      [I18N.t("metricR2") + " (" + I18N.t("detailTrain") + ")", null, "right"],
-      [I18N.t("metricRho") + " (" + I18N.t("detailTrain") + ")", null, "right"],
-      [I18N.t("metricRMSE") + " (" + I18N.t("detailVerify") + ")", null, "right"],
-      [I18N.t("metricMaxAE") + " (" + I18N.t("detailVerify") + ")", null, "right"],
-      [I18N.t("metricRho") + " (" + I18N.t("detailVerify") + ")", null, "right"],
-      [I18N.t("colActions"), null, "left"],
-    ];
+    var cols = visibleTableColumns();
+
     cols.forEach(function (c) {
-      var th = el("th", null, c[0]);
-      if (c[2] === "right") th.style.textAlign = "right";
+      var th = el("th", null, null);
+      var sortable = c.numeric || c.id === "rank";
+      if (sortable) {
+        th.classList.add("th-sortable");
+        th.setAttribute("tabindex", "0");
+        th.setAttribute("role", "button");
+        th.setAttribute("aria-label", I18N.format("sortByCol", { col: c.label() }));
+        if (state.sortKey === c.id) {
+          th.classList.add("is-sorted");
+          th.classList.add(state.sortAsc ? "is-sorted-asc" : "is-sorted-desc");
+          th.setAttribute("aria-sort", state.sortAsc ? "ascending" : "descending");
+        }
+        th.addEventListener("click", function () { sortByColumn(c.id); });
+        th.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortByColumn(c.id); }
+        });
+      } else {
+        th.classList.add("th-static");
+      }
+      var label = el("span", "th-label", c.label());
+      th.appendChild(label);
+      if (sortable) {
+        var caret = el("span", "th-caret");
+        caret.setAttribute("aria-hidden", "true");
+        th.appendChild(caret);
+      }
+      if (c.numeric) th.classList.add("th-num");
       hr.appendChild(th);
     });
     thead.appendChild(hr);
@@ -1298,21 +1627,25 @@
       tr.setAttribute("role", "button");
       tr.setAttribute("aria-label", I18N.t("detailRank") + " " + m.rank);
 
-      tr.appendChild(el("td", "num", String(m.rank)));
-      tr.appendChild(el("td", "formula-cell", m.formulaOriginal));
-      tr.appendChild(el("td", "num", fmt(m.metricsTrain.rmse, 4)));
-      tr.appendChild(el("td", "num", fmt(m.metricsTrain.maxae, 4)));
-      tr.appendChild(el("td", "num", fmt(m.metricsTrain.r2, 4)));
-      tr.appendChild(el("td", "num", fmt(m.metricsTrain.rho, 4)));
-      tr.appendChild(el("td", "num", fmt(m.metricsVerify ? m.metricsVerify.rmse : null, 4)));
-      tr.appendChild(el("td", "num", fmt(m.metricsVerify ? m.metricsVerify.maxae : null, 4)));
-      tr.appendChild(el("td", "num", fmt(m.metricsVerify ? m.metricsVerify.rho : null, 4)));
-
-      var td = el("td");
-      var btn = el("button", "btn btn--secondary btn--sm", I18N.t("view"));
-      btn.addEventListener("click", function (e) { e.stopPropagation(); openDetail(m.rank); });
-      td.appendChild(btn);
-      tr.appendChild(td);
+      cols.forEach(function (c) {
+        var td;
+        if (c.id === "formula") {
+          td = el("td", "formula-cell");
+          setFormulaContent(td, m.formulaOriginal);
+        } else if (c.id === "actions") {
+          td = el("td");
+          var btn = el("button", "btn btn--secondary btn--sm", I18N.t("view"));
+          btn.addEventListener("click", function (e) { e.stopPropagation(); openDetail(m.rank); });
+          td.appendChild(btn);
+        } else if (c.numeric) {
+          var v = c.get(m);
+          td = el("td", "num", fmt(v, 4));
+          if (v === null || v === undefined || Number.isNaN(v)) td.classList.add("is-empty");
+        } else {
+          td = el("td", "num", String(c.get(m)));
+        }
+        tr.appendChild(td);
+      });
 
       tr.addEventListener("click", function () { openDetail(m.rank); });
       tr.addEventListener("keydown", function (e) {
@@ -1322,6 +1655,19 @@
     });
     table.appendChild(tbody);
     wrap.appendChild(table);
+  }
+
+  // Column-header sorting: clicking a column sorts ascending, clicking the
+  // already-sorted column toggles asc <-> desc. Column ids equal sort keys,
+  // so this reuses the same pipeline.
+  function sortByColumn(colId) {
+    if (state.sortKey === colId) {
+      state.sortAsc = !state.sortAsc;
+    } else {
+      state.sortKey = colId;
+      state.sortAsc = true;
+    }
+    renderModels();
   }
 
   // ---------------------------------------------------------------------------
@@ -1482,6 +1828,37 @@
   // ---------------------------------------------------------------------------
   // Pareto front: train metric (x) vs verify metric (y)
   // ---------------------------------------------------------------------------
+  // Split Pareto-eligible points into models that pass the active filter (they
+  // are the ones allowed to build the front) and "ghosts" — models filtered
+  // out that are still drawn faintly on the scatter but never take part in the
+  // Pareto-front computation.
+  function paretoSplit(pts) {
+    if (!state.filter || !state.filter.active) return { pts: pts, ghosts: [] };
+    var included = [], ghosts = [];
+    for (var i = 0; i < pts.length; i++) {
+      var p = pts[i];
+      if (modelPassesFilter(p.m)) included.push(p);
+      else ghosts.push(p);
+    }
+    return { pts: included, ghosts: ghosts };
+  }
+
+  // Theme colours arrive as CSS-resolved strings ("rgb(r,g,b)" or "#rrggbb");
+  // return the same colour with the given alpha for faint/faded point styles.
+  function withAlpha(cssColor, alpha) {
+    var m = /^rgba?\(([^)]+)\)$/.exec(cssColor || "");
+    if (m) {
+      var p = m[1].split(",").map(function (s) { return parseFloat(s); });
+      return "rgba(" + Math.round(p[0]) + "," + Math.round(p[1]) + "," + Math.round(p[2]) + "," + alpha + ")";
+    }
+    m = /^#([0-9a-f]{6})$/i.exec(cssColor || "");
+    if (m) {
+      var n = parseInt(m[1], 16);
+      return "rgba(" + ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + alpha + ")";
+    }
+    return cssColor;
+  }
+
   function paretoPoints() {
     var res = state.result;
     var xDef = paretoMetricDef(state.paretoX);
@@ -1572,21 +1949,28 @@
 
   function renderPareto3D() {
     var computed = paretoPoints3D();
-    var pts = computed.pts, xDef = computed.xDef, yDef = computed.yDef, zDef = computed.zDef;
+    var split = paretoSplit(computed.pts);
+    var pts = split.pts, ghosts = split.ghosts;
+    var xDef = computed.xDef, yDef = computed.yDef, zDef = computed.zDef;
     var front = computeParetoFront3D(pts, xDef, yDef, zDef);
+    var ghostOn = ghosts.length > 0;
 
-    $("#pareto-count").textContent = I18N.format("paretoCount", { n: front.length });
+    $("#pareto-count").textContent = ghostOn
+      ? I18N.format("paretoCountFiltered", { n: front.length, m: pts.length, t: computed.pts.length })
+      : I18N.format("paretoCount", { n: front.length });
 
     var dom = $("#pareto-chart");
     var C = getThemeColors();
     if (state.paretoChart) { state.paretoChart.dispose(); }
     state.paretoChart = echarts.init(dom);
 
-    var xb = paretoAxisBounds(pts.map(function (p) { return p.x; }));
-    var yb = paretoAxisBounds(pts.map(function (p) { return p.y; }));
-    var zb = paretoAxisBounds(pts.map(function (p) { return p.z; }));
+    var viewPts = computed.pts;
+    var xb = paretoAxisBounds(viewPts.map(function (p) { return p.x; }));
+    var yb = paretoAxisBounds(viewPts.map(function (p) { return p.y; }));
+    var zb = paretoAxisBounds(viewPts.map(function (p) { return p.z; }));
 
     var allData = pts.map(function (p) { return { value: [p.x, p.y, p.z], rank: p.rank }; });
+    var ghostData = ghosts.map(function (p) { return { value: [p.x, p.y, p.z], rank: p.rank, ghost: true }; });
     var frontData = front.map(function (p) { return { value: [p.x, p.y, p.z], rank: p.rank }; });
     var frontPath = front.slice().sort(function (a, b) { return a.x - b.x; })
       .map(function (p) { return [p.x, p.y, p.z]; });
@@ -1611,12 +1995,14 @@
         formatter: function (params) {
           var d = params.data;
           if (!d || d.rank == null) return "";
-          return [
+          var rows = [
             "<strong>" + I18N.t("detailRank") + " " + d.rank + "</strong>",
             paretoAxisName(xDef, "detailTrain") + ": " + fmt(d.value[0], 4),
             paretoAxisName(yDef, "detailVerify") + ": " + fmt(d.value[1], 4),
             paretoZLabel(zDef, state.paretoZ.set) + ": " + fmt(d.value[2], 4),
-          ].join("<br/>");
+          ];
+          if (d.ghost) rows.push('<span style="opacity:.65">' + I18N.t("paretoGhostNote") + "</span>");
+          return rows.join("<br/>");
         },
       },
       grid3D: {
@@ -1641,33 +2027,54 @@
       yAxis3D: axis3D(paretoAxisName(yDef, "detailVerify"), yb),
       zAxis3D: axis3D(paretoZLabel(zDef, state.paretoZ.set), zb),
       legend: {
-        data: [I18N.t("paretoAll"), I18N.t("paretoFront")],
+        data: (function () {
+          var names = [I18N.t("paretoAll"), I18N.t("paretoFront")];
+          if (ghostOn) {
+            names.unshift({
+              name: I18N.t("paretoGhost"),
+              icon: "circle",
+              itemStyle: { color: withAlpha(C.textSoft, 0.35) },
+            });
+          }
+          return names;
+        })(),
         top: 8,
         textStyle: { color: C.chartText },
       },
-      series: [
-        {
+      series: (function () {
+        var s = [];
+        if (ghostOn) {
+          s.push({
+            name: I18N.t("paretoGhost"),
+            type: "scatter3D",
+            data: ghostData,
+            symbolSize: 5,
+            itemStyle: { color: withAlpha(C.textSoft, 0.18) },
+          });
+        }
+        s.push({
           name: I18N.t("paretoAll"),
           type: "scatter3D",
           data: allData,
           symbolSize: 6,
           itemStyle: { color: C.textSoft, opacity: 0.55 },
-        },
-        {
+        });
+        s.push({
           name: "_frontLine",
           type: "line3D",
           data: frontPath,
           lineStyle: { color: C.train, width: 2 },
           silent: true,
-        },
-        {
+        });
+        s.push({
           name: I18N.t("paretoFront"),
           type: "scatter3D",
           data: frontData,
           symbolSize: 10,
           itemStyle: { color: C.train, opacity: 1 },
-        },
-      ],
+        });
+        return s;
+      })(),
     });
 
     state.paretoChart.off("click");
@@ -1700,7 +2107,9 @@
       tr.tabIndex = 0;
       tr.setAttribute("role", "button");
       tr.appendChild(el("td", "num", String(p.rank)));
-      tr.appendChild(el("td", "formula-cell", p.m.formulaOriginal));
+      var fcTd = el("td", "formula-cell");
+      setFormulaContent(fcTd, p.m.formulaOriginal);
+      tr.appendChild(fcTd);
       tr.appendChild(el("td", "num", fmt(p.x, 4)));
       tr.appendChild(el("td", "num", fmt(p.y, 4)));
       tr.appendChild(el("td", "num", fmt(p.z, 4)));
@@ -1720,15 +2129,490 @@
     wrap.appendChild(table);
   }
 
+  // ---------------------------------------------------------------------------
+  // Units (dimension) view — one card per unit group, coloured like the
+  // formula tokens, with the member features listed.
+  // ---------------------------------------------------------------------------
+  function vectorText(vec) {
+    return vec.map(function (v) { return v === Math.round(v) ? String(Math.round(v)) : String(v); }).join(" ");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Column manager + filter panels (table toolbar popovers)
+  // ---------------------------------------------------------------------------
+  function setPopover(anchorSel, popSel, open) {
+    var anchor = document.querySelector(anchorSel);
+    var pop = document.querySelector(popSel);
+    var btn = anchor ? anchor.querySelector("button") : null;
+    if (pop) pop.hidden = !open;
+    if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  function closeAllPopovers(exceptSel) {
+    [["#filter-anchor", "#filter-pop"], ["#cols-anchor", "#cols-pop"]].forEach(function (pair) {
+      if (pair[1] !== exceptSel) setPopover(pair[0], pair[1], false);
+    });
+  }
+
+  // --- Column manager ------------------------------------------------
+  function renderColsPanel() {
+    var pop = $("#cols-pop");
+    if (!pop) return;
+    pop.innerHTML = "";
+    var cols = buildTableColumns().filter(function (c) { return c.id !== "actions"; });
+
+    var intro = el("p", "pop-label", I18N.t("colsIntro"));
+    pop.appendChild(intro);
+
+    var list = el("div", "pop-list");
+    cols.forEach(function (c) {
+      var lab = el("label", "check-row");
+      var cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = !state.hiddenCols[c.id];
+      cb.addEventListener("change", function () {
+        if (cb.checked) delete state.hiddenCols[c.id];
+        else state.hiddenCols[c.id] = true;
+        persistColPrefs();
+        if (state.view === "table") renderTable();
+        renderCount();
+      });
+      var span = el("span", null, c.label());
+      lab.appendChild(cb);
+      lab.appendChild(span);
+      list.appendChild(lab);
+    });
+    pop.appendChild(list);
+
+    var footer = el("div", "pop-footer");
+    var reset = el("button", "btn btn--ghost btn--sm", I18N.t("colsReset"));
+    reset.type = "button";
+    reset.addEventListener("click", function () {
+      state.hiddenCols = {};
+      persistColPrefs();
+      renderColsPanel();
+      if (state.view === "table") renderTable();
+      renderCount();
+    });
+    footer.appendChild(reset);
+    pop.appendChild(footer);
+  }
+
+  function persistColPrefs() {
+    try { window.localStorage.setItem(COLS_PREF_KEY, JSON.stringify(state.hiddenCols)); } catch (e) { /* ignore */ }
+  }
+  function restoreColPrefs() {
+    state.hiddenCols = {};
+    try {
+      var raw = window.localStorage.getItem(COLS_PREF_KEY);
+      if (raw) {
+        var o = JSON.parse(raw);
+        Object.keys(o).forEach(function (k) { if (o[k]) state.hiddenCols[k] = true; });
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  // --- Filter model helpers (feature-level include/exclude) ------------
+  // The panel edits a working copy (filterDraft); nothing affects the table
+  // until Apply is pressed. This lets the user check many boxes at once
+  // without the table rebuilding on every click.
+  var filterDraft = null;
+
+  function emptyFilterDraft() {
+    return { includeMode: "any", include: new Set(), exclude: new Set(), numeric: {} };
+  }
+  function cloneFilter(src) {
+    var d = emptyFilterDraft();
+    if (!src) return d;
+    d.includeMode = src.includeMode || "any";
+    (src.include || []).forEach(function (n) { d.include.add(n); });
+    (src.exclude || []).forEach(function (n) { d.exclude.add(n); });
+    Object.keys(src.numeric || {}).forEach(function (k) {
+      var c = src.numeric[k];
+      if (c && (c.min != null || c.max != null)) d.numeric[k] = { min: c.min != null ? c.min : null, max: c.max != null ? c.max : null };
+    });
+    return d;
+  }
+  function draftIsEmpty(d) {
+    return !d || (!d.include.size && !d.exclude.size && !Object.keys(d.numeric).length);
+  }
+  function draftDiffersFromApplied() {
+    if (!state.filter || !filterDraft) return true;
+    if ((state.filter.includeMode || "any") !== filterDraft.includeMode) return true;
+    function eqSet(a, b) {
+      if (a.size !== b.size) return false;
+      var it = a.values(), x;
+      while (!(x = it.next()).done) if (!b.has(x.value)) return false;
+      return true;
+    }
+    if (!eqSet(state.filter.include || new Set(), filterDraft.include)) return true;
+    if (!eqSet(state.filter.exclude || new Set(), filterDraft.exclude)) return true;
+    var ak = Object.keys(state.filter.numeric || {}), bk = Object.keys(filterDraft.numeric);
+    if (ak.length !== bk.length) return true;
+    for (var i = 0; i < ak.length; i++) {
+      var k = ak[i];
+      var a = state.filter.numeric[k], b = filterDraft.numeric[k];
+      if (!b) return true;
+      if ((a.min == null ? null : a.min) !== (b.min == null ? null : b.min)) return true;
+      if ((a.max == null ? null : a.max) !== (b.max == null ? null : b.max)) return true;
+    }
+    return false;
+  }
+
+  // Apply the draft to the real filter and rebuild the visible model list.
+  function applyFilterDraft() {
+    if (!filterDraft) return;
+    state.filter = cloneFilter(filterDraft);
+    state.filter.active = !draftIsEmpty(state.filter);
+    updateApplyVisual();
+    applyFilterAndRender();
+  }
+
+  function setFeatureInDraft(name, mode) {
+    if (mode === "include") { filterDraft.include.add(name); filterDraft.exclude.delete(name); }
+    else if (mode === "exclude") { filterDraft.exclude.add(name); filterDraft.include.delete(name); }
+    else { filterDraft.include.delete(name); filterDraft.exclude.delete(name); }
+  }
+
+  // --- Filter panel ---------------------------------------------------
+  function renderFilterPanel() {
+    var pop = $("#filter-pop");
+    if (!pop) return;
+    pop.innerHTML = "";
+    // Reset the working copy to the currently applied filter each time the
+    // panel opens, so closing without Apply keeps the previous result.
+    filterDraft = cloneFilter(state.filter);
+    var units = state.result && state.result.meta && state.result.meta.units;
+
+    // Metric range section
+    var numTitle = el("p", "pop-label", I18N.t("filterMetrics"));
+    pop.appendChild(numTitle);
+    var numGrid = el("div", "pop-grid");
+    var numCols = buildTableColumns().filter(function (c) { return c.numeric; });
+    numCols.forEach(function (c) {
+      var cond = filterDraft.numeric[c.id] || { min: null, max: null };
+      var row = el("label", "range-row");
+      var lab = el("span", "range-row__label", c.label());
+      row.appendChild(lab);
+      var minIn = el("input", "input range-row__input");
+      minIn.type = "number";
+      minIn.placeholder = I18N.t("filterMin");
+      if (cond.min != null) minIn.value = cond.min;
+      minIn.addEventListener("change", function () {
+        cond.min = minIn.value === "" ? null : parseFloat(minIn.value);
+        storeDraftNumeric(c.id, cond.min, cond.max);
+        updateApplyVisual();
+      });
+      var maxIn = el("input", "input range-row__input");
+      maxIn.type = "number";
+      maxIn.placeholder = I18N.t("filterMax");
+      if (cond.max != null) maxIn.value = cond.max;
+      maxIn.addEventListener("change", function () {
+        cond.max = maxIn.value === "" ? null : parseFloat(maxIn.value);
+        storeDraftNumeric(c.id, cond.min, cond.max);
+        updateApplyVisual();
+      });
+      row.appendChild(minIn);
+      row.appendChild(maxIn);
+      numGrid.appendChild(row);
+    });
+    pop.appendChild(numGrid);
+
+    // Unit-group section (only when SISSO.out was loaded)
+    if (units) {
+      var gTitle = el("p", "pop-label", I18N.t("filterGroups"));
+      pop.appendChild(gTitle);
+
+      // include matching mode (any / only) — edits the draft only
+      var seg = el("div", "segmented seg-group-mode");
+      [["any", I18N.t("filterModeAny")], ["only", I18N.t("filterModeOnly")]].forEach(function (o) {
+        var b = el("button", "segmented__btn" + (filterDraft.includeMode === o[0] ? " is-active" : ""), o[1]);
+        b.type = "button";
+        b.addEventListener("click", function () {
+          filterDraft.includeMode = o[0];
+          seg.querySelectorAll(".segmented__btn").forEach(function (x) { x.classList.remove("is-active"); });
+          b.classList.add("is-active");
+          updateApplyVisual();
+        });
+        seg.appendChild(b);
+      });
+      pop.appendChild(seg);
+
+      var hint = el("p", "pop-note", I18N.t("filterModeHint"));
+      pop.appendChild(hint);
+
+      var gl = el("div", "pop-list group-list");
+      units.groups.forEach(function (g) {
+        gl.appendChild(buildFilterGroupRow(g));
+      });
+      pop.appendChild(gl);
+    } else {
+      var noUnits = el("p", "pop-note", I18N.t("unitsEmpty"));
+      pop.appendChild(noUnits);
+    }
+
+    // Panel hint + footer with Apply / Clear
+    var ph = el("p", "pop-note pop-note--apply", I18N.t("filterPanelHint"));
+    pop.appendChild(ph);
+
+    var footer = el("div", "pop-footer pop-footer--split");
+    var clear = el("button", "btn btn--ghost btn--sm", I18N.t("filterClear"));
+    clear.type = "button";
+    clear.addEventListener("click", function () {
+      filterDraft = emptyFilterDraft();
+      if (!state.filter.active && draftIsEmpty(state.filter)) return;
+      applyFilterDraft();
+    });
+    footer.appendChild(clear);
+
+    var apply = el("button", "btn btn--primary btn--sm btn-filter-apply", I18N.t("filterApply"));
+    apply.type = "button";
+    apply.addEventListener("click", function () { applyFilterDraft(); });
+    footer.appendChild(apply);
+    pop.appendChild(footer);
+    updateApplyVisual();
+  }
+
+  // Highlight the Apply button while the draft holds changes that have not
+  // been committed (i.e. the table has not been re-filtered yet).
+  function updateApplyVisual() {
+    var btn = document.querySelector("#filter-pop .btn-filter-apply");
+    if (!btn) return;
+    btn.classList.toggle("is-dirty", draftDiffersFromApplied());
+  }
+
+  function storeDraftNumeric(colId, min, max) {
+    if (min == null && max == null) delete filterDraft.numeric[colId];
+    else filterDraft.numeric[colId] = { min: min == null ? null : min, max: max == null ? null : max };
+  }
+
+  // One row per unit group: batch include/exclude + expandable member list.
+  function buildFilterGroupRow(g) {
+    var row = el("div", "fgroup" + (g.dimensionless ? " fgroup--dimless" : ""));
+    row.setAttribute("data-gi", g.idx);
+
+    var head = el("div", "fgroup__head");
+    var sw = el("span", "unit-group__swatch unit-g" + g.idx);
+    sw.setAttribute("aria-hidden", "true");
+    head.appendChild(sw);
+
+    var title = el("span", "fgroup__title",
+      (g.dimensionless ? I18N.t("unitsDimless") : I18N.format("unitsGroupName", { n: g.idx + 1 })) +
+      " · " + g.n);
+    head.appendChild(title);
+
+    var badge = el("span", "fgroup__badge");
+    badge.hidden = true;
+    head.appendChild(badge);
+
+    // Shared UI context for local (no-rebuild) updates while drafting.
+    var ctx = {
+      row: row, g: g, badge: badge,
+      allIn: null, allOut: null,
+      featureBtns: [],
+    };
+
+    var allIn = el("button", "fbtn fbtn--in", I18N.t("filterGroupAllIn"));
+    allIn.type = "button";
+    allIn.title = I18N.t("filterGroupAllInTitle");
+    allIn.addEventListener("click", function () {
+      var allKept = ctx.g.members.every(function (name) { return filterDraft.include.has(name); });
+      // second click on an already fully-kept group clears the whole group
+      ctx.g.members.forEach(function (name) { setFeatureInDraft(name, allKept ? null : "include"); });
+      refreshGroupUI(ctx);
+    });
+    ctx.allIn = allIn;
+    head.appendChild(allIn);
+
+    var allOut = el("button", "fbtn fbtn--out", I18N.t("filterGroupAllOut"));
+    allOut.type = "button";
+    allOut.title = I18N.t("filterGroupAllOutTitle");
+    allOut.addEventListener("click", function () {
+      var allDropped = ctx.g.members.every(function (name) { return filterDraft.exclude.has(name); });
+      ctx.g.members.forEach(function (name) { setFeatureInDraft(name, allDropped ? null : "exclude"); });
+      refreshGroupUI(ctx);
+    });
+    ctx.allOut = allOut;
+    head.appendChild(allOut);
+
+    var toggle = el("button", "fgroup__toggle", "▸");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.addEventListener("click", function () {
+      var body = row.querySelector(".fgroup__body");
+      var open = !body.hidden;
+      body.hidden = open;
+      toggle.textContent = open ? "▸" : "▾";
+      toggle.setAttribute("aria-expanded", String(!open));
+    });
+    head.appendChild(toggle);
+
+    row.appendChild(head);
+
+    var body = el("div", "fgroup__body");
+    body.hidden = true;
+    g.members.forEach(function (name) {
+      var fe = buildFilterFeatureRow(name, ctx);
+      body.appendChild(fe.row);
+      ctx.featureBtns.push(fe);
+    });
+    row.appendChild(body);
+
+    refreshGroupUI(ctx); // initial state from draft
+    return row;
+  }
+
+  // One feature row inside an expanded group: name + include / exclude.
+  // Clicks edit the draft and refresh only this row + its group badge.
+  function buildFilterFeatureRow(name, ctx) {
+    var frow = el("div", "frow");
+    var nm = el("span", "frow__name", name);
+    nm.title = name;
+    frow.appendChild(nm);
+
+    var inBtn = el("button", "fbtn fbtn--in fbtn--sm", I18N.t("filterKeep"));
+    inBtn.type = "button";
+    inBtn.addEventListener("click", function () {
+      var nowIn = filterDraft.include.has(name);
+      setFeatureInDraft(name, nowIn ? null : "include");
+      refreshRowUI(name, inBtn, outBtn);
+      refreshGroupUI(ctx);
+    });
+    frow.appendChild(inBtn);
+
+    var outBtn = el("button", "fbtn fbtn--out fbtn--sm", I18N.t("filterDrop"));
+    outBtn.type = "button";
+    outBtn.addEventListener("click", function () {
+      var nowOut = filterDraft.exclude.has(name);
+      setFeatureInDraft(name, nowOut ? null : "exclude");
+      refreshRowUI(name, inBtn, outBtn);
+      refreshGroupUI(ctx);
+    });
+    frow.appendChild(outBtn);
+
+    refreshRowUI(name, inBtn, outBtn);
+    return { row: frow, name: name, inBtn: inBtn, outBtn: outBtn };
+  }
+
+  function refreshRowUI(name, inBtn, outBtn) {
+    inBtn.classList.toggle("is-active", filterDraft.include.has(name));
+    outBtn.classList.toggle("is-active", filterDraft.exclude.has(name));
+  }
+
+  // Recompute a group header's badge + all-buttons from the draft only.
+  function refreshGroupUI(ctx) {
+    var nIn = 0, nOut = 0;
+    ctx.g.members.forEach(function (name) {
+      if (filterDraft.include.has(name)) nIn++;
+      if (filterDraft.exclude.has(name)) nOut++;
+    });
+    ctx.allIn.classList.toggle("is-active", nIn === ctx.g.n && nIn > 0);
+    ctx.allOut.classList.toggle("is-active", nOut === ctx.g.n && nOut > 0);
+    var parts = [];
+    if (nIn) parts.push(I18N.format("filterInCount", { n: nIn }));
+    if (nOut) parts.push(I18N.format("filterOutCount", { n: nOut }));
+    ctx.badge.textContent = parts.join(" / ");
+    ctx.badge.hidden = !(nIn || nOut);
+    updateApplyVisual();
+  }
+
+  function applyFilterAndRender() {
+    renderFilterSummary();
+    renderModels();
+    // The Pareto scatter reflects the same filter: filtered-out models stay as
+    // faint ghosts, and the front is rebuilt from the filtered-in set only.
+    if (state.view === "pareto" && state.result && state.result.verify) renderPareto();
+  }
+
+  // Summary chip next to the Filter button: e.g. "2 in · 3 out · 1 range".
+  function renderFilterSummary() {
+    var f = state.filter;
+    var summary = $("#filter-summary");
+    if (!summary) return;
+    var nNum = 0;
+    for (var k in f.numeric) if (Object.prototype.hasOwnProperty.call(f.numeric, k) &&
+        (f.numeric[k].min != null || f.numeric[k].max != null)) nNum++;
+    var parts = [];
+    if (f.include && f.include.size) parts.push(I18N.format("filterInCount", { n: f.include.size }));
+    if (f.exclude && f.exclude.size) parts.push(I18N.format("filterOutCount", { n: f.exclude.size }));
+    if (nNum) parts.push(I18N.format(nNum === 1 ? "filterRulesCount" : "filterRulesCountPlural", { n: nNum }));
+    summary.textContent = parts.join(" · ");
+    summary.hidden = !(f.active && parts.length);
+    var btn = $("#btn-filter");
+    if (btn) btn.classList.toggle("is-active-filter", f.active && parts.length > 0);
+  }
+
+  function renderUnits() {
+    var res = state.result;
+    var wrap = $("#units-groups");
+    var empty = $("#units-empty");
+    if (!wrap) return;
+    if (!res || !res.meta || !res.meta.units) {
+      wrap.innerHTML = "";
+      if (empty) empty.hidden = false;
+      return;
+    }
+    if (empty) empty.hidden = true;
+    var units = res.meta.units;
+    wrap.innerHTML = "";
+    var grid = el("div", "units__cards");
+    units.groups.forEach(function (g) {
+      var card = el("article", "unit-group");
+      card.className = "unit-group unit-g" + g.idx;
+
+      var head = el("div", "unit-group__head");
+      var swatch = el("span", "unit-group__swatch");
+      swatch.setAttribute("aria-hidden", "true");
+      head.appendChild(swatch);
+
+      var txt = el("div", "unit-group__title");
+      var name = el("div", "unit-group__name");
+      name.textContent = g.dimensionless
+        ? I18N.t("unitsDimless")
+        : I18N.format("unitsGroupName", { n: g.idx + 1 });
+      txt.appendChild(name);
+
+      var meta = el("div", "unit-group__meta");
+      meta.textContent = I18N.format("unitsGroupMeta", {
+        range: g.rangeText,
+        n: g.n,
+      });
+      txt.appendChild(meta);
+      head.appendChild(txt);
+
+      var vec = el("div", "unit-group__vector");
+      vec.textContent = I18N.t("unitsVector") + " " + vectorText(g.vector);
+      vec.title = I18N.t("unitsVectorTitle");
+      head.appendChild(vec);
+
+      card.appendChild(head);
+
+      var members = el("div", "unit-group__members");
+      g.members.forEach(function (nameText) {
+        var chip = el("span", "unit-group__chip");
+        chip.textContent = nameText;
+        members.appendChild(chip);
+      });
+      card.appendChild(members);
+
+      grid.appendChild(card);
+    });
+    wrap.appendChild(grid);
+  }
+
   function renderPareto() {
     var res = state.result;
     if (!res || !res.verify) return;
     if (state.paretoMode === "3d") { renderPareto3D(); return; }
     var computed = paretoPoints();
-    var pts = computed.pts, xDef = computed.xDef, yDef = computed.yDef;
+    var split = paretoSplit(computed.pts);
+    var pts = split.pts, ghosts = split.ghosts;
+    var xDef = computed.xDef, yDef = computed.yDef;
     var front = computeParetoFront1(pts, xDef, yDef);
+    var ghostOn = ghosts.length > 0;
 
-    $("#pareto-count").textContent = I18N.format("paretoCount", { n: front.length });
+    $("#pareto-count").textContent = ghostOn
+      ? I18N.format("paretoCountFiltered", { n: front.length, m: pts.length, t: computed.pts.length })
+      : I18N.format("paretoCount", { n: front.length });
 
     var dom = $("#pareto-chart");
     var C = getThemeColors();
@@ -1736,10 +2620,14 @@
     state.paretoChart = echarts.init(dom);
 
     var allData = pts.map(function (p) { return { value: [p.x, p.y], rank: p.rank }; });
+    var ghostData = ghosts.map(function (p) { return { value: [p.x, p.y], rank: p.rank, ghost: true }; });
     var frontLine = front.map(function (p) { return [p.x, p.y]; });
     var frontData = front.map(function (p) { return { value: [p.x, p.y], rank: p.rank }; });
-    var xb = paretoAxisBounds(pts.map(function (p) { return p.x; }));
-    var yb = paretoAxisBounds(pts.map(function (p) { return p.y; }));
+    // Axis bounds must cover the ghosts too — they stay visible (faintly) so
+    // they must not fall outside the plotted range.
+    var viewPts = computed.pts;
+    var xb = paretoAxisBounds(viewPts.map(function (p) { return p.x; }));
+    var yb = paretoAxisBounds(viewPts.map(function (p) { return p.y; }));
 
     state.paretoChart.setOption({
       animation: true,
@@ -1749,15 +2637,31 @@
         formatter: function (params) {
           var d = params.data;
           if (!d || d.rank == null) return "";
-          return [
+          var rows = [
             "<strong>" + I18N.t("detailRank") + " " + d.rank + "</strong>",
             I18N.t("detailTrain") + " " + I18N.t(xDef.label) + ": " + fmt(d.value[0], 4),
             I18N.t("detailVerify") + " " + I18N.t(yDef.label) + ": " + fmt(d.value[1], 4),
-          ].join("<br/>");
+          ];
+          if (d.ghost) rows.push('<span style="opacity:.65">' + I18N.t("paretoGhostNote") + "</span>");
+          return rows.join("<br/>");
         },
       },
       legend: {
-        data: [I18N.t("paretoAll"), I18N.t("paretoFront")],
+        data: (function () {
+          var names = [I18N.t("paretoAll"), I18N.t("paretoFront")];
+          if (ghostOn) {
+            names.unshift({
+              name: I18N.t("paretoGhost"),
+              icon: "circle",
+              itemStyle: {
+                color: "transparent",
+                borderColor: withAlpha(C.textSoft, 0.6),
+                borderWidth: 1.4,
+              },
+            });
+          }
+          return names;
+        })(),
         top: 8,
         textStyle: { color: C.chartText },
       },
@@ -1787,15 +2691,40 @@
         splitLine: { lineStyle: { color: C.grid } },
       },
       dataZoom: [{ type: "inside" }],
-      series: [
-        {
+      series: (function () {
+        var s = [];
+        // Ghosts: filtered-out models drawn as faint hollow rings — they stay
+        // inspectable (click opens the detail) but never join the front.
+        if (ghostOn) {
+          s.push({
+            name: I18N.t("paretoGhost"),
+            type: "scatter",
+            data: ghostData,
+            symbolSize: 8,
+            itemStyle: {
+              color: withAlpha(C.textSoft, 0.10),
+              borderColor: withAlpha(C.textSoft, 0.55),
+              borderWidth: 1,
+            },
+            emphasis: {
+              itemStyle: {
+                color: withAlpha(C.textSoft, 0.20),
+                borderColor: withAlpha(C.textSoft, 0.9),
+                borderWidth: 1.6,
+              },
+            },
+            z: 1,
+          });
+        }
+        s.push({
           name: I18N.t("paretoAll"),
           type: "scatter",
           data: allData,
           symbolSize: 8,
           itemStyle: { color: C.textSoft, opacity: 0.5 },
-        },
-        {
+          z: 2,
+        });
+        s.push({
           name: "_frontLine",
           type: "line",
           data: frontLine,
@@ -1805,8 +2734,8 @@
           showSymbol: false,
           tooltip: { show: false },
           z: 4,
-        },
-        {
+        });
+        s.push({
           name: I18N.t("paretoFront"),
           type: "scatter",
           data: frontData,
@@ -1814,8 +2743,9 @@
           symbolSize: 10,
           itemStyle: { color: C.train, opacity: 0.95 },
           z: 5,
-        },
-      ],
+        });
+        return s;
+      })(),
     });
 
     state.paretoChart.off("click");
@@ -1845,7 +2775,9 @@
       tr.tabIndex = 0;
       tr.setAttribute("role", "button");
       tr.appendChild(el("td", "num", String(p.rank)));
-      tr.appendChild(el("td", "formula-cell", p.m.formulaOriginal));
+      var fcTd = el("td", "formula-cell");
+      setFormulaContent(fcTd, p.m.formulaOriginal);
+      tr.appendChild(fcTd);
       tr.appendChild(el("td", "num", fmt(p.x, 4)));
       tr.appendChild(el("td", "num", fmt(p.y, 4)));
       var td = el("td");
@@ -1874,7 +2806,7 @@
     state.currentModel = m;
 
     $("#dialog-title").textContent = I18N.t("detailRank") + " " + m.rank;
-    $("#formula-code").textContent = m.formulaOriginal;
+    setFormulaContent($("#formula-code"), m.formulaOriginal);
     renderMetricGrid(m);
 
     // Make the dialog visible BEFORE initialising ECharts: a chart initialised
@@ -2306,11 +3238,15 @@
     // language
     $("#btn-lang").addEventListener("click", function () {
       I18N.setLocale(I18N.getLocale() === "zh" ? "en" : "zh");
+      closeAllPopovers(null);
       applyI18n();
       if (state.result) {
         renderKpis();
+        renderControls(); // rebuild i18n option labels + view-aware controls
         renderModels();
+        renderFilterSummary();
         if (state.view === "pareto") renderPareto();
+        if (state.view === "units") renderUnits();
       }
     });
 
@@ -2337,24 +3273,40 @@
       });
     });
 
-    // controls
-    $("#sort-key").addEventListener("change", function (e) {
-      state.sortKey = e.target.value;
-      renderModels();
+    // filter / column popovers
+    $("#btn-filter").addEventListener("click", function (e) {
+      e.stopPropagation();
+      var pop = $("#filter-pop");
+      closeAllPopovers("#filter-pop");
+      if (pop.hidden) { renderFilterPanel(); setPopover("#filter-anchor", "#filter-pop", true); }
+      else setPopover("#filter-anchor", "#filter-pop", false);
     });
-    $("#sort-dir").addEventListener("change", function (e) {
-      state.sortAsc = e.target.value === "asc";
-      renderModels();
+    $("#btn-cols").addEventListener("click", function (e) {
+      e.stopPropagation();
+      var pop = $("#cols-pop");
+      closeAllPopovers("#cols-pop");
+      if (pop.hidden) { renderColsPanel(); setPopover("#cols-anchor", "#cols-pop", true); }
+      else setPopover("#cols-anchor", "#cols-pop", false);
     });
-    $("#top-n").addEventListener("change", function (e) {
-      var v = parseInt(e.target.value, 10);
-      state.topN = Number.isFinite(v) && v > 0 ? v : 100;
-      state.loadAll = false;
-      renderModels();
+    document.addEventListener("click", function (e) {
+      var inside = e.target.closest && e.target.closest(".pop-anchor");
+      if (!inside) closeAllPopovers(null);
     });
     $("#btn-load-all").addEventListener("click", function () {
-      state.loadAll = true;
+      state.loadAll = !state.loadAll;
+      renderControls();
       renderModels();
+    });
+    // Grid toolbar sorting — routes through sortByColumn() so it shares the
+    // exact pipeline (and cross-view state) with the table column headers.
+    $("#grid-sort-key").addEventListener("change", function (e) {
+      if (!e.target.value) return;
+      sortByColumn(e.target.value);
+      syncGridSortUI();
+    });
+    $("#grid-sort-dir").addEventListener("click", function () {
+      sortByColumn(state.sortKey); // same key toggles asc <-> desc
+      syncGridSortUI();
     });
     $("#view-table-btn").addEventListener("click", function () {
       state.view = "table";
@@ -2374,6 +3326,15 @@
       state.view = "pareto";
       renderControls();
       renderPareto();
+    });
+    $("#view-units-btn").addEventListener("click", function () {
+      if (!state.result || !state.result.meta || !state.result.meta.units) {
+        toast(I18N.t("unitsRequireOut"));
+        return;
+      }
+      state.view = "units";
+      renderControls();
+      renderUnits();
     });
     $("#pareto-x").addEventListener("change", function (e) {
       state.paretoX = e.target.value || "rmse";
@@ -2466,6 +3427,7 @@
     }
 
     applyI18n();
+    restoreColPrefs();
     renderFileList();
     renderRunButton();
     renderRecentList();

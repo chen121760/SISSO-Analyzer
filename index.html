@@ -34,8 +34,6 @@
         <span class="shell__brand-name" data-i18n="appTitle">SISSO-Analyzer</span>
       </div>
 
-      <div class="nav-summary" id="kpi-strip" aria-label="Run summary"></div>
-
       <nav class="nav-menu" aria-label="Pages">
         <button type="button" class="nav-item is-active" id="btn-nav-home">
           <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
@@ -66,6 +64,13 @@
             <path d="M6 19V9M11 19V5M16 19v-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
           </svg>
           <span data-i18n="viewPareto">Pareto</span>
+        </button>
+        <button type="button" class="nav-item" id="view-units-btn" disabled>
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+            <path d="M3 8.5 12 4l9 4.5-9 4.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+            <path d="M3 15.5 12 20l9-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+          </svg>
+          <span data-i18n="viewUnits">Units</span>
         </button>
       </nav>
     </aside>
@@ -139,6 +144,7 @@
           <div class="upload-layout">
             <div class="upload-card">
               <h1 class="upload-card__title" id="upload-title" data-i18n="uploadTitle">Load SISSO results</h1>
+              <p class="upload-card__subtitle" data-i18n="appSubtitle">Interactive analyzer for SISSO regression results</p>
               <div
                 class="dropzone"
                 id="dropzone"
@@ -182,28 +188,34 @@
         <section id="view-results" class="view view--results" hidden aria-label="Results">
           <div id="warning" class="warning" role="status" hidden></div>
 
+          <div class="run-overview" id="kpi-strip" aria-label="Run summary"></div>
+
           <div class="toolbar">
-            <div class="toolbar__group">
-              <span class="toolbar__group-label" data-i18n="toolbarSort">Sort &amp; filter</span>
+            <div class="toolbar__group toolbar__group--count">
+              <span class="count-note" id="count-note" aria-live="polite"></span>
+            </div>
+            <div class="toolbar__group toolbar__group--actions">
+              <div class="toolbar__row" id="load-all-row">
+                <button type="button" class="btn btn--secondary btn--sm" id="btn-load-all" data-i18n="loadAll">Load all</button>
+              </div>
               <div class="toolbar__row">
-                <label class="field">
-                  <span class="field__label" data-i18n="sortBy">Sort by</span>
-                  <select id="sort-key" class="select"></select>
-                </label>
-                <label class="field">
-                  <span class="field__label">&#8597;</span>
-                  <select id="sort-dir" class="select"></select>
-                </label>
-                <label class="field">
-                  <span class="field__label" data-i18n="topN">Show</span>
-                  <input type="number" id="top-n" class="input" min="1" value="100" />
-                </label>
-                <button type="button" class="btn btn--secondary" id="btn-load-all" data-i18n="loadAll">Load all</button>
+                <span class="field" id="grid-sort-field" hidden>
+                  <span class="field__label" id="grid-sort-label" data-i18n="sortBy">Sort by</span>
+                  <select id="grid-sort-key" class="select select--sm" aria-labelledby="grid-sort-label"></select>
+                  <button type="button" class="btn btn--secondary btn--sm sort-dir-btn" id="grid-sort-dir" aria-label="Sort direction"></button>
+                </span>
+                <span class="pop-anchor" id="filter-anchor">
+                  <button type="button" class="btn btn--secondary btn--sm" id="btn-filter" aria-expanded="false" data-i18n="filterBtn">Filter</button>
+                  <span class="filter-summary" id="filter-summary" hidden></span>
+                  <div class="popover" id="filter-pop" hidden role="dialog" aria-label="Filter models"></div>
+                </span>
+                <span class="pop-anchor" id="cols-anchor">
+                  <button type="button" class="btn btn--secondary btn--sm" id="btn-cols" aria-expanded="false" data-i18n="colsBtn">Columns</button>
+                  <div class="popover" id="cols-pop" hidden role="dialog" aria-label="Manage columns"></div>
+                </span>
               </div>
             </div>
           </div>
-
-          <p class="count-note" id="count-note" aria-live="polite"></p>
 
           <div class="models-table-wrap" id="table-wrap"></div>
           <div class="models-grid" id="grid-wrap" hidden></div>
@@ -233,6 +245,21 @@
             <p class="count-note" id="pareto-count" aria-live="polite"></p>
             <div id="pareto-chart" class="chart chart--pareto" role="img" aria-label="Pareto front scatter"></div>
             <div class="models-table-wrap" id="pareto-table-wrap"></div>
+          </div>
+
+          <!-- Units / dimension view -->
+          <div class="units" id="units-wrap" hidden>
+            <div class="units__header">
+              <h2 class="units__title" data-i18n="unitsTitle">Dimension groups</h2>
+              <p class="units__hint" data-i18n="unitsHint">
+                Feature columns sharing the same unit vector are grouped and coloured alike —
+                in formulas below, the same colour marks the same dimension.
+              </p>
+            </div>
+            <div class="units__grid" id="units-groups"></div>
+            <p class="empty-state" id="units-empty" hidden data-i18n="unitsEmpty">
+              SISSO.out is required to read the unit matrix — load it with the result files.
+            </p>
           </div>
 
           <p class="empty-state" id="empty-state" data-i18n="emptyGrid" hidden>No models to display.</p>
