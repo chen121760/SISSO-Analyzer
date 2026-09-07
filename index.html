@@ -65,6 +65,14 @@
           </svg>
           <span data-i18n="viewPareto">Pareto</span>
         </button>
+        <button type="button" class="nav-item" id="view-compare-btn" disabled>
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+            <path d="M4 20h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M9 4v16M15 4v16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M9 7.5L6 10.5M9 7.5l3 3M15 7.5l-3 3M15 7.5l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span data-i18n="viewCompare">Compare</span>
+        </button>
         <button type="button" class="nav-item" id="view-units-btn" disabled>
           <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
             <path d="M3 8.5 12 4l9 4.5-9 4.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
@@ -181,6 +189,8 @@
                 verify.dat is optional — if omitted, only train metrics are shown.
               </p>
 
+              <div class="health-box health-box--block" id="health-block" role="status" aria-live="polite" hidden></div>
+
               <div class="upload-card__run">
                 <button type="button" class="btn btn--primary btn--run" id="btn-run" disabled data-i18n="run">Analyze</button>
               </div>
@@ -223,6 +233,8 @@
                   <button type="button" class="btn btn--secondary btn--sm" id="btn-cols" aria-expanded="false" data-i18n="colsBtn">Columns</button>
                   <div class="popover" id="cols-pop" hidden role="dialog" aria-label="Manage columns"></div>
                 </span>
+                <button type="button" class="btn btn--secondary btn--sm" id="btn-fav-only" disabled></button>
+                <button type="button" class="btn btn--secondary btn--sm" id="btn-excluded" disabled></button>
               </div>
             </div>
           </div>
@@ -238,24 +250,28 @@
               </div>
               <div class="toolbar__row">
                 <label class="field">
-                  <span class="field__label" data-i18n="paretoX">Train metric (X)</span>
+                  <span class="field__label" data-i18n="paretoX">X · dataset &amp; metric</span>
                   <select id="pareto-x" class="select"></select>
                 </label>
                 <label class="field">
-                  <span class="field__label" data-i18n="paretoY">Verify metric (Y)</span>
+                  <span class="field__label" data-i18n="paretoY">Y · dataset &amp; metric</span>
                   <select id="pareto-y" class="select"></select>
                 </label>
                 <label class="field" id="pareto-z-field" hidden>
-                  <span class="field__label" data-i18n="paretoZ">Third metric (Z)</span>
+                  <span class="field__label" data-i18n="paretoZ">Z · dataset &amp; metric</span>
                   <select id="pareto-z" class="select"></select>
                 </label>
                 <button type="button" class="btn btn--secondary btn--sm" id="pareto-mode-btn">3D</button>
+                <button type="button" class="btn btn--secondary btn--sm" id="btn-pareto-export" data-i18n="exportCsv">Export CSV</button>
               </div>
             </div>
             <p class="count-note" id="pareto-count" aria-live="polite"></p>
             <div id="pareto-chart" class="chart chart--pareto" role="img" aria-label="Pareto front scatter"></div>
             <div class="models-table-wrap" id="pareto-table-wrap"></div>
           </div>
+
+          <!-- Compare models view -->
+          <div class="compare" id="compare-wrap" hidden aria-label="Compare models"></div>
 
           <!-- Units / dimension view -->
           <div class="units" id="units-wrap" hidden>
@@ -270,6 +286,9 @@
             <p class="empty-state" id="units-empty" hidden data-i18n="unitsEmpty">
               SISSO.out is required to read the unit matrix — load it with the result files.
             </p>
+
+            <!-- Feature & descriptor usage frequency + batch favourite / exclude -->
+            <div class="units__usage" id="units-usage"></div>
           </div>
 
           <p class="empty-state" id="empty-state" data-i18n="emptyGrid" hidden>No models to display.</p>
@@ -283,6 +302,10 @@
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
       <header class="dialog__header">
         <h2 class="dialog__title" id="dialog-title"></h2>
+        <div class="dialog__tools">
+          <button type="button" class="btn btn--ghost btn--icon dialog__state-btn" id="btn-detail-fav" aria-pressed="false"></button>
+          <button type="button" class="btn btn--ghost btn--icon dialog__state-btn" id="btn-detail-excl" aria-pressed="false"></button>
+        </div>
         <button type="button" class="btn btn--ghost btn--icon" id="dialog-close" aria-label="Close">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
             <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -295,20 +318,48 @@
             <div class="formula-block">
               <div class="formula-block__header">
                 <span class="formula-block__label" data-i18n="detailFormula">Formula</span>
-                <button type="button" class="btn btn--ghost btn--sm" id="btn-copy" data-i18n="detailCopy">Copy formula</button>
+                <div class="copy-menu-anchor">
+                  <button type="button" class="btn btn--ghost btn--sm" id="btn-copy" data-i18n="detailCopy">Copy formula</button>
+                  <button type="button" class="btn btn--ghost btn--sm btn--icon" id="btn-copy-as" data-i18n-title="copyAsTitle" aria-expanded="false" aria-label="Copy as">
+                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                      <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </button>
+                  <div class="copy-menu" id="copy-menu" hidden role="menu" aria-label="Copy formula as">
+                    <button type="button" class="copy-menu__item" data-copy-kind="plain" role="menuitem" data-i18n="copyPlain">Plain text</button>
+                    <button type="button" class="copy-menu__item" data-copy-kind="latex" role="menuitem" data-i18n="copyLatex">LaTeX</button>
+                    <button type="button" class="copy-menu__item" data-copy-kind="office" role="menuitem" data-i18n="copyOffice">Word / PowerPoint (Office equation)</button>
+                    <p class="copy-menu__hint" data-i18n="copyOfficeHint">Paste into an equation box (Alt + =) in Word or PowerPoint.</p>
+                  </div>
+                </div>
               </div>
               <pre class="formula-block__code" id="formula-code"></pre>
             </div>
             <div class="metric-grid" id="metric-grid"></div>
           </div>
           <div class="detail-chart">
-            <div class="chart-controls">
+            <div class="chart-tabs" role="group" aria-label="Model chart views">
+              <button type="button" class="chart-tab is-active" id="tab-predicted" data-chart-tab="scatter" data-i18n="detailChartTitle">Predicted vs true</button>
+              <button type="button" class="chart-tab" id="tab-error" data-chart-tab="error" data-i18n="detailErrorTitle">Error distribution</button>
+            </div>
+            <div class="chart-controls" id="scatter-controls">
               <label class="chart-controls__field">
                 <span class="chart-controls__label" data-i18n="colorBy">Color by</span>
                 <select id="color-key" class="select select--sm"></select>
               </label>
             </div>
+            <div class="error-controls" id="error-controls" hidden>
+              <div class="segmented" id="error-ds-seg" role="group" aria-label="Error distribution dataset">
+                <button type="button" class="segmented__btn is-active" id="ds-train" data-i18n="detailTrain">train</button>
+                <button type="button" class="segmented__btn" id="ds-verify" data-i18n="detailVerify" hidden>verify</button>
+              </div>
+              <span class="error-controls__hint" data-i18n="errHint">error = predicted − true</span>
+            </div>
             <div id="chart" class="chart" role="img" aria-label="Predicted vs true scatter plot"></div>
+            <div class="error-view" id="error-view" hidden>
+              <div id="chart-error" class="chart chart--error" role="img" aria-label="Error distribution histogram"></div>
+              <aside class="error-stats" id="error-stats" aria-label="Error distribution statistics"></aside>
+            </div>
           </div>
         </div>
       </div>
@@ -343,6 +394,7 @@
   <script src="js/i18n.js"></script>
   <script src="js/sisso-core.js"></script>
   <script src="js/demo-data.js"></script>
+  <script src="js/health-check.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

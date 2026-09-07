@@ -13,6 +13,9 @@
  *   parseTopFile(text)        -> {ranks, rmses, maxaes, featureLists}
  *   parseCoeffFile(text)      -> number[][]
  *   runPipeline(files)        -> full analysis result (see below)
+ *   …plus the usage/matching helpers used by the Units view (featureUsage,
+ *   descriptorUsage, modelsWithFeature / modelsWithDescriptor, and the batch
+ *   favourite/exclude writers batchSetModelStates / undoBatchModels).
  */
 (function (root, factory) {
   if (typeof module === "object" && module.exports) {
@@ -276,6 +279,364 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Formula text exporters — Plain / LaTeX / Microsoft Office UnicodeMath.
+  //
+  // SISSO stores model formulas as ASCII text, e.g.
+  //   "(-7.042753903) + (0.1613175959)*((f_138))"
+  //   "c0 + c1*sqrt((x1+x2)/x3) + c2*x1^2/x4 - abs(log(x5))"
+  // These helpers parse such a string ONCE into a shared expression AST and
+  // render the same AST to each target format, so precedence/parenthesisation
+  // live in one place instead of per-format string replacement. Feature /
+  // variable names are preserved verbatim.
+  //
+  // Public API:
+  //   formulaAst(text)         -> AST (throws on unparsable input)
+  //   formulaToPlain(text)     -> canonical ASCII (the evaluator's dialect)
+  //   formulaToLatex(text)     -> LaTeX math fragment
+  //   formulaToUnicodeMath(text)-> Office UnicodeMath linear format (Word /
+  //                                PowerPoint equation, paste into Alt+= box)
+  // ---------------------------------------------------------------------------
+
+  var FORMULA_NUM_RE = /(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(?:[eE][+-]?[0-9]+)?/y;
+  var FORMULA_IDENT_RE = /[A-Za-z_][A-Za-z0-9_]*/y;
+  var FORMULA_SKIP_RE = /\s+/y;
+  var FORMULA_OPERATORS = { "+": 1, "-": 1, "*": 2, "/": 2, "^": 4 };
+  var FORMULA_UNARY_PREC = 3; // unary minus: tighter than */, looser than ^
+  var FORMULA_ATOM_PREC = 5;
+
+  function formulaTokens(text) {
+    var toks = [];
+    var src = String(text == null ? "" : text);
+    var i = 0, n = src.length;
+    while (i < n) {
+      FORMULA_SKIP_RE.lastIndex = i;
+      var wm = FORMULA_SKIP_RE.exec(src);
+      if (wm && wm.index === i) { i = wm.index + wm[0].length; continue; }
+      var c = src[i];
+      if (c === "(") { toks.push({ t: "(", raw: "(" }); i++; continue; }
+      if (c === ")") { toks.push({ t: ")", raw: ")" }); i++; continue; }
+      if (c === ",") { toks.push({ t: ",", raw: "," }); i++; continue; }
+      if (c === "+" || c === "-" || c === "*" || c === "/" || c === "^") {
+        toks.push({ t: "op", op: c, raw: c }); i++; continue;
+      }
+      if (/[0-9.]/.test(c)) {
+        FORMULA_NUM_RE.lastIndex = i;
+        var nm = FORMULA_NUM_RE.exec(src);
+        if (nm && nm.index === i) {
+          toks.push({ t: "num", v: parseFloat(nm[0]), raw: nm[0] });
+          i = nm.index + nm[0].length;
+          continue;
+        }
+      }
+      if (/[A-Za-z_]/.test(c)) {
+        FORMULA_IDENT_RE.lastIndex = i;
+        var im = FORMULA_IDENT_RE.exec(src);
+        if (im && im.index === i) {
+          toks.push({ t: "ident", name: im[0], raw: im[0] });
+          i = im.index + im[0].length;
+          continue;
+        }
+      }
+      throw new Error("formula: unexpected character '" + c + "' at position " + i);
+    }
+    return toks;
+  }
+
+  // Parse formula text into the shared AST.
+  //   node kinds:
+  //     { k: "num", v }        number
+  //     { k: "var", name }     variable / feature name
+  //     { k: "neg", a }        unary minus
+  //     { k: "op", op, a, b }  binary + - * / ^
+  //     { k: "call", name, args:[..] }  function call (sqrt, log, exp, abs, …)
+  function formulaAst(text) {
+    var toks = formulaTokens(text);
+    var p = 0;
+    function cur() { return toks[p]; }
+    function peekOp() { var t = cur(); return t && t.t === "op" ? t.op : null; }
+    function next() { return toks[p++]; }
+    function expect(t) {
+      var x = next();
+      if (!x || x.t !== t) throw new Error("formula: expected '" + t + "'");
+      return x;
+    }
+    function parseAdd() {
+      var l = parseMul();
+      var o;
+      while ((o = peekOp()) === "+" || o === "-") { next(); l = { k: "op", op: o, a: l, b: parseMul() }; }
+      return l;
+    }
+    function parseMul() {
+      var l = parseUnary();
+      var o;
+      while ((o = peekOp()) === "*" || o === "/") { next(); l = { k: "op", op: o, a: l, b: parseUnary() }; }
+      return l;
+    }
+    function parseUnary() {
+      var o = peekOp();
+      if (o === "-" || o === "+") {
+        next();
+        var a = parseUnary();
+        return o === "-" ? { k: "neg", a: a } : a;
+      }
+      return parsePower();
+    }
+    function parsePower() {
+      var l = parsePrimary();
+      if (peekOp() === "^") {
+        next();
+        return { k: "op", op: "^", a: l, b: parseUnary() };
+      }
+      return l;
+    }
+    function parseArgs(fnName) {
+      var args = [];
+      var t = cur();
+      if (t && t.t === ")") { next(); return args; }
+      args.push(parseAdd());
+      while (cur() && cur().t === ",") { next(); args.push(parseAdd()); }
+      expect(")");
+      return args;
+    }
+    function parsePrimary() {
+      var t = next();
+      if (!t) throw new Error("formula: unexpected end of expression");
+      if (t.t === "num") return { k: "num", v: t.v };
+      if (t.t === "ident") {
+        if (cur() && cur().t === "(") {
+          next();
+          return { k: "call", name: t.name, args: parseArgs(t.name) };
+        }
+        return { k: "var", name: t.name };
+      }
+      if (t.t === "(") {
+        var e = parseAdd();
+        expect(")");
+        return e;
+      }
+      throw new Error("formula: unexpected token '" + (t.raw != null ? t.raw : t.t) + "'");
+    }
+    var root = parseAdd();
+    if (p < toks.length) throw new Error("formula: trailing tokens after expression");
+    return root;
+  }
+
+  function formulaNodePrec(node) {
+    if (!node) return FORMULA_ATOM_PREC;
+    if (node.k === "op") return FORMULA_OPERATORS[node.op] != null ? FORMULA_OPERATORS[node.op] : FORMULA_ATOM_PREC;
+    if (node.k === "neg") return FORMULA_UNARY_PREC;
+    return FORMULA_ATOM_PREC; // num / var / call
+  }
+
+  // Decide whether `child` needs surrounding parentheses when printed as the
+  // left/right operand of `parentOp`. Based purely on precedence + associativity
+  // (^ is right-associative; +,-,*,/ are left-associative in this dialect).
+  function formulaChildNeedsParens(child, parentOp, side) {
+    if (!parentOp) return false;
+    if (child && child.k === "neg") return true; // group unary minus under binary ops
+    var childOp = child && child.k === "op" ? child.op : null;
+    var pc = formulaNodePrec(child);
+    var pp = FORMULA_OPERATORS[parentOp] != null ? FORMULA_OPERATORS[parentOp] : FORMULA_ATOM_PREC;
+    if (pc < pp) return true;
+    if (pc > pp) return false;
+    // Equal precedence:
+    if (side === "left") return parentOp === "^";          // (a^b)^c
+    if (parentOp === "-" || parentOp === "/") return true;  // a-(b-c), a/(b*c)
+    if (parentOp === "^") return false;                     // a^b^c = a^(b^c)
+    // + and * are associative on the right: group only when the operator differs
+    return childOp !== parentOp;                            // a+(b-c), a*(b/c)
+  }
+
+  // A unary minus must parenthesise its operand when the operand is a lower /
+  // equal-precedence binary expression or another unary minus: -(a+b), -(a*b).
+  function formulaNegArgNeedsParens(arg) {
+    if (!arg) return false;
+    if (arg.k === "neg") return true;
+    if (arg.k === "op") return arg.op !== "^"; // -x^2 is -(x^2) by convention
+    return false;
+  }
+
+  function fmtPlainNumber(v) {
+    if (v === 0) return "0"; // also normalises -0
+    return String(v);
+  }
+
+  function fmtLatexNumber(v) {
+    if (v === 0) return "0";
+    var s = String(v);
+    var m = /^([+-]?[0-9.]+)[eE]([+-]?[0-9]+)$/.exec(s);
+    if (!m) return s;
+    var mant = m[1];
+    if (mant.charAt(0) === "+") mant = mant.slice(1);
+    return mant + "\\times 10^{" + parseInt(m[2], 10) + "}";
+  }
+
+  function fmtUmathNumber(v) {
+    if (v === 0) return "0";
+    var s = String(v);
+    var m = /^([+-]?[0-9.]+)[eE]([+-]?[0-9]+)$/.exec(s);
+    if (!m) return s;
+    var mant = m[1];
+    if (mant.charAt(0) === "+") mant = mant.slice(1);
+    return mant + "×10^(" + parseInt(m[2], 10) + ")";
+  }
+
+  function latexEscapeName(name) {
+    // feature names are [A-Za-z0-9_]+ by construction; escape the few LaTeX
+    // specials that could appear anyway.
+    return String(name).replace(/([\\{}_%$&#^])/g, "\\$1");
+  }
+
+  // A "word-like" identifier (multi-character or contains digits) is typeset
+  // upright via \mathrm so "f_138"/"NValence" don't read as f·1·3·8.
+  function latexVarName(name) {
+    var s = String(name);
+    return /^[A-Za-z]$/.test(s) ? s : "\\mathrm{" + latexEscapeName(s) + "}";
+  }
+
+  // ------------------------------------------------------------------ Plain --
+
+  function formulaPlainNode(node) {
+    if (!node) return "";
+    switch (node.k) {
+      case "num": return fmtPlainNumber(node.v);
+      case "var": return node.name;
+      case "call": return node.name + "(" + node.args.map(formulaPlainNode).join(",") + ")";
+      case "neg": {
+        var inner = formulaNegArgNeedsParens(node.a) ? "(" + formulaPlainNode(node.a) + ")" : formulaPlainNode(node.a);
+        return "-" + inner;
+      }
+      case "op": {
+        if (node.op === "^") {
+          var baseP = formulaChildNeedsParens(node.a, "^", "left") ? "(" + formulaPlainNode(node.a) + ")" : formulaPlainNode(node.a);
+          var exp = node.b;
+          var expStr = formulaPlainNode(exp);
+          if (exp.k === "op" && exp.op !== "^" || exp.k === "neg") expStr = "(" + expStr + ")";
+          return baseP + "^" + expStr;
+        }
+        var la = formulaChildNeedsParens(node.a, node.op, "left") ? "(" + formulaPlainNode(node.a) + ")" : formulaPlainNode(node.a);
+        var rb = formulaChildNeedsParens(node.b, node.op, "right") ? "(" + formulaPlainNode(node.b) + ")" : formulaPlainNode(node.b);
+        return la + node.op + rb;
+      }
+    }
+    return "";
+  }
+
+  // ----------------------------------------------------------------- LaTeX --
+
+  var LATEX_FN = {
+    sqrt: 1, cbrt: 1, log: 1, exp: 1, abs: 1,
+  };
+
+  function formulaLatexNode(node, parentOp, side) {
+    if (!node) return "";
+    var wrap = formulaChildNeedsParens(node, parentOp, side);
+    var body;
+    switch (node.k) {
+      case "num": body = fmtLatexNumber(node.v); break;
+      case "var": body = latexVarName(node.name); break;
+      case "neg":
+        body = "-" + (formulaNegArgNeedsParens(node.a)
+          ? "(" + formulaLatexNode(node.a) + ")"
+          : formulaLatexNode(node.a));
+        break;
+      case "call": {
+        var origName = String(node.name);
+        var name = origName.toLowerCase();
+        var arg = node.args && node.args[0] ? formulaLatexNode(node.args[0]) : "";
+        var rest = (node.args || []).slice(1).map(function (a) { return formulaLatexNode(a); }).join(",");
+        if (name === "sqrt") body = "\\sqrt{" + arg + "}";
+        else if (name === "cbrt") body = "\\sqrt[3]{" + arg + "}";
+        else if (name === "exp") body = "e^{" + arg + "}";
+        else if (name === "abs") body = "\\left|" + arg + "\\right|";
+        else if (name === "log") body = "\\log(" + arg + (rest ? "," + rest : "") + ")";
+        else body = "\\mathrm{" + latexEscapeName(origName) + "}(" + arg + (rest ? "," + rest : "") + ")";
+        break;
+      }
+      case "op": {
+        if (node.op === "^") {
+          var bp = formulaChildNeedsParens(node.a, "^", "left") ? "(" + formulaLatexNode(node.a) + ")" : formulaLatexNode(node.a);
+          body = bp + "^{" + formulaLatexNode(node.b) + "}";
+          break;
+        }
+        if (node.op === "/") {
+          body = "\\frac{" + formulaLatexNode(node.a) + "}{" + formulaLatexNode(node.b) + "}";
+          break;
+        }
+        var sep = node.op === "*" ? " \\cdot " : " " + node.op + " ";
+        var la = formulaChildNeedsParens(node.a, node.op, "left") ? "(" + formulaLatexNode(node.a) + ")" : formulaLatexNode(node.a);
+        var rb = formulaChildNeedsParens(node.b, node.op, "right") ? "(" + formulaLatexNode(node.b) + ")" : formulaLatexNode(node.b);
+        body = la + sep + rb;
+        break;
+      }
+      default: body = "";
+    }
+    return wrap ? "(" + body + ")" : body;
+  }
+
+  // ------------------------------------------------------------- UnicodeMath --
+
+  // Word / PowerPoint equation linear format (UnicodeMath). Math blocks built
+  // from the same AST; paste the result into an equation box (Alt + =).
+  function umathIsUnit(node) {
+    if (!node) return false;
+    return node.k === "num" || node.k === "var";
+  }
+
+  function formulaUmathNode(node, parentOp, side) {
+    if (!node) return "";
+    var wrap = formulaChildNeedsParens(node, parentOp, side);
+    var body;
+    switch (node.k) {
+      case "num": body = fmtUmathNumber(node.v); break;
+      case "var": body = node.name; break;
+      case "neg":
+        body = "-" + (formulaNegArgNeedsParens(node.a)
+          ? "(" + formulaUmathNode(node.a) + ")"
+          : formulaUmathNode(node.a));
+        break;
+      case "call": {
+        var origName = String(node.name);
+        var name = origName.toLowerCase();
+        var arg = node.args && node.args[0] ? formulaUmathNode(node.args[0]) : "";
+        var rest = (node.args || []).slice(1).map(function (a) { return formulaUmathNode(a); }).join(",");
+        if (name === "sqrt") body = "\\sqrt(" + arg + ")";
+        else if (name === "cbrt") body = "\\sqrt(3&" + arg + ")";
+        else if (name === "exp") body = "e" + (umathIsUnit(node.args[0]) ? "^" + arg : "^(" + arg + ")");
+        else if (name === "abs") body = "|" + arg + "|";
+        else body = origName + "(" + arg + (rest ? "," + rest : "") + ")"; // log & unknown fns keep their name
+        break;
+      }
+      case "op": {
+        if (node.op === "^") {
+          var bp = formulaChildNeedsParens(node.a, "^", "left") ? "(" + formulaUmathNode(node.a) + ")" : formulaUmathNode(node.a);
+          var ex = node.b;
+          body = bp + "^" + (umathIsUnit(ex) ? formulaUmathNode(ex) : "(" + formulaUmathNode(ex) + ")");
+          break;
+        }
+        if (node.op === "/") {
+          // UnicodeMath fraction: a/(b+c) builds a stacked fraction in Word.
+          var numS = umathIsUnit(node.a) ? formulaUmathNode(node.a) : "(" + formulaUmathNode(node.a) + ")";
+          var denS = umathIsUnit(node.b) ? formulaUmathNode(node.b) : "(" + formulaUmathNode(node.b) + ")";
+          body = numS + "/" + denS;
+          break;
+        }
+        var sep = node.op === "*" ? "*" : node.op;
+        var la = formulaChildNeedsParens(node.a, node.op, "left") ? "(" + formulaUmathNode(node.a) + ")" : formulaUmathNode(node.a);
+        var rb = formulaChildNeedsParens(node.b, node.op, "right") ? "(" + formulaUmathNode(node.b) + ")" : formulaUmathNode(node.b);
+        body = la + sep + rb;
+        break;
+      }
+      default: body = "";
+    }
+    return wrap ? "(" + body + ")" : body;
+  }
+
+  function formulaToPlain(text) { return formulaPlainNode(formulaAst(text)); }
+  function formulaToLatex(text) { return formulaLatexNode(formulaAst(text)); }
+  function formulaToUnicodeMath(text) { return formulaUmathNode(formulaAst(text)); }
+
+  // ---------------------------------------------------------------------------
   // Metrics
   // ---------------------------------------------------------------------------
 
@@ -344,6 +705,749 @@
       rho: Number.isFinite(rho) ? rho : NaN,
       ok: ok,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Prediction residuals + error histogram helpers.
+  //
+  // error = predicted - true. Kept as pure functions (no DOM / chart types) so
+  // the detail-dialog histogram, statistics and the Node test suite all share
+  // exactly one implementation. The chart code only formats their output.
+  // ---------------------------------------------------------------------------
+
+  // errorSeries(pred, yTrue) -> Float64Array of residuals aligned 1:1 with the
+  // inputs (error = predicted - true). Pairs where either side is non-finite
+  // produce NaN — callers filter with finiteResiduals, mirroring how the
+  // scatter chart skips non-finite points.
+  function errorSeries(pred, yTrue) {
+    var n = pred && yTrue ? Math.min(pred.length, yTrue.length) : 0;
+    var out = new Float64Array(n);
+    for (var i = 0; i < n; i++) {
+      var p = pred[i];
+      var t = yTrue[i];
+      out[i] = Number.isFinite(p) && Number.isFinite(t) ? p - t : NaN;
+    }
+    return out;
+  }
+
+  // Copy the finite residuals out of a series that may contain NaN / ±Inf
+  // (from errorSeries) so downstream statistics and binning never see junk.
+  function finiteResiduals(errors) {
+    var out = [];
+    if (!errors) return out;
+    for (var i = 0; i < errors.length; i++) {
+      if (Number.isFinite(errors[i])) out.push(errors[i]);
+    }
+    return out;
+  }
+
+  // Descriptive statistics of a residual series (finite values only).
+  //   n       — number of finite residuals
+  //   mean    — mean error (sum / n)
+  //   median  — median error (average of the two middle values for even n)
+  //   std     — population standard deviation (÷ n), describing exactly the
+  //             distribution shown in the histogram; matches np.std(errors)
+  //   ok      — false when there is nothing finite to describe
+  function residualStats(errors) {
+    var vals = finiteResiduals(errors);
+    var n = vals.length;
+    if (n === 0) return { n: 0, mean: NaN, median: NaN, std: NaN, ok: false };
+    var sum = 0;
+    for (var i = 0; i < n; i++) sum += vals[i];
+    var mean = sum / n;
+    var sorted = vals.slice().sort(function (a, b) { return a - b; });
+    var median = n % 2 === 1
+      ? sorted[(n - 1) / 2]
+      : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+    var ss = 0;
+    for (var j = 0; j < n; j++) {
+      var d = vals[j] - mean;
+      ss += d * d;
+    }
+    var std = Math.sqrt(ss / n); // population SD (÷ n)
+    return { n: n, mean: mean, median: median, std: std, ok: true };
+  }
+
+  // Default bin count for a residual histogram: sqrt-based, clamped to a
+  // sensible [5, 60] window so tiny runs still get readable bins.
+  function autoBinCount(n) {
+    if (!(n > 0)) return 0;
+    var b = Math.ceil(Math.sqrt(n));
+    if (b < 5) b = 5;
+    if (b > 60) b = 60;
+    return b;
+  }
+
+  // Equal-width binning of finite residuals over [min, max] of the data.
+  //
+  //   opts.bins   optional fixed bin count (default: autoBinCount(n))
+  //
+  // Returns:
+  //   n            finite residual count
+  //   excluded     non-finite residuals dropped from the input
+  //   min, max     data extent (after resolving an all-equal degenerate case)
+  //   binCount     number of bins
+  //   binWidth     (max - min) / binCount
+  //   start        left edge of the first bin (== min)
+  //   edges        binCount + 1 boundaries: bin i covers [edges[i], edges[i+1])
+  //   counts       count per bin; the last bin also accepts values == edges[binCount]
+  //   bins         [{ start, end, center, count }] convenience form
+  //   zeroBin      index of the bin whose half-open range contains 0, or -1
+  //   containsZero whether 0 falls inside [min, max]
+  //   ok           false when there are no finite residuals to bin
+  //
+  // Binning rule (unit-testable contract): every finite value is counted
+  // exactly once; a value exactly on an interior edge belongs to the bin to its
+  // right; the observed maximum (which equals the last edge) lands in the last
+  // bin.
+  function errorHistogram(errors, opts) {
+    var vals = finiteResiduals(errors);
+    var n = vals.length;
+    var excluded = errors ? errors.length - n : 0;
+    var empty = { n: 0, excluded: excluded, min: NaN, max: NaN, binCount: 0, binWidth: 0, start: NaN, edges: [], counts: [], bins: [], zeroBin: -1, containsZero: false, ok: false };
+    if (n === 0) return empty;
+
+    var mn = Math.min.apply(null, vals);
+    var mx = Math.max.apply(null, vals);
+    // Degenerate case: every residual identical. Expand symmetrically around
+    // the value so bins still have positive width and stay readable.
+    if (mn === mx) {
+      var v = mn;
+      var half = v === 0 ? 0.5 : Math.max(Math.abs(v) * 0.05, 1e-9);
+      mn = v - half;
+      mx = v + half;
+    }
+
+    var bins = opts && opts.bins > 0 ? Math.floor(opts.bins) : autoBinCount(n);
+    if (bins < 1) return empty;
+    var binWidth = (mx - mn) / bins;
+
+    var edges = new Array(bins + 1);
+    for (var e = 0; e <= bins; e++) edges[e] = mn + e * binWidth;
+
+    var counts = new Array(bins);
+    for (var c = 0; c < bins; c++) counts[c] = 0;
+    for (var i = 0; i < n; i++) {
+      var idx = Math.floor((vals[i] - mn) / binWidth);
+      if (idx < 0) idx = 0;
+      if (idx >= bins) idx = bins - 1; // float edge → observed max goes last
+      counts[idx]++;
+    }
+
+    var zeroBin = -1;
+    for (var z = 0; z < bins; z++) {
+      var zLo = edges[z];
+      var zHi = edges[z + 1];
+      var inside = z === bins - 1 ? (0 >= zLo && 0 <= zHi) : (0 >= zLo && 0 < zHi);
+      if (inside) { zeroBin = z; break; }
+    }
+
+    var binList = new Array(bins);
+    for (var b = 0; b < bins; b++) {
+      binList[b] = { start: edges[b], end: edges[b + 1], center: (edges[b] + edges[b + 1]) / 2, count: counts[b] };
+    }
+
+    return {
+      n: n,
+      excluded: excluded,
+      min: mn,
+      max: mx,
+      binCount: bins,
+      binWidth: binWidth,
+      start: mn,
+      edges: edges,
+      counts: counts,
+      bins: binList,
+      zeroBin: zeroBin,
+      containsZero: zeroBin >= 0,
+      ok: true,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pareto front (2D/3D) + CSV export rows.
+  //
+  // The front helpers are pure: given the point list and which axes are
+  // "smaller is better" (minimize) or "larger is better", they return the
+  // non-dominated subset. Both the 2D and 3D Pareto charts in the UI consume
+  // these helpers, and the CSV export is built from the *same* point/front
+  // arrays the chart was rendered from (see paretoExportRows below) — so the
+  // exported rows, metric values and is_pareto flags always match the plot
+  // without re-implementing any Pareto logic.
+  // ---------------------------------------------------------------------------
+
+  // Convert an axis value into a "better is smaller" score: minimize keeps the
+  // value, maximize negates it, so dominance can always be tested with <=.
+  function paretoScore(minimize, v) {
+    return minimize ? v : -v;
+  }
+
+  function paretoFront2D(points, minimizeX, minimizeY) {
+    function nx(p) { return paretoScore(minimizeX, p.x); }
+    function ny(p) { return paretoScore(minimizeY, p.y); }
+    var nonDom = points.filter(function (p) {
+      return !points.some(function (q) {
+        if (q.rank === p.rank) return false;
+        return nx(q) <= nx(p) && ny(q) <= ny(p) && (nx(q) < nx(p) || ny(q) < ny(p));
+      });
+    });
+    // Sorted along the x axis (ties broken by rank) — same as the UI front.
+    return nonDom.slice().sort(function (a, b) {
+      return (nx(a) - nx(b)) || (a.rank - b.rank);
+    });
+  }
+
+  function paretoFront3D(points, minimizeX, minimizeY, minimizeZ) {
+    function nx(p) { return paretoScore(minimizeX, p.x); }
+    function ny(p) { return paretoScore(minimizeY, p.y); }
+    function nz(p) { return paretoScore(minimizeZ, p.z); }
+    return points.filter(function (p) {
+      return !points.some(function (q) {
+        if (q.rank === p.rank) return false;
+        return nx(q) <= nx(p) && ny(q) <= ny(p) && nz(q) <= nz(p) &&
+               (nx(q) < nx(p) || ny(q) < ny(p) || nz(q) < nz(p));
+      });
+    });
+  }
+
+  // Formula text of a point, taken from the point's own string when present,
+  // else from the model object the point carries (p.m.formulaOriginal).
+  function paretoFormula(p) {
+    if (p && typeof p.formulaOriginal === "string") return p.formulaOriginal;
+    if (p && p.m && typeof p.m.formulaOriginal === "string") return p.m.formulaOriginal;
+    return "";
+  }
+
+  // Build the CSV row matrix that reproduces the *current* Pareto chart.
+  //
+  // `points` are the front-eligible plotted points, `ghosts` the models the
+  // active filter excluded from the front computation (still drawn faintly),
+  // and `front` the exact output of paretoFront2D/paretoFront3D over `points`.
+  // Passing in those chart arrays — rather than recomputing anything — is what
+  // guarantees the export matches the plot 1:1. One implementation covers both
+  // the 2D chart (two axes) and the 3D chart (three axes).
+  //
+  //   axes:  [{ code: "x", dataset: "train", metric: "rmse" }, ...]  // 2 or 3
+  //   point: { rank, x, y(, z), m?: { formulaOriginal } }
+  //
+  // Returns an array of arrays (rows[0] = header) ready for rowsToCsv().
+  function paretoExportRows(points, ghosts, front, axes) {
+    var onFront = {};
+    var i;
+    for (i = 0; i < front.length; i++) onFront[front[i].rank] = true;
+    var eligible = {};
+    for (i = 0; i < points.length; i++) eligible[points[i].rank] = true;
+
+    var header = ["rank", "formula"];
+    for (i = 0; i < axes.length; i++) {
+      var ax = axes[i];
+      header.push(ax.code + "_dataset", ax.code + "_metric", ax.code + "_value");
+    }
+    header.push("is_pareto", "excluded");
+
+    var rows = [header];
+    // Same order the chart plots them: eligible points first, ghosts after.
+    var all = points.concat(ghosts);
+    for (i = 0; i < all.length; i++) {
+      var p = all[i];
+      var row = [p.rank, paretoFormula(p)];
+      for (var a = 0; a < axes.length; a++) {
+        var axis = axes[a];
+        row.push(axis.dataset, axis.metric, p[axis.code]);
+      }
+      row.push(onFront[p.rank] ? 1 : 0, eligible[p.rank] ? 0 : 1);
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  // RFC 4180-style field escaping (fields containing commas, quotes or line
+  // breaks are quoted; embedded quotes are doubled). Numbers are serialized
+  // with String(), so full floating-point precision is preserved for replots.
+  function csvField(value) {
+    var s = value === undefined || value === null ? "" : String(value);
+    if (/[",\r\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  function rowsToCsv(rows) {
+    if (!rows || !rows.length) return "";
+    var out = [];
+    for (var i = 0; i < rows.length; i++) {
+      var line = [];
+      for (var j = 0; j < rows[i].length; j++) line.push(csvField(rows[i][j]));
+      out.push(line.join(","));
+    }
+    return out.join("\r\n") + "\r\n";
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pareto axes + metrics — (dataset, metric) addressing.
+  //
+  // The engine keeps its metricsTrain / metricsVerify fields (no mass rename);
+  // this small API is the single place that maps a dataset token onto them, so
+  // the UI and the export never add per-dataset branches themselves. Datasets
+  // are derived from the loaded run, which lets a train-only run still build a
+  // meaningful Pareto view (e.g. Train RMSE × Train MaxAE).
+  //
+  // Besides "train" / "verify" there is the pseudo-dataset "delta" — the
+  // train → validation generalization gap. All delta values are defined so that
+  // POSITIVE means validation performed worse than training, i.e. every delta
+  // metric is "smaller = better":
+  //     ΔRMSE  = RMSE_validation − RMSE_train
+  //     ΔMaxAE = MaxAE_validation − MaxAE_train
+  //     ΔR²    = R²_train − R²_validation
+  //     Δρ     = ρ_train − ρ_validation
+  // The single implementation below is what the table, the numeric filter, the
+  // sorters and the Pareto axes all read through Core.metricValue.
+  // ---------------------------------------------------------------------------
+
+  // Which metric keys support the train→validation delta and whether the metric
+  // is "smaller is better" in its own dataset (those keys flip the sign in the
+  // delta definition above).
+  function deltaDirection(metricKey) {
+    return metricKey === "r2" || metricKey === "rho" ? -1 : 1; // -1 ⇒ invert (train − validation)
+  }
+
+  function deltaMetricValue(model, metricKey) {
+    if (!model) return NaN;
+    var t = model.metricsTrain;
+    var v = model.metricsVerify;
+    if (!t || !v) return NaN; // train-only model (or no verify) → no gap defined
+    var tv = t[metricKey];
+    var vv = v[metricKey];
+    if (typeof tv !== "number" || typeof vv !== "number") return NaN;
+    return deltaDirection(metricKey) === -1 ? tv - vv : vv - tv;
+  }
+
+  // Deterministic NaN endpoint used when sorting on a metric column, so missing
+  // values never poison the comparator: endpoints sit on the metric's "worse"
+  // side under ascending sort (rmse/maxae → +Infinity, r2 → −Infinity, rho → 0).
+  // Delta is smaller-better for every metric, so a missing gap sorts as worst
+  // (+Infinity) no matter which underlying metric it belongs to.
+  function metricSortEndpoint(metricKey, dataset) {
+    if (dataset === "delta") return Infinity;
+    if (metricKey === "r2") return -Infinity;
+    if (metricKey === "rho") return 0;
+    return Infinity; // rmse / maxae
+  }
+
+  // Unified metric accessor for a model.
+  //   dataset:   "train" | "verify" | "delta" (pseudo-dataset)
+  // Returns NaN when the model has no such dataset/metric, or when delta is
+  // requested for a model/run without validation data.
+  function metricValue(model, dataset, metricKey) {
+    if (dataset === "delta") return deltaMetricValue(model, metricKey);
+    var set = dataset === "verify" ? model.metricsVerify : model.metricsTrain;
+    return set && typeof set[metricKey] === "number" ? set[metricKey] : NaN;
+  }
+
+  // Datasets present in a pipeline result: "train" always; "verify" only when
+  // a verify file was analysed (result.verify truthy).
+  function availableDatasets(result) {
+    var out = ["train"];
+    if (result && result.verify) out.push("verify");
+    return out;
+  }
+
+  // Two axes are the "same" only when dataset AND metric match.
+  function paretoAxesEqual(a, b) {
+    return !!(a && b && a.dataset === b.dataset && a.metric === b.metric);
+  }
+
+  // True when no two axes in the list share the same (dataset, metric).
+  function paretoAxesDistinct(axes) {
+    for (var i = 0; i < axes.length; i++) {
+      for (var j = i + 1; j < axes.length; j++) {
+        if (paretoAxesEqual(axes[i], axes[j])) return false;
+      }
+    }
+    return true;
+  }
+
+  // Deterministic default axes for a run with `datasets` (tokens from
+  // availableDatasets) and `dim` objectives (2 or 3). Picks metrics in the
+  // usual order (rmse, maxae, r2, rho), interleaving datasets, and never
+  // returns a duplicated (dataset, metric) pair.
+  function paretoDefaultAxes(datasets, dim) {
+    var ds = datasets && datasets.length ? datasets.slice() : ["train"];
+    var order = ["rmse", "maxae", "r2", "rho"];
+    var axes = [];
+    for (var i = 0; i < order.length && axes.length < dim; i++) {
+      for (var j = 0; j < ds.length && axes.length < dim; j++) {
+        axes.push({ dataset: ds[j], metric: order[i] });
+      }
+    }
+    return axes;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Model bookkeeping (favorite / excluded) + Compare data builders.
+  //
+  // Model states live in ONE map (rank -> { favorite?, excluded? }) that rides
+  // on the pipeline result, so the table, detail dialog, Pareto view and the
+  // Compare view all read the same object. Only the flags a caller actually
+  // touched are serialized, keeping saved projects small — and older projects
+  // without a state section simply deserialize to "nothing favourite /
+  // excluded".
+  // ---------------------------------------------------------------------------
+
+  // Accepts a persisted map (or null) and returns a clean map keyed by numeric
+  // rank with boolean flags. Unknown ranks / non-boolean junk are dropped;
+  // `validRanks` (optional Set) prunes entries whose models no longer exist
+  // (e.g. after the project files changed between saves).
+  function normalizeModelStates(raw, validRanks) {
+    var out = {};
+    if (!raw || typeof raw !== "object") return out;
+    Object.keys(raw).forEach(function (rankKey) {
+      var rank = Number(rankKey);
+      var s = raw[rankKey];
+      if (!isFinite(rank) || rank <= 0 || !s || typeof s !== "object") return;
+      if (validRanks && !validRanks.has(rank)) return;
+      out[rank] = {
+        favorite: !!(s.favorite || s.fav),
+        excluded: !!(s.excluded || s.hidden),
+      };
+    });
+    return out;
+  }
+
+  // Compact serializable copy: entries with any enabled flag only.
+  function modelStatesToJSON(states) {
+    var out = {};
+    if (!states || typeof states !== "object") return out;
+    Object.keys(states).forEach(function (rankKey) {
+      var rank = Number(rankKey);
+      var s = states[rankKey];
+      if (!s) return;
+      var rec = {};
+      if (s.favorite) rec.favorite = true;
+      if (s.excluded) rec.excluded = true;
+      if (rec.favorite || rec.excluded) out[rank] = rec;
+    });
+    return out;
+  }
+
+  // True when a model is excluded (takes part in nothing by default).
+  function modelExcluded(states, model) {
+    var s = states && model ? states[model.rank] : null;
+    return !!(s && s.excluded);
+  }
+
+  // True when a model is marked as a favourite.
+  function modelFavorite(states, model) {
+    var s = states && model ? states[model.rank] : null;
+    return !!(s && s.favorite);
+  }
+
+  // Stable metric row order for the Compare view.
+  var COMPARE_METRIC_ORDER = ["rmse", "maxae", "r2", "rho"];
+
+  // Metric matrix shared by the Compare view: one row per dataset x metric in a
+  // stable order, one value per model (NaN when a model lacks that metric).
+  function compareMetricRows(models) {
+    var datasets = ["train"];
+    if (models.some(function (m) { return !!m.metricsVerify; })) datasets.push("verify");
+    var rows = [];
+    datasets.forEach(function (ds) {
+      COMPARE_METRIC_ORDER.forEach(function (metric) {
+        rows.push({
+          dataset: ds,
+          metric: metric,
+          values: models.map(function (m) { return metricValue(m, ds, metric); }),
+        });
+      });
+    });
+    return rows;
+  }
+
+  // Per-sample prediction matrix for the Compare view.
+  //   result:  runPipeline output (train/verify datasets + models carrying
+  //            predTrain / predVerify arrays)
+  //   models:  compared model objects (column order kept)
+  //   dataset: "train" | "verify"
+  // Returns { dataset, rows } where rows[i] = { sample, target, preds } and
+  // preds is aligned with models: preds[k] = { rank, pred, error } for
+  // models[k] (NaN when that model has no prediction array for this dataset,
+  // e.g. a train-only run compared on verify). Returns null when the dataset
+  // is not available in the result.
+  function compareSampleMatrix(result, models, dataset) {
+    if (!result) return null;
+    var isV = dataset === "verify";
+    var data = isV ? result.verify : result.train;
+    if (!data) return null;
+    var y = Array.from(data.cols[result.meta.targetLetter]);
+    var rows = [];
+    for (var i = 0; i < data.n; i++) {
+      var preds = [];
+      for (var mi = 0; mi < models.length; mi++) {
+        var m = models[mi];
+        var pa = isV ? m.predVerify : m.predTrain;
+        var pred = (pa && pa.length === data.n) ? pa[i] : NaN;
+        var err = (Number.isFinite(pred) && Number.isFinite(y[i])) ? pred - y[i] : NaN;
+        preds.push({ rank: m.rank, pred: pred, error: err });
+      }
+      rows.push({ sample: data.names[i], target: y[i], preds: preds });
+    }
+    return { dataset: dataset, rows: rows };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Feature & descriptor usage — counting and "model contains X" matching.
+  //
+  // These helpers answer two questions over a run's candidate models:
+  //   1. how often is each primary feature / each descriptor (expression) used?
+  //   2. which models contain a given feature or descriptor?
+  //
+  // Matching NEVER scans the formatted coefficient string. Feature hits are
+  // identifier-boundary token matches against a known feature-name set, so a
+  // feature named "A" can never match inside "AA" or "A1". Descriptors are
+  // compared through a canonical normalised expression (whitespace / redundant
+  // parentheses removed via the shared formula AST), so a descriptor searched
+  // for as "(A+B)" matches the same expression written "A + B".
+  //
+  // Both rely on the per-term records the pipeline attaches to every model
+  // (model.descriptors[i].original), which is exactly the Uspace expression
+  // text SISSO selected for that term.
+  // ---------------------------------------------------------------------------
+
+  var IDENT_TOKEN_RE = /[A-Za-z_][A-Za-z0-9_]*/g;
+
+  // Unique identifier tokens of an expression (feature names, function names…)
+  // with real identifier boundaries — no substring false positives.
+  function uniqueIdentifiers(text) {
+    var out = [];
+    if (!text) return out;
+    var seen = {};
+    IDENT_TOKEN_RE.lastIndex = 0;
+    var m;
+    while ((m = IDENT_TOKEN_RE.exec(String(text))) !== null) {
+      if (!seen[m[0]]) { seen[m[0]] = true; out.push(m[0]); }
+    }
+    return out;
+  }
+
+  // Canonical key of a descriptor expression. Prefers the shared formula AST
+  // (whitespace / redundant parentheses removed); expressions outside the
+  // formula dialect fall back to a whitespace-minified form.
+  function normalizeDescriptorText(text) {
+    var s = String(text == null ? "" : text).trim();
+    if (!s) return "";
+    try { return formulaToPlain(s); }
+    catch (err) { return s.replace(/\s+/g, ""); }
+  }
+
+  // Original descriptor-expression texts of a model (from the pipeline's
+  // per-term records). Unknown-shaped models simply yield [].
+  function descriptorTextsOf(model) {
+    if (!model) return [];
+    var ds = model.descriptors;
+    if (!Array.isArray(ds) || !ds.length) return [];
+    var out = [];
+    for (var i = 0; i < ds.length; i++) {
+      var d = ds[i];
+      if (d == null) continue;
+      var t = typeof d === "string" ? d : (d.original != null ? d.original : "");
+      if (t) out.push(String(t));
+    }
+    return out;
+  }
+
+  function descriptorKeysOf(model) {
+    return descriptorTextsOf(model).map(normalizeDescriptorText);
+  }
+
+  function toNameSet(featureNames) {
+    if (featureNames instanceof Set) return featureNames;
+    var set = new Set();
+    if (featureNames) {
+      var list = Array.isArray(featureNames) ? featureNames : [featureNames];
+      for (var i = 0; i < list.length; i++) if (list[i] != null) set.add(list[i]);
+    }
+    return set;
+  }
+
+  // Distinct feature names (restricted to the known `featureNames` set) that a
+  // model's descriptors reference.
+  function modelFeatureNames(model, featureNames) {
+    var set = toNameSet(featureNames);
+    var out = [];
+    var texts = descriptorTextsOf(model);
+    if (!texts.length && model && model.formulaOriginal) texts = [model.formulaOriginal];
+    for (var t = 0; t < texts.length; t++) {
+      var toks = uniqueIdentifiers(texts[t]);
+      for (var i = 0; i < toks.length; i++) {
+        var tok = toks[i];
+        if (set.has(tok) && out.indexOf(tok) < 0) out.push(tok);
+      }
+    }
+    return out;
+  }
+
+  function modelUsesFeature(model, name) {
+    if (!name) return false;
+    var toks = uniqueIdentifiers(descriptorTextsOf(model).join(" "));
+    for (var i = 0; i < toks.length; i++) if (toks[i] === name) return true;
+    return false;
+  }
+
+  function modelsWithFeature(models, name) {
+    var out = [];
+    if (!models) return out;
+    for (var i = 0; i < models.length; i++) {
+      if (modelUsesFeature(models[i], name)) out.push(models[i]);
+    }
+    return out;
+  }
+
+  // True when a model carries a descriptor whose normalised expression equals
+  // the (normalised) `descriptorExpr`.
+  function modelUsesDescriptor(model, descriptorExpr) {
+    var key = normalizeDescriptorText(descriptorExpr);
+    if (!key) return false;
+    var keys = descriptorKeysOf(model);
+    return keys.indexOf(key) >= 0;
+  }
+
+  function modelsWithDescriptor(models, descriptorExpr) {
+    var out = [];
+    if (!models) return out;
+    for (var i = 0; i < models.length; i++) {
+      if (modelUsesDescriptor(models[i], descriptorExpr)) out.push(models[i]);
+    }
+    return out;
+  }
+
+  // Usage counts across a model list, newest-style descending rows. Each model
+  // counts at most once per feature / per descriptor key.
+  function featureUsage(models, featureNames) {
+    var n = models ? models.length : 0;
+    var counts = new Map();
+    for (var i = 0; i < n; i++) {
+      var names = modelFeatureNames(models[i], featureNames);
+      for (var k = 0; k < names.length; k++) {
+        var nm = names[k];
+        counts.set(nm, (counts.get(nm) || 0) + 1);
+      }
+    }
+    var rows = [];
+    counts.forEach(function (count, name) {
+      rows.push({ name: name, count: count, ratio: n ? count / n : 0 });
+    });
+    rows.sort(function (a, b) {
+      return b.count - a.count ||
+        (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    });
+    return rows;
+  }
+
+  function descriptorUsage(models) {
+    var n = models ? models.length : 0;
+    var byKey = new Map(); // key -> { key, count, texts }
+    for (var i = 0; i < n; i++) {
+      var texts = descriptorTextsOf(models[i]);
+      for (var k = 0; k < texts.length; k++) {
+        var raw = texts[k];
+        var key = normalizeDescriptorText(raw);
+        var rec = byKey.get(key);
+        if (!rec) {
+          rec = { key: key, count: 0, texts: {} };
+          byKey.set(key, rec);
+        }
+        rec.count++;
+        rec.texts[raw] = (rec.texts[raw] || 0) + 1;
+      }
+    }
+    var rows = [];
+    byKey.forEach(function (rec, key) {
+      // display the most common original spelling of this canonical key
+      var best = key, bestN = -1;
+      for (var spelling in rec.texts) {
+        if (Object.prototype.hasOwnProperty.call(rec.texts, spelling) && rec.texts[spelling] > bestN) {
+          best = spelling; bestN = rec.texts[spelling];
+        }
+      }
+      rows.push({ expr: best, key: key, count: rec.count, ratio: n ? rec.count / n : 0 });
+    });
+    rows.sort(function (a, b) {
+      return b.count - a.count ||
+        (a.expr < b.expr ? -1 : a.expr > b.expr ? 1 : 0);
+    });
+    return rows;
+  }
+
+  // One-stop summary used by the UI (and tests): feature + descriptor usage
+  // over a pipeline result, with the feature-name set read from result.columns.
+  function usageReport(result) {
+    if (!result || !Array.isArray(result.models)) return null;
+    var names = [];
+    if (Array.isArray(result.columns)) {
+      for (var i = 0; i < result.columns.length; i++) {
+        var c = result.columns[i];
+        if (c && c.role === "feature") names.push(c.original);
+      }
+    }
+    return {
+      totalModels: result.models.length,
+      featureNames: names,
+      features: featureUsage(result.models, names),
+      descriptors: descriptorUsage(result.models),
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Batch favourite / exclude + undo — pure writers on the shared state map.
+  //
+  // The UI keeps ONE map (rank -> {favorite, excluded}) on the result; batch
+  // operations write to exactly that map via these helpers, so undo is a pure
+  // inverse and there is no second state system to desynchronise.
+  //   batchSetModelStates(states, ranks, patch) -> undo entries
+  //     ranks: ranks to touch; patch: {favorite?: bool, excluded?: bool}.
+  //     An entry is recorded only when the patch actually flips a flag.
+  //   undoBatchModels(states, entries) -> # of ranks restored
+  //     Reverts flags that still carry the batch-applied value; a flag the
+  //     user changed since the batch is left alone.
+  // ---------------------------------------------------------------------------
+
+  function batchSetModelStates(states, ranks, patch) {
+    var entries = [];
+    if (!states || !ranks) return entries;
+    var wantFav = patch && patch.favorite !== undefined ? !!patch.favorite : null;
+    var wantExcl = patch && patch.excluded !== undefined ? !!patch.excluded : null;
+    if (wantFav === null && wantExcl === null) return entries;
+    for (var i = 0; i < ranks.length; i++) {
+      var rank = ranks[i];
+      var cur = states[rank] || { favorite: false, excluded: false };
+      var favBefore = !!cur.favorite;
+      var exclBefore = !!cur.excluded;
+      var nextFav = wantFav === null ? favBefore : wantFav;
+      var nextExcl = wantExcl === null ? exclBefore : wantExcl;
+      if (nextFav === favBefore && nextExcl === exclBefore) continue;
+      states[rank] = { favorite: nextFav, excluded: nextExcl };
+      entries.push({
+        rank: rank,
+        setFavorite: wantFav === true,
+        setExcluded: wantExcl === true,
+        favBefore: favBefore,
+        exclBefore: exclBefore,
+      });
+    }
+    return entries;
+  }
+
+  function undoBatchModels(states, entries) {
+    var restored = 0;
+    if (!states || !entries) return 0;
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var cur = states[e.rank];
+      if (!cur) continue;
+      var touched = false;
+      if (e.setFavorite && cur.favorite === true) { cur.favorite = !!e.favBefore; touched = true; }
+      if (e.setExcluded && cur.excluded === true) { cur.excluded = !!e.exclBefore; touched = true; }
+      if (touched) restored++;
+    }
+    return restored;
   }
 
   // ---------------------------------------------------------------------------
@@ -504,7 +1608,7 @@
         );
       }
       var const0 = co[0];
-      var termsNew = [], termsOrig = [];
+      var termsNew = [], termsOrig = [], descRecs = [];
       for (var k = 0; k < ids.length; k++) {
         var fid = ids[k];
         var fNew = uspace.idToRenamed.get(fid);
@@ -514,11 +1618,17 @@
         }
         termsNew.push("(" + co[k + 1] + ")*(" + fNew + ")");
         termsOrig.push("(" + co[k + 1] + ")*(" + fOrig + ")");
+        // Structured per-term record: the Uspace id plus the descriptor
+        // expression in original- and renamed-feature spelling. Feature /
+        // descriptor usage statistics and "contains" matching are built from
+        // these records (never from the formatted coefficient string).
+        descRecs.push({ id: fid, original: fOrig, renamed: fNew });
       }
       models.push({
         rank: top.ranks[mi],
         formula: "(" + const0 + ") + " + termsNew.join(" + "),
         formulaOriginal: "(" + const0 + ") + " + termsOrig.join(" + "),
+        descriptors: descRecs,
         featureIds: ids.slice(),
         rmseSisso: top.rmses[mi],
         maxaeSisso: top.maxaes[mi],
@@ -597,7 +1707,16 @@
     parseCoeffFile: parseCoeffFile,
     parseUspace: parseUspace,
     compileFormula: compileFormula,
+    formulaAst: formulaAst,
+    formulaToPlain: formulaToPlain,
+    formulaToLatex: formulaToLatex,
+    formulaToUnicodeMath: formulaToUnicodeMath,
     computeMetrics: computeMetrics,
+    errorSeries: errorSeries,
+    finiteResiduals: finiteResiduals,
+    residualStats: residualStats,
+    autoBinCount: autoBinCount,
+    errorHistogram: errorHistogram,
     spearman: spearman,
     pearson: pearson,
     parseDataFile: parseDataFile,
@@ -605,5 +1724,40 @@
     runPipeline: runPipeline,
     parseUnitMatrix: parseUnitMatrix,
     groupUnitRows: groupUnitRows,
+    paretoScore: paretoScore,
+    paretoFront2D: paretoFront2D,
+    paretoFront3D: paretoFront3D,
+    paretoFormula: paretoFormula,
+    paretoExportRows: paretoExportRows,
+    csvField: csvField,
+    rowsToCsv: rowsToCsv,
+    metricValue: metricValue,
+    metricSortEndpoint: metricSortEndpoint,
+    deltaMetricValue: deltaMetricValue,
+    deltaDirection: deltaDirection,
+    availableDatasets: availableDatasets,
+    paretoAxesEqual: paretoAxesEqual,
+    paretoAxesDistinct: paretoAxesDistinct,
+    paretoDefaultAxes: paretoDefaultAxes,
+    normalizeModelStates: normalizeModelStates,
+    modelStatesToJSON: modelStatesToJSON,
+    modelExcluded: modelExcluded,
+    modelFavorite: modelFavorite,
+    compareMetricRows: compareMetricRows,
+    compareSampleMatrix: compareSampleMatrix,
+    uniqueIdentifiers: uniqueIdentifiers,
+    normalizeDescriptorText: normalizeDescriptorText,
+    descriptorTextsOf: descriptorTextsOf,
+    descriptorKeysOf: descriptorKeysOf,
+    modelFeatureNames: modelFeatureNames,
+    modelUsesFeature: modelUsesFeature,
+    modelsWithFeature: modelsWithFeature,
+    modelUsesDescriptor: modelUsesDescriptor,
+    modelsWithDescriptor: modelsWithDescriptor,
+    featureUsage: featureUsage,
+    descriptorUsage: descriptorUsage,
+    usageReport: usageReport,
+    batchSetModelStates: batchSetModelStates,
+    undoBatchModels: undoBatchModels,
   };
 });

@@ -11,6 +11,7 @@
   var Core = window.SissoCore;
   var I18N = window.I18N;
   var echarts = window.echarts;
+  var HealthCheck = window.HealthCheck;
 
   // ---------------------------------------------------------------------------
   // State
@@ -28,11 +29,31 @@
     chart: null,    // echarts instance
     currentModel: null,
     colorKey: "",   // "" = class colors; otherwise a column letter to color by
-    paretoX: "rmse",    // train metric for the Pareto scatter (x)
-    paretoY: "rmse",    // verify metric for the Pareto scatter (y)
+    detailTab: "scatter",   // detail dialog chart view: "scatter" (predicted vs
+                            // true) or "error" (residual histogram)
+    errorDataset: "train",  // residual histogram dataset: "train" | "verify"
+    errorChart: null,       // echarts instance for the residual histogram
+    paretoX: null,  // Pareto axis spec: { dataset, metric } — e.g. {train, rmse}
+    paretoY: null,  // (legacy sessions stored bare metric keys; coerceParetoAxes migrates)
     paretoChart: null,  // echarts instance for the Pareto view
     paretoMode: "2d",   // "2d" | "3d"
-    paretoZ: { metric: "r2", set: "train" },  // third objective (metric + dataset)
+    paretoZ: null,  // third axis spec: { dataset, metric } (3D only)
+    health: null,   // latest HealthCheck report: { level, checks, dropVerify }
+    showExcluded: false,  // when true, excluded models show again (so users can restore them)
+    favOnly: false,       // when true, the table / grid list shows favourite models only
+    // Batch "copy selected models for AI comparison" per table view. Keyed by
+    // the view that owns the checkboxes so the main table and the Pareto table
+    // keep independent selections. Reset when a new run is analysed.
+    batchSel: { table: new Set(), pareto: new Set() },
+    // Undo history of the batch favourite / exclude actions made from the
+    // Units view's usage tables (one entry per action, most recent last).
+    batchOps: [],
+    // Usage-table view state (per analysis): sort key / direction and the
+    // "show all rows" expansion for each panel ("feature" | "descriptor").
+    usageSort: { feature: { by: "count", asc: false }, descriptor: { by: "count", asc: false } },
+    usageExpanded: { feature: false, descriptor: false },
+    compareSel: [],       // ranks currently selected in the Compare view
+    compareChart: null,      // echarts instance for the Compare overlay chart
     // table configuration (persisted)
     hiddenCols: {},   // column id -> true when hidden from the table
     // filters (per analysis; reset when a new run is analysed)
@@ -48,6 +69,7 @@
   };
 
   var COLS_PREF_KEY = "sisso-table-cols";
+  var errorHistCache = null; // last histogram layout (for bar-width refit on resize)
 
   // ---------------------------------------------------------------------------
   // Theme (system / light / dark) + citation data
@@ -70,6 +92,34 @@
   var ICON_MOON =
     '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
     '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+    "</svg>";
+
+  // Small inline icons for the model-state controls (favourite / exclude) and
+  // the Compare navigation entry.
+  var ICON_STAR =
+    '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">' +
+    '<path d="M12 2.35l2.91 6.02 6.6.95-4.78 4.66 1.13 6.58L12 17.34l-5.86 3.22 1.13-6.58L2.49 9.32l6.6-.95z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>' +
+    "</svg>";
+  var ICON_STAR_FILL =
+    '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">' +
+    '<path d="M12 2.35l2.91 6.02 6.6.95-4.78 4.66 1.13 6.58L12 17.34l-5.86 3.22 1.13-6.58L2.49 9.32l6.6-.95z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>' +
+    "</svg>";
+  var ICON_EYE =
+    '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">' +
+    '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>' +
+    '<circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    "</svg>";
+  var ICON_EYE_OFF =
+    '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">' +
+    '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>' +
+    '<circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<path d="M4 3l16 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+    "</svg>";
+  var ICON_COMPARE =
+    '<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">' +
+    '<path d="M4 20h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+    '<path d="M9 4v16M15 4v16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+    '<path d="M9 7.5L6 10.5M9 7.5l3 3M15 7.5l-3 3M15 7.5l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
     "</svg>";
 
   var theme = { preference: "system", resolved: "light" };
@@ -134,7 +184,9 @@
     if (!state.result) return;
     if (state.view === "grid") renderGrid();
     if (state.view === "pareto") renderPareto();
-    if (state.currentModel && !$("#dialog-backdrop").hidden) renderChart(state.currentModel);
+    if (state.currentModel && !$("#dialog-backdrop").hidden) {
+      renderCurrentDetailChart();
+    }
   }
 
   function applyTheme() {
@@ -353,6 +405,9 @@
       complexity: info && info.fcomplexity !== null ? info.fcomplexity : null,
       features: (info && info.nsf !== null ? info.nsf : res.meta.nFeatures) || 0,
       files: files,
+      // favourite / excluded per model (compact; empty for untouched models,
+      // absent in projects saved before this feature existed)
+      modelStates: Core.modelStatesToJSON(res.modelStates),
     };
   }
 
@@ -411,7 +466,7 @@
     if (!ok) { toast(I18N.t("errProject")); return; }
     state.projectId = p.id || null;
     try {
-      processTexts(roleTexts);
+      processTexts(roleTexts, { modelStates: p && p.modelStates });
       if (!silent) toast(I18N.t("loadedOk"));
     } catch (err) {
       console.error(err);
@@ -432,9 +487,10 @@
         topN: state.topN || 100,
         loadAll: !!state.loadAll,
         colorKey: state.colorKey || "",
-        paretoX: state.paretoX || "rmse",
-        paretoY: state.paretoY || "rmse",
-        paretoZ: state.paretoZ || { metric: "r2", set: "train" },
+        favOnly: !!state.favOnly,
+        paretoX: state.paretoX || null,
+        paretoY: state.paretoY || null,
+        paretoZ: state.paretoZ || null,
         paretoMode: state.paretoMode || "2d",
       }));
     } catch (e) { /* ignore */ }
@@ -455,26 +511,29 @@
       try {
         applyProject(rec, true);
         if (!state.result) return;
-        var want = saved.view === "grid" || saved.view === "pareto" || saved.view === "units" ? saved.view : "table";
-        if (want === "pareto" && !state.result.verify) want = "table";
-        if (want === "units" && !(state.result.meta && state.result.meta.units)) want = "table";
+        var want = saved.view === "grid" || saved.view === "pareto" || saved.view === "units" ||
+          saved.view === "compare" ? saved.view : "table";
         state.view = want;
         state.sortKey = (saved.sortKey || "rank") || "rank";
         state.sortAsc = saved.sortAsc !== false;
         state.topN = saved.topN && saved.topN > 0 ? saved.topN : 100;
         state.loadAll = !!saved.loadAll;
         state.colorKey = saved.colorKey || "";
-        state.paretoX = saved.paretoX || "rmse";
-        state.paretoY = saved.paretoY || "rmse";
+        state.favOnly = !!saved.favOnly;
         state.paretoMode = saved.paretoMode === "3d" ? "3d" : "2d";
-        if (saved.paretoZ && saved.paretoZ.metric) {
-          state.paretoZ = { metric: saved.paretoZ.metric, set: saved.paretoZ.set === "verify" ? "verify" : "train" };
-        }
+        // Legacy sessions stored paretoX/paretoY as bare metric keys (train /
+        // verify implied) and paretoZ as {metric, set}; coerceParetoAxes migrates
+        // them to {dataset, metric} specs valid for the datasets actually loaded.
+        state.paretoX = saved.paretoX;
+        state.paretoY = saved.paretoY;
+        state.paretoZ = saved.paretoZ;
+        coerceParetoAxes();
         renderControls();
         populateColorSelect();
         renderModels();
         if (state.view === "pareto") renderPareto();
         if (state.view === "units") renderUnits();
+        if (state.view === "compare") renderCompare();
         persistSession();
       } catch (err) {
         console.warn("session restore failed:", err);
@@ -591,6 +650,11 @@
     renderCount();
     populateColorSelect();
     renderRecentList();
+    refreshHealthPanels();
+    syncDetailStateButtons();
+    syncExcludedToggleUI();
+    syncFavOnlyUI();
+    if (state.view === "compare" && state.result) renderCompare();
   }
 
   function toast(msg) {
@@ -599,6 +663,27 @@
     t.hidden = false;
     clearTimeout(t._timer);
     t._timer = setTimeout(function () { t.hidden = true; }, 3500);
+  }
+
+  // Shared clipboard writer with an explicit toast message (formula copies and
+  // the batch model-copy bar both use this).
+  function writeClipboard(text, doneMsg) {
+    if (!text) return;
+    var ok = function () { toast(doneMsg || I18N.t("copied")); };
+    var fail = function () { toast(I18N.t("errUnknown")); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok, fail);
+    } else {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); ok(); }
+      catch (e) { fail(); }
+      document.body.removeChild(ta);
+    }
   }
 
   // Full-screen loading overlay with a spinner (High severity per ui-ux-pro-max:
@@ -613,6 +698,211 @@
   function hideLoading() {
     var overlay = $("#loading-overlay");
     if (overlay) overlay.hidden = true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Analysis health check UI — compact Passed / Warning / Error report.
+  //
+  // Healthy/warning runs are reported with a short-lived toast only. The only
+  // thing that stays on screen is the blocking-error report on the upload page
+  // (it disappears once the user changes files or re-runs).
+  // ---------------------------------------------------------------------------
+  function clearHealthPanels() {
+    var a = $("#health-block");
+    if (a) a.hidden = true;
+  }
+
+  function countHealth(report) {
+    var out = { pass: 0, warning: 0, error: 0 };
+    if (report && report.checks) {
+      report.checks.forEach(function (ch) {
+        if (ch.level === "error") out.error++;
+        else if (ch.level === "warning") out.warning++;
+        else out.pass++;
+      });
+    }
+    return out;
+  }
+
+  function renderHealthReport(report, box) {
+    if (!box) return;
+    box.innerHTML = "";
+    if (!report || !report.checks || !report.checks.length) {
+      box.hidden = true;
+      return;
+    }
+    var head = el("div", "health-box__head");
+    head.appendChild(el("span", "health-box__title", I18N.t("healthTitle")));
+    var c = countHealth(report);
+    head.appendChild(el("span", "health-box__summary",
+      I18N.format("healthSummary", { p: c.pass, w: c.warning, e: c.error })));
+    box.appendChild(head);
+    report.checks.forEach(function (ch) {
+      var row = el("div", "health-row health-row--" + ch.level);
+      var badgeKey = ch.level === "error"
+        ? "healthError" : ch.level === "warning" ? "healthWarning" : "healthPass";
+      row.appendChild(el("span", "health-badge health-badge--" + ch.level, I18N.t(badgeKey)));
+      row.appendChild(el("span", "health-msg", ch.message));
+      box.appendChild(row);
+    });
+    box.hidden = false;
+  }
+
+  // After a successful run only blocking errors deserve persistent space — they
+  // live in the upload panel. Passed/warning health is transient (toast in the
+  // caller), so the results header stays clean.
+  function refreshHealthPanels() {
+    var blocked = !!(state.health && state.health.level === "error");
+    var blockBox = $("#health-block");
+    if (blocked) renderHealthReport(state.health, blockBox);
+    else if (blockBox) blockBox.hidden = true;
+  }
+
+  // Short-lived health summary after a healthy/warning run; the first warning
+  // message is included so users still see *why* without a permanent panel.
+  function toastHealthSummary() {
+    var hc = state.health;
+    if (!hc) return;
+    var c = countHealth(hc);
+    var detail = "";
+    for (var i = 0; i < hc.checks.length; i++) {
+      if (hc.checks[i].level === "warning") {
+        detail = " · " + hc.checks[i].message;
+        break;
+      }
+    }
+    toast(I18N.format("healthToast", { p: c.pass, w: c.warning, e: c.error }) + detail);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-model favourite / excluded state.
+  //
+  // Single source of truth: state.result.modelStates — a map of
+  // rank -> { favorite, excluded }. The table, the detail dialog, the Pareto
+  // view and the Compare view all read this one map, so the two control points
+  // stay in sync by construction. makeProjectJson()/applyProject() move it into
+  // the saved project; projects saved before this feature simply have no map
+  // and deserialize to "nothing favourite / excluded".
+  // ---------------------------------------------------------------------------
+  var _projectSaveTimer = null;
+  function scheduleProjectSaveSoon() {
+    if (!state.result || !state.result.meta) return;
+    clearTimeout(_projectSaveTimer);
+    _projectSaveTimer = setTimeout(function () { storeProjectLocally(); }, 600);
+  }
+
+  function modelStates() {
+    return state.result ? state.result.modelStates : null;
+  }
+
+  function ensureModelState(rank) {
+    var st = modelStates();
+    if (!st) return null;
+    var s = st[rank];
+    if (!s) s = st[rank] = { favorite: false, excluded: false };
+    return s;
+  }
+
+  function isFavoriteModel(m) { return Core.modelFavorite(modelStates(), m); }
+  function isExcludedModel(m) { return Core.modelExcluded(modelStates(), m); }
+
+  function excludedModelCount() {
+    var st = modelStates();
+    var n = 0;
+    if (st && state.result) {
+      for (var i = 0; i < state.result.models.length; i++) {
+        var s = st[state.result.models[i].rank];
+        if (s && s.excluded) n++;
+      }
+    }
+    return n;
+  }
+
+  // The one place that writes model state; everything else re-renders from it.
+  function applyModelState(rank, patch) {
+    if (!state.result) return;
+    var s = ensureModelState(rank);
+    if (!s) return;
+    if (patch.favorite !== undefined) s.favorite = !!patch.favorite;
+    if (patch.excluded !== undefined) s.excluded = !!patch.excluded;
+    scheduleProjectSaveSoon();
+    refreshStateUI();
+  }
+
+  function toggleShowExcluded() {
+    state.showExcluded = !state.showExcluded;
+    refreshStateUI();
+  }
+
+  // Re-render whatever is currently on screen after a model-state change so
+  // table / detail / Pareto / Compare (and the Units view's live batch counts)
+  // all reflect the same source of truth.
+  function refreshStateUI() {
+    syncDetailStateButtons();
+    syncExcludedToggleUI();
+    syncFavOnlyUI();
+    if (state.view === "table" || state.view === "grid") renderModels();
+    else if (state.view === "pareto") renderPareto();
+    else if (state.view === "compare") renderCompare();
+    else if (state.view === "units") renderUnits();
+  }
+
+  // The results-toolbar "show excluded" toggle (also drives the Compare picker
+  // visibility through the same flag).
+  function syncExcludedToggleUI() {
+    var btn = $("#btn-excluded");
+    if (!btn) return;
+    var n = excludedModelCount();
+    btn.textContent = I18N.t(state.showExcluded ? "excludedHiddenBtn" : "excludedShowBtn");
+    btn.classList.toggle("is-active", state.showExcluded);
+    btn.disabled = !state.showExcluded && n === 0;
+    btn.title = n ? I18N.format("excludedTooltip", { n: n }) : I18N.t("excludedNone");
+    btn.setAttribute("aria-pressed", state.showExcluded ? "true" : "false");
+  }
+
+  // Favourite / exclude buttons inside the model detail dialog.
+  function syncDetailStateButtons() {
+    var m = state.currentModel;
+    if (!m) return;
+    var favBtn = $("#btn-detail-fav");
+    var exclBtn = $("#btn-detail-excl");
+    if (favBtn) {
+      var fav = isFavoriteModel(m);
+      favBtn.innerHTML = fav ? ICON_STAR_FILL : ICON_STAR;
+      favBtn.classList.toggle("is-active", fav);
+      favBtn.setAttribute("aria-pressed", fav ? "true" : "false");
+      favBtn.title = I18N.t(fav ? "actionUnfavorite" : "actionFavorite");
+      favBtn.setAttribute("aria-label", I18N.t(fav ? "actionUnfavorite" : "actionFavorite"));
+    }
+    if (exclBtn) {
+      var excl = isExcludedModel(m);
+      exclBtn.innerHTML = excl ? ICON_EYE_OFF : ICON_EYE;
+      exclBtn.classList.toggle("is-active", excl);
+      exclBtn.setAttribute("aria-pressed", excl ? "true" : "false");
+      exclBtn.title = I18N.t(excl ? "actionRestore" : "actionExclude");
+      exclBtn.setAttribute("aria-label", I18N.t(excl ? "actionRestore" : "actionExclude"));
+    }
+  }
+
+  // Row icon button (favourite or exclude) used in the models table.
+  function makeStateIconButton(kind, m) {
+    var isFav = kind === "fav";
+    var active = isFav ? isFavoriteModel(m) : isExcludedModel(m);
+    var b = el("button", "icon-btn" + (active ? " is-active" : ""), null);
+    b.type = "button";
+    var titleKey = isFav
+      ? (active ? "actionUnfavorite" : "actionFavorite")
+      : (active ? "actionRestore" : "actionExclude");
+    b.title = I18N.t(titleKey);
+    b.setAttribute("aria-label", I18N.t(titleKey));
+    b.innerHTML = isFav ? (active ? ICON_STAR_FILL : ICON_STAR)
+      : (active ? ICON_EYE_OFF : ICON_EYE);
+    b.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (isFav) applyModelState(m.rank, { favorite: !active });
+      else applyModelState(m.rank, { excluded: !active });
+    });
+    return b;
   }
 
   // Attach an inline spinner + disabled state to a button during an async op.
@@ -670,6 +960,7 @@
   }
 
   function ingestFiles(fileList) {
+    clearHealthPanels(); // stale health report no longer applies to the new file set
     for (var i = 0; i < fileList.length; i++) {
       var f = fileList[i];
       var name = f.webkitRelativePath ? basename(f.webkitRelativePath) : f.name;
@@ -1079,7 +1370,28 @@
       // let the UI paint the "analyzing" state before the synchronous parse
       await new Promise(function (r) { setTimeout(r, 30); });
 
+      // Analysis health check — catch data / parse problems with a compact
+      // Passed / Warning / Error report BEFORE the heavy pipeline. Only real
+      // blockers (error level) stop the run; warnings continue and are shown
+      // with the results. A broken verify.dat is dropped (train-only mode).
+      clearHealthPanels();
+      state.health = HealthCheck.check({
+        train: roleTexts.train,
+        verify: roleTexts.verify,
+        top: roleTexts.top,
+        coeff: roleTexts.coeff,
+        uspace: roleTexts.uspace,
+      });
+      if (state.health.level === "error") {
+        renderHealthReport(state.health, $("#health-block"));
+        toast(I18N.t("healthBlocked"));
+        return; // stays on the upload view with the report visible
+      }
+      if (state.health.dropVerify) delete roleTexts.verify;
+
       processTexts(roleTexts);
+      // Healthy/warning runs: one short-lived toast, no permanent panel.
+      toastHealthSummary();
     } catch (err) {
       console.error(err);
       toast(I18N.t("errParse") + " " + (err && err.message ? err.message : ""));
@@ -1091,8 +1403,9 @@
   }
 
   // Shared analysis entry point used by a fresh upload (run) and by loading a
-  // saved project. roleTexts: { train, uspace, coeff, top, verify?, sissoin? }.
-  function processTexts(roleTexts) {
+  // saved project. `init` may carry { modelStates } so favourites/exclusions
+  // saved inside a project JSON are restored onto the freshly rebuilt models.
+  function processTexts(roleTexts, init) {
     var files = {};
     files.trainText = roleTexts.train;
     files.uspaceText = roleTexts.uspace;
@@ -1107,6 +1420,11 @@
     });
 
     state.result = Core.runPipeline(files);
+    // Single source of truth for per-model favourite / excluded flags. A saved
+    // project may bring one along (pruned to the ranks that still exist);
+    // otherwise every model starts unflagged.
+    state.result.modelStates = Core.normalizeModelStates(init && init.modelStates,
+      new Set(state.result.models.map(function (m) { return m.rank; })));
 
     // Parse the unit (dimension) matrix from SISSO.out, when provided, and map
     // every train.dat feature column to its dimension group. Rows of the unit
@@ -1124,12 +1442,25 @@
     }
     state.result.meta.units = unitInfo;
 
+    // Usage statistics (feature & descriptor frequency across the candidate
+    // models) are derived once per run and cached on the result; the Units
+    // view renders from here, and batch ops match models with these helpers.
+    state.result.usage = Core.usageReport(state.result);
+
     // A fresh analysis starts with no filter and the default sort.
     state.filter = newEmptyFilter();
     state.sortKey = "rank";
     state.sortAsc = true;
     state.loadAll = false;
     state.topN = 100;
+    state.showExcluded = false;
+    state.favOnly = false;
+    state.batchSel = { table: new Set(), pareto: new Set() };
+    state.batchOps = [];
+    state.usageSort = { feature: { by: "count", asc: false }, descriptor: { by: "count", asc: false } };
+    state.usageExpanded = { feature: false, descriptor: false };
+    state.compareSel = [];
+    disposeCompareChart();
 
     // Enrich the run metadata with SISSO.in settings, with safe fallbacks so
     // the dimension / complexity cards still show when SISSO.in is missing or
@@ -1170,19 +1501,21 @@
   // ---------------------------------------------------------------------------
   // Left-nav state: upload ("Load results") vs. loaded run + sub-views.
   function setNavState(hasResults) {
-    var t = $("#view-table-btn"), g = $("#view-grid-btn"), p = $("#view-pareto-btn"), u = $("#view-units-btn");
+    var t = $("#view-table-btn"), g = $("#view-grid-btn"), p = $("#view-pareto-btn"),
+        c = $("#view-compare-btn"), u = $("#view-units-btn");
     var home = $("#btn-nav-home");
     if (hasResults) {
       document.body.classList.add("has-results");
       if (home) home.classList.remove("is-active");
       if (t) t.disabled = false;
       if (g) g.disabled = false;
-      if (p) p.disabled = false; // verify gating happens in renderControls
+      if (p) p.disabled = false; // available for train-only runs too; hidden in renderControls when no result
+      if (c) c.disabled = false;
       if (u) u.disabled = false; // unit gating happens in renderControls
     } else {
       document.body.classList.remove("has-results");
       if (home) home.classList.add("is-active");
-      [t, g, p, u].forEach(function (b) {
+      [t, g, p, c, u].forEach(function (b) {
         if (b) { b.disabled = true; b.classList.remove("is-active"); }
       });
     }
@@ -1216,6 +1549,7 @@
     populateColorSelect();
     renderFilterSummary();
     renderModels();
+    refreshHealthPanels();
   }
 
   function renderKpis() {
@@ -1273,15 +1607,38 @@
   ];
 
   function metricValue(m, metric, dataset) {
-    var ms = dataset === "verify" ? (m.metricsVerify || null) : (m.metricsTrain || null);
-    return ms ? ms[metric] : null;
+    // Single source of truth: everything reads through SissoCore.metricValue
+    // (which also implements the "delta" generalization-gap pseudo-dataset), so
+    // table / filter / sort / Pareto can never disagree about a value.
+    var v = Core.metricValue(m, dataset, metric);
+    return Number.isFinite(v) ? v : null;
+  }
+
+  // Short display dataset tag for delta columns ("ΔRMSE (V−T)" …).
+  function deltaColLabel(metricLabelKey) {
+    return "Δ" + I18N.t(metricLabelKey) + " (" + I18N.t("detailDeltaShort") + ")";
+  }
+
+  // Explicit per-metric definition text (shown as a tooltip on delta columns,
+  // filter rows and Pareto delta options) so the sign convention is never
+  // guessed: positive always means validation performed worse than training.
+  function deltaMetricDefinition(metricKey, metricLabelKey) {
+    var label = "Δ" + I18N.t(metricLabelKey);
+    return I18N.format(metricKey === "r2" || metricKey === "rho"
+      ? "deltaDefInv" : "deltaDefDiff", { label: label });
   }
 
   function buildTableColumns() {
     var hasVerify = !!(state.result && state.result.verify);
+    // Column order in the overview table: batch-check, rank, model formula,
+    // ACTIONS, then the train / verify / Δ metric columns — the row actions
+    // (View · favourite · exclude) sit right after the formula, not at the end.
     var cols = [
       { id: "rank", label: function () { return I18N.t("colRank"); }, numeric: false, get: function (m) { return m.rank; } },
       { id: "formula", label: function () { return I18N.t("colFormula"); }, numeric: false, get: function (m) { return m.formulaOriginal; } },
+      {
+        id: "actions", label: function () { return I18N.t("colActions"); }, numeric: false, get: function () { return null; },
+      },
     ];
     COL_METRICS.forEach(function (d) {
       cols.push({
@@ -1295,10 +1652,13 @@
           numeric: true, metric: d.metric, dataset: "verify",
           get: function (m) { return metricValue(m, d.metric, "verify"); },
         });
+        cols.push({
+          id: d.metric + "-delta", label: function () { return deltaColLabel(d.labelKey); },
+          hint: function () { return deltaMetricDefinition(d.metric, d.labelKey); },
+          numeric: true, metric: d.metric, dataset: "delta",
+          get: function (m) { return metricValue(m, d.metric, "delta"); },
+        });
       }
-    });
-    cols.push({
-      id: "actions", label: function () { return I18N.t("colActions"); }, numeric: false, get: function () { return null; },
     });
     return cols;
   }
@@ -1359,35 +1719,54 @@
 
   function renderControls() {
     // Sorting is column-header driven (click a header to sort); no dropdowns.
-    var hasVerify = !!(state.result && state.result.verify);
     syncLoadAllButton();
 
-    // Pareto axis selects — metric direction is preset (↓ smaller better,
-    // ↑ bigger better).
-    [["#pareto-x", state.paretoX], ["#pareto-y", state.paretoY]].forEach(function (pair) {
-      var s = $(pair[0]);
-      if (!s) return;
+    // Keep the Pareto axes valid for the datasets that actually exist in the
+    // current run, then rebuild the three axis selects. Every axis is now a
+    // (dataset, metric) pair: dataset options are derived from the run (Train,
+    // plus Verify when a verify file was analysed), so a train-only run can
+    // plot e.g. Train RMSE × Train MaxAE. Metric direction stays preset
+    // (↓ smaller better, ↑ bigger better).
+    coerceParetoAxes();
+    var datasets = paretoDatasets();
+    var axisSelects = [
+      ["#pareto-x", "paretoX"],
+      ["#pareto-y", "paretoY"],
+      ["#pareto-z", "paretoZ"],
+    ];
+    for (var si = 0; si < axisSelects.length; si++) {
+      var s = $(axisSelects[si][0]);
+      if (!s) continue;
+      var key = axisSelects[si][1];
+      var spec = state[key];
       s.innerHTML = "";
-      PARETO_METRICS.forEach(function (d) {
-        var opt = el("option", null, I18N.t(d.label) + (d.minimize ? " ↓" : " ↑"));
-        opt.value = d.key;
-        s.appendChild(opt);
-      });
-      s.value = pair[1];
-    });
-
-    // third Pareto axis (metric + dataset) and 2D/3D toggle
-    var zSel = $("#pareto-z");
-    if (zSel) {
-      zSel.innerHTML = "";
-      PARETO_METRICS.forEach(function (d) {
-        [["train", "detailTrain"], ["verify", "detailVerify"]].forEach(function (s) {
-          var opt = el("option", null, I18N.t(d.label) + " (" + I18N.t(s[1]) + ") " + (d.minimize ? "↓" : "↑"));
-          opt.value = d.key + "|" + s[0];
-          zSel.appendChild(opt);
-        });
-      });
-      zSel.value = state.paretoZ.metric + "|" + state.paretoZ.set;
+      for (var di = 0; di < datasets.length; di++) {
+        var isDeltaGroup = datasets[di] === "delta";
+        var group = el("optgroup");
+        group.label = isDeltaGroup ? I18N.t("paretoDeltaGroup")
+          : I18N.t(datasets[di] === "verify" ? "detailVerify" : "detailTrain");
+        for (var mi = 0; mi < PARETO_METRICS.length; mi++) {
+          var d = PARETO_METRICS[mi];
+          // Delta is defined "smaller = better" for all four metrics, so the
+          // ↑/↓ arrows always point down there. The Pareto chart trades off the
+          // gap MAGNITUDE (|Δ|), never its direction.
+          var minim = isDeltaGroup || d.minimize;
+          var opt = el("option", null, (isDeltaGroup ? "|Δ" : "") + I18N.t(d.label) + (isDeltaGroup ? "|" : "") + (minim ? " ↓" : " ↑"));
+          opt.value = datasets[di] + "|" + d.key;
+          if (isDeltaGroup) {
+            opt.title = deltaAxisDefinition(d.key, d.label);
+          }
+          group.appendChild(opt);
+        }
+        s.appendChild(group);
+      }
+      if (spec) {
+        s.value = spec.dataset + "|" + spec.metric;
+        // hovering the axis select explains the sign convention for Δ axes
+        s.title = spec.dataset === "delta"
+          ? deltaAxisDefinition(spec.metric, paretoMetricDef(spec.metric).label)
+          : "";
+      }
     }
     var zField = $("#pareto-z-field");
     if (zField) zField.hidden = state.paretoMode !== "3d";
@@ -1396,26 +1775,31 @@
       modeBtn.textContent = state.paretoMode === "2d" ? I18N.t("paretoMode3D") : I18N.t("paretoMode2D");
     }
 
-    // view toggle (pareto only meaningful when a verify set exists)
-    var hasVerify = !!(state.result && state.result.verify);
+    // view toggle (Pareto works with train-only runs as well)
+    var res = state.result;
     $("#view-table-btn").classList.toggle("is-active", state.view === "table");
     $("#view-grid-btn").classList.toggle("is-active", state.view === "grid");
     $("#view-pareto-btn").classList.toggle("is-active", state.view === "pareto");
+    $("#view-compare-btn").classList.toggle("is-active", state.view === "compare");
     $("#view-units-btn").classList.toggle("is-active", state.view === "units");
-    $("#view-pareto-btn").disabled = !hasVerify;
-    var res = state.result;
-    var hasUnits = !!(res && res.meta && res.meta.units);
-    $("#view-units-btn").disabled = !hasUnits;
+    $("#view-pareto-btn").disabled = !res;
+    $("#view-compare-btn").disabled = !res;
+    // The Units / dimension view hosts the dimension groups (needs SISSO.out)
+    // AND the feature & descriptor usage tables (which only need the models),
+    // so it is available for every analysed run.
+    $("#view-units-btn").disabled = !res;
     $("#table-wrap").hidden = state.view !== "table";
     $("#grid-wrap").hidden = state.view !== "grid";
     $("#pareto-wrap").hidden = state.view !== "pareto";
+    $("#compare-wrap").hidden = state.view !== "compare";
     $("#units-wrap").hidden = state.view !== "units";
-    // The Filter control is meaningful in the list views *and* on the Pareto
-    // scatter (filtered models become faint "ghosts" that never join the front);
-    // the Load-all toggle and "showing N of M" note are list-view only. Units
-    // is its own layout and shows none of this chrome.
+    // The Filter control is meaningful in the list views, on the Pareto scatter
+    // (filtered/excluded models become faint "ghosts" that never join the front)
+    // and on the Compare picker (same eligible model set). The Load-all toggle
+    // and the "showing N of M" note are list-view only. Units is its own layout
+    // and shows none of this chrome.
     var showListChrome = state.view === "table" || state.view === "grid";
-    var showFilterChrome = showListChrome || state.view === "pareto";
+    var showFilterChrome = showListChrome || state.view === "pareto" || state.view === "compare";
     var resToolbar = document.querySelector("#view-results .toolbar");
     if (resToolbar) resToolbar.hidden = !showFilterChrome;
     var countNote = $("#count-note");
@@ -1430,6 +1814,10 @@
     if (sortField) sortField.hidden = state.view !== "grid";
     var colsAnchor = $("#cols-anchor");
     if (colsAnchor) colsAnchor.hidden = state.view !== "table";
+    var favOnlyBtn = $("#btn-fav-only");
+    if (favOnlyBtn) favOnlyBtn.hidden = !showListChrome; // list views only
+    syncExcludedToggleUI();
+    syncFavOnlyUI();
     syncGridSortUI();
   }
 
@@ -1531,33 +1919,49 @@
     return filterNumericMatch(m) && filterFeatureMatch(m);
   }
 
+  // Model-level exclusion rides on top of the (feature/numeric) filter: by
+  // default excluded models take no part in the list views, the Pareto front or
+  // the Compare picker. Turning "show excluded" on brings them back into the
+  // lists (marked) so users can restore them.
+  function modelVisibleByExclusion(m) {
+    return state.showExcluded || !isExcludedModel(m);
+  }
+
   function filteredModels() {
     if (!state.result) return [];
-    if (!state.filter.active) return state.result.models.slice();
-    return state.result.models.filter(modelPassesFilter);
+    var applyFeature = state.filter.active;
+    return state.result.models.filter(function (m) {
+      if (!modelVisibleByExclusion(m)) return false;
+      if (state.favOnly && !isFavoriteModel(m)) return false;
+      if (applyFeature && !modelPassesFilter(m)) return false;
+      return true;
+    });
   }
 
   function sortedModels() {
     if (!state.result) return [];
     var list = filteredModels();
     var asc = state.sortAsc;
-    // sortKey format: "rank" or "<metric>-<train|verify>", e.g. "rmse-verify".
+    // sortKey format: "rank" or "<metric>-<dataset>", e.g. "rmse-verify" or
+    // "rmse-delta" (delta = the train→validation generalization gap). All
+    // metric reads go through the same Core.metricValue accessor as the table
+    // cells and the Pareto axes, so sorting can never disagree with the display.
     var sk = state.sortKey.split("-");
     var metric = sk[0];
-    var isVerify = sk[1] === "verify";
+    var dataset = sk.length > 1 ? sk[1] : "";
+    var metricKey = (dataset === "verify" || dataset === "delta" || dataset === "train")
+      && (metric === "rmse" || metric === "maxae" || metric === "r2" || metric === "rho")
+      ? metric : null;
 
     // Normalise non-finite metrics to a deterministic endpoint so NaN values
     // never poison the comparator (which would make sort order unstable).
+    // Endpoints sit on the metric's own "worse" side; for delta every metric is
+    // smaller-better (a larger gap = worse), matching its rmse/maxae behaviour.
     function key(m) {
-      if (metric === "rank") return m.rank;
-      var ms = isVerify ? (m.metricsVerify || null) : m.metricsTrain;
-      switch (metric) {
-        case "rmse": return (ms && Number.isFinite(ms.rmse)) ? ms.rmse : Infinity;
-        case "maxae": return (ms && Number.isFinite(ms.maxae)) ? ms.maxae : Infinity;
-        case "r2": return (ms && Number.isFinite(ms.r2)) ? ms.r2 : -Infinity;
-        case "rho": return (ms && Number.isFinite(ms.rho)) ? ms.rho : 0;
-        default: return m.rank;
-      }
+      if (!metricKey) return m.rank;
+      var v = Core.metricValue(m, dataset, metricKey);
+      if (Number.isFinite(v)) return v;
+      return Core.metricSortEndpoint(metricKey, dataset);
     }
 
     list.sort(function (a, b) {
@@ -1602,7 +2006,8 @@
     var seq = ++renderSeq;
 
     renderCount();
-    $("#empty-state").hidden = vis.shown > 0;
+    var listView = state.view === "table" || state.view === "grid";
+    $("#empty-state").hidden = !listView || vis.shown > 0;
 
     if (vis.shown > 400) {
       showLoading("rendering");
@@ -1620,6 +2025,157 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Batch "copy selected models" for AI comparison.
+  //
+  // The main results table and the Pareto table each get a checkbox column plus
+  // a slim bar ("Copy selected (n)"). Copying builds one text block per chosen
+  // model — the model formula (LaTeX, falling back to the original ASCII when
+  // the formula does not parse) plus its fit statistics per dataset — so the
+  // whole selection can be pasted straight into an AI prompt for comparison.
+  // Selections live in state.batchSel, keyed per table view, and are reset on
+  // every new analysis.
+  // ---------------------------------------------------------------------------
+
+  function batchSelSet(viewKey) {
+    if (!state.batchSel) state.batchSel = { table: new Set(), pareto: new Set() };
+    if (!state.batchSel[viewKey]) state.batchSel[viewKey] = new Set();
+    return state.batchSel[viewKey];
+  }
+
+  function makeBatchCheckbox(m, viewKey) {
+    var set = batchSelSet(viewKey);
+    var box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "batch-check";
+    box.dataset.rank = String(m.rank);
+    box.checked = set.has(m.rank);
+    box.setAttribute("aria-label", I18N.format("batchSelAria", { rank: m.rank }));
+    // Never let a checkbox interaction open the model detail on the row behind it.
+    box.addEventListener("click", function (e) { e.stopPropagation(); });
+    box.addEventListener("keydown", function (e) { e.stopPropagation(); });
+    return box;
+  }
+
+  function fmtBatchMetric(v) {
+    return (typeof v === "number" && Number.isFinite(v)) ? String(Number(v.toPrecision(7))) : "NaN";
+  }
+
+  // One text block per model (see the function header for the format).
+  function batchModelText(m) {
+    var formula = m.formulaOriginal;
+    try { formula = Core.formulaToLatex(m.formulaOriginal); } catch (e) { /* unparsable formula → keep original text */ }
+    var lines = ["model" + m.rank + "：" + formula];
+    var metricDefs = [["rmse", "RMSE"], ["maxae", "MaxAE"], ["r2", "R2"], ["rho", "rho"]];
+    var datasets = ["train"];
+    if (m.metricsVerify) datasets.push("verify");
+    metricDefs.forEach(function (def) {
+      datasets.forEach(function (ds) {
+        var ms = ds === "verify" ? m.metricsVerify : m.metricsTrain;
+        lines.push(def[1] + "_" + ds + ": " + fmtBatchMetric(ms ? ms[def[0]] : NaN));
+      });
+    });
+    return lines.join("\n");
+  }
+
+  function batchModelsToText(models) {
+    if (!models || !models.length) return "";
+    return models.map(batchModelText).join("\n\n") + "\n";
+  }
+
+  // Create the "copy selected (n)" bar for one table and wire checkbox events.
+  //   viewKey   "table" | "pareto" (state.batchSel key)
+  //   entries   [{ m, box }] for every visible row of that table
+  //   headBox   the "select all visible" checkbox in the header (may be null)
+  // Returns the bar element (caller appends it above the table).
+  function createBatchBar(viewKey, entries, headBox) {
+    var set = batchSelSet(viewKey);
+    var bar = el("div", "batch-bar");
+    var countLbl = el("span", "batch-bar__count", "");
+    var clearBtn = el("button", "btn btn--ghost btn--sm", I18N.t("compareClear"));
+    clearBtn.type = "button";
+    var copyBtn = el("button", "btn btn--primary btn--sm", "");
+    copyBtn.type = "button";
+    copyBtn.disabled = true;
+    bar.appendChild(countLbl);
+    bar.appendChild(clearBtn);
+    bar.appendChild(copyBtn);
+
+    function sync() {
+      var n = 0;
+      for (var i = 0; i < entries.length; i++) {
+        if (set.has(entries[i].m.rank)) n++;
+      }
+      countLbl.textContent = I18N.format("batchSelCount", { n: n });
+      copyBtn.textContent = I18N.format("batchCopy", { n: n });
+      copyBtn.disabled = n === 0;
+      if (headBox) {
+        var all = entries.length > 0 && n === entries.length;
+        headBox.checked = all;
+        headBox.indeterminate = !all && n > 0;
+      }
+    }
+
+    // Each visible row's checkbox keeps the shared rank set in sync.
+    for (var ei = 0; ei < entries.length; ei++) {
+      (function (ent) {
+        ent.box.addEventListener("change", function () {
+          if (ent.box.checked) set.add(ent.m.rank); else set.delete(ent.m.rank);
+          sync();
+        });
+      })(entries[ei]);
+    }
+    if (headBox) {
+      headBox.addEventListener("change", function () {
+        var want = headBox.checked;
+        for (var i = 0; i < entries.length; i++) {
+          var box = entries[i].box;
+          box.checked = want;
+          if (want) set.add(entries[i].m.rank); else set.delete(entries[i].m.rank);
+        }
+        sync();
+      });
+    }
+    clearBtn.addEventListener("click", function () {
+      for (var i = 0; i < entries.length; i++) {
+        set.delete(entries[i].m.rank);
+        entries[i].box.checked = false;
+      }
+      sync();
+    });
+    copyBtn.addEventListener("click", function () {
+      var models = [];
+      for (var i = 0; i < entries.length; i++) {
+        if (set.has(entries[i].m.rank)) models.push(entries[i].m);
+      }
+      if (!models.length) return;
+      writeClipboard(batchModelsToText(models), I18N.format("batchCopied", { n: models.length }));
+    });
+
+    sync();
+    return bar;
+  }
+
+  // Favourites-only list toggle ("收藏页面"): filters the table/grid to starred
+  // models while staying composable with the feature filter + exclusions.
+  function favouriteModelCount() {
+    return state.result ? state.result.models.filter(isFavoriteModel).length : 0;
+  }
+  function toggleFavOnly() {
+    state.favOnly = !state.favOnly;
+    refreshStateUI();
+  }
+  function syncFavOnlyUI() {
+    var btn = $("#btn-fav-only");
+    if (!btn) return;
+    var n = favouriteModelCount();
+    btn.textContent = I18N.t("favOnlyBtn");
+    btn.classList.toggle("is-active", state.favOnly);
+    btn.disabled = !state.favOnly && n === 0;
+    btn.title = n ? I18N.format("favOnlyHint", { n: n }) : I18N.t("favOnlyNone");
+    btn.setAttribute("aria-pressed", state.favOnly ? "true" : "false");
+  }
+
+  // ---------------------------------------------------------------------------
   // Table
   // ---------------------------------------------------------------------------
   function renderTable() {
@@ -1631,6 +2187,17 @@
     var thead = el("thead");
     var hr = el("tr");
     var cols = visibleTableColumns();
+
+    // Batch-copy selection column ("select all visible" lives in the header).
+    var entries = [];
+    var selTh = el("th", "batch-th", null);
+    var headBox = document.createElement("input");
+    headBox.type = "checkbox";
+    headBox.className = "batch-check batch-check--head";
+    headBox.setAttribute("aria-label", I18N.t("batchSelAllAria"));
+    if (vis.shown <= 0) headBox.disabled = true;
+    selTh.appendChild(headBox);
+    hr.appendChild(selTh);
 
     cols.forEach(function (c) {
       var th = el("th", null, null);
@@ -1652,6 +2219,7 @@
       } else {
         th.classList.add("th-static");
       }
+      if (c.hint) th.title = c.hint();
       var label = el("span", "th-label", c.label());
       th.appendChild(label);
       if (sortable) {
@@ -1671,6 +2239,14 @@
       tr.tabIndex = 0;
       tr.setAttribute("role", "button");
       tr.setAttribute("aria-label", I18N.t("detailRank") + " " + m.rank);
+      if (isExcludedModel(m)) tr.classList.add("is-excluded");
+      if (isFavoriteModel(m)) tr.classList.add("is-fav");
+
+      var box = makeBatchCheckbox(m, "table");
+      var selTd = el("td", "batch-cell");
+      selTd.appendChild(box);
+      tr.appendChild(selTd);
+      entries.push({ m: m, box: box });
 
       cols.forEach(function (c) {
         var td;
@@ -1678,10 +2254,12 @@
           td = el("td", "formula-cell");
           setFormulaContent(td, m.formulaOriginal);
         } else if (c.id === "actions") {
-          td = el("td");
+          td = el("td", "row-actions");
           var btn = el("button", "btn btn--secondary btn--sm", I18N.t("view"));
           btn.addEventListener("click", function (e) { e.stopPropagation(); openDetail(m.rank); });
           td.appendChild(btn);
+          td.appendChild(makeStateIconButton("fav", m));
+          td.appendChild(makeStateIconButton("excl", m));
         } else if (c.numeric) {
           var v = c.get(m);
           td = el("td", "num", fmt(v, 4));
@@ -1699,6 +2277,7 @@
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
+    wrap.appendChild(createBatchBar("table", entries, headBox));
     wrap.appendChild(table);
   }
 
@@ -1873,19 +2452,30 @@
   // ---------------------------------------------------------------------------
   // Pareto front: train metric (x) vs verify metric (y)
   // ---------------------------------------------------------------------------
-  // Split Pareto-eligible points into models that pass the active filter (they
-  // are the ones allowed to build the front) and "ghosts" — models filtered
-  // out that are still drawn faintly on the scatter but never take part in the
-  // Pareto-front computation.
+  // Split Pareto-eligible points into the models allowed to build the front and
+  // "ghosts" — models that are drawn faintly but never take part in the front
+  // computation. A model becomes a ghost when it fails the active feature
+  // filter OR is excluded (per-model state); clicking a ghost still opens its
+  // detail, where the exclusion can be restored.
   function paretoSplit(pts) {
-    if (!state.filter || !state.filter.active) return { pts: pts, ghosts: [] };
+    var filterOn = !!(state.filter && state.filter.active);
     var included = [], ghosts = [];
     for (var i = 0; i < pts.length; i++) {
       var p = pts[i];
-      if (modelPassesFilter(p.m)) included.push(p);
-      else ghosts.push(p);
+      var ghost = isExcludedModel(p.m) || (filterOn && !modelPassesFilter(p.m));
+      if (ghost) ghosts.push(p);
+      else included.push(p);
     }
     return { pts: included, ghosts: ghosts };
+  }
+
+  // Favourite models get an obvious golden-diamond marker on the Pareto chart
+  // (works for both 2D and 3D data items). Ghosts keep their faint style.
+  function withFavMark(datum, p) {
+    if (!isFavoriteModel(p.m)) return datum;
+    datum.itemStyle = { color: "#f6b100", borderColor: "#5a4400", borderWidth: 0.7 };
+    datum.symbol = "diamond";
+    return datum;
   }
 
   // Theme colours arrive as CSS-resolved strings ("rgb(r,g,b)" or "#rrggbb");
@@ -1904,38 +2494,181 @@
     return cssColor;
   }
 
-  function paretoPoints() {
+  // ---------------------------------------------------------------------------
+  // Pareto axes — every axis is a { dataset, metric } pair.
+  //
+  // Datasets are derived from the run actually loaded ("train" always, plus
+  // "verify" when a verify file was analysed), so the Pareto view no longer
+  // requires train + verify data — a train-only run can plot e.g. Train RMSE ×
+  // Train MaxAE. Choosing the *same* dataset + metric for two axes is rejected
+  // in the UI. The engine keeps its metricsTrain / metricsVerify fields; this
+  // module is the single place that maps a dataset token onto them (through
+  // SissoCore.metricValue), which is why no other code adds per-dataset
+  // branches.
+  // ---------------------------------------------------------------------------
+
+  // Axis dataset tokens available in this run: real datasets ("train", plus
+  // "verify" when a verify file was analysed) and the "delta" pseudo-dataset
+  // (train → validation gap, only meaningful when validation data exists).
+  // Keeping "delta" out of Core.availableDatasets avoids making it a real
+  // dataset anywhere else (compare matrix, default axes, etc.).
+  function paretoDatasets() {
+    var ds = Core.availableDatasets(state.result);
+    if (state.result && state.result.verify) ds = ds.concat(["delta"]);
+    return ds;
+  }
+
+  function paretoIsMetric(k) {
+    return PARETO_METRICS.some(function (d) { return d.key === k; });
+  }
+
+  // Migrate a legacy/external axis value into a {dataset, metric} spec valid
+  // for the loaded run. Accepts the new object form, the old bare metric key
+  // (dataset implied) and the very old { metric, set } form used by paretoZ.
+  function paretoNormalizeAxis(v, fallback) {
+    var spec = { dataset: fallback.dataset, metric: fallback.metric };
+    if (v) {
+      var ds = typeof v.dataset === "string" && v.dataset
+        ? v.dataset : (typeof v.set === "string" && v.set ? v.set : "");
+      if (ds && paretoDatasets().indexOf(ds) >= 0) spec.dataset = ds;
+      var m = typeof v === "string" ? v : (v && typeof v.metric === "string" ? v.metric : "");
+      if (m && paretoIsMetric(m)) spec.metric = m;
+    }
+    return spec;
+  }
+
+  // Keep the three stored Pareto axes valid for the loaded run, and pairwise
+  // distinct on the axes the current mode actually shows. Runs after every
+  // analysis / project restore / render, so legacy sessions and train-only
+  // projects always end up with sensible, non-duplicate axes.
+  function coerceParetoAxes() {
     var res = state.result;
-    var xDef = paretoMetricDef(state.paretoX);
-    var yDef = paretoMetricDef(state.paretoY);
+    if (!res) return;
+    var datasets = paretoDatasets();
+    var dim = state.paretoMode === "3d" ? 3 : 2;
+    var fallbackDs = datasets.indexOf("verify") >= 0 ? "verify" : "train";
+    var specs = [
+      paretoNormalizeAxis(state.paretoX, { dataset: "train", metric: "rmse" }),
+      paretoNormalizeAxis(state.paretoY, { dataset: fallbackDs, metric: "rmse" }),
+      paretoNormalizeAxis(state.paretoZ, { dataset: "train", metric: "r2" }),
+    ];
+    // Preference pool of every (dataset, metric) combo present in this run,
+    // used to replace any duplicate axis with the next free default.
+    var pool = [];
+    PARETO_METRICS.forEach(function (d) {
+      datasets.forEach(function (ds) { pool.push({ dataset: ds, metric: d.key }); });
+    });
+    var used = [], next = 0;
+    for (var i = 0; i < dim; i++) {
+      var s = specs[i];
+      var dup = used.some(function (u) {
+        return u.dataset === s.dataset && u.metric === s.metric;
+      });
+      if (dup) {
+        while (next < pool.length && used.some(function (u) {
+          return u.dataset === pool[next].dataset && u.metric === pool[next].metric;
+        })) next++;
+        if (next < pool.length) {
+          s = { dataset: pool[next].dataset, metric: pool[next].metric };
+          next++;
+        } else {
+          break; // cannot happen: >= 2 train combos are always available
+        }
+      }
+      used.push(s);
+      specs[i] = s;
+    }
+    state.paretoX = specs[0];
+    state.paretoY = specs[1];
+    state.paretoZ = specs[2];
+  }
+
+  // Current axes as full defs: code "x"/"y"/(2D) + "z" (3D), dataset, metric
+  // key, minimize direction and i18n label key.
+  function paretoCurrentAxisDefs() {
+    var dim = state.paretoMode === "3d" ? 3 : 2;
+    var keys = ["paretoX", "paretoY", "paretoZ"];
+    var codes = ["x", "y", "z"];
+    var defs = [];
+    for (var i = 0; i < dim; i++) {
+      var a = state[keys[i]] || { dataset: "train", metric: "rmse" };
+      var d = paretoMetricDef(a.metric);
+      var dataset = a.dataset === "verify" ? "verify"
+        : a.dataset === "delta" ? "delta" : "train";
+      defs.push({
+        code: codes[i],
+        dataset: dataset,
+        metric: d.key,
+        label: d.label,
+        // Every Δ metric is defined as "positive = worse on validation", so a
+        // smaller gap is always better regardless of the underlying metric.
+        minimize: dataset === "delta" ? true : d.minimize,
+      });
+    }
+    return defs;
+  }
+
+  // One point collector for both dimensions: read every axis' metric value via
+  // the shared engine accessor and keep a point only when all values are
+  // finite (same membership rule the charts and the CSV export use).
+  // Delta axes plot the ABSOLUTE gap |Δ| — the direction of the gap is ignored
+  // on the Pareto chart (only its magnitude trades off against the other axes);
+  // the signed Δ stays in the table / filters / sorting.
+  function paretoCollectPoints(defs) {
+    var res = state.result;
     var pts = [];
     res.models.forEach(function (m) {
-      if (!m.metricsTrain || !m.metricsVerify) return;
-      var x = m.metricsTrain[xDef.key];
-      var y = m.metricsVerify[yDef.key];
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-      pts.push({ rank: m.rank, x: x, y: y, m: m });
+      var pt = { rank: m.rank, m: m };
+      var ok = true;
+      for (var i = 0; i < defs.length; i++) {
+        var v = Core.metricValue(m, defs[i].dataset, defs[i].metric);
+        if (!Number.isFinite(v)) { ok = false; break; }
+        if (defs[i].dataset === "delta") v = Math.abs(v);
+        pt[defs[i].code] = v;
+      }
+      if (ok) pts.push(pt);
     });
-    return { xDef: xDef, yDef: yDef, pts: pts };
+    return { defs: defs, pts: pts };
+  }
+
+  function paretoComputed() {
+    return paretoCollectPoints(paretoCurrentAxisDefs());
   }
 
   // Non-dominated (Pareto-optimal) set for the chosen "better" directions.
+  // Both Pareto charts and the CSV export call these, and both delegate to the
+  // engine (SissoCore.paretoFront2D/3D), so the exported is_pareto flags are
+  // always computed by the exact code path that produced the plotted front.
   function computeParetoFront1(pts, xDef, yDef) {
-    function nx(p) { return xDef.minimize ? p.x : -p.x; }
-    function ny(p) { return yDef.minimize ? p.y : -p.y; }
-    var nonDom = pts.filter(function (p) {
-      return !pts.some(function (q) {
-        if (q.rank === p.rank) return false;
-        return nx(q) <= nx(p) && ny(q) <= ny(p) && (nx(q) < nx(p) || ny(q) < ny(p));
-      });
-    });
-    return nonDom.slice().sort(function (a, b) {
-      return (nx(a) - nx(b)) || (a.rank - b.rank);
-    });
+    return Core.paretoFront2D(pts, xDef.minimize, yDef.minimize);
   }
 
-  function paretoAxisName(def, whichKey) {
-    return I18N.t(def.label) + " (" + I18N.t(whichKey) + ") " + (def.minimize ? "↓" : "↑");
+  function computeParetoFront3D(pts, xDef, yDef, zDef) {
+    return Core.paretoFront3D(pts, xDef.minimize, yDef.minimize, zDef.minimize);
+  }
+
+  // Short axis dataset tag: Train / Verify / Δ (validation − train).
+  function paretoDatasetLabel(dataset) {
+    if (dataset === "delta") return I18N.t("detailDelta");
+    return I18N.t(dataset === "verify" ? "detailVerify" : "detailTrain");
+  }
+
+  // Dataset-aware axis display name: "RMSE (Train) ↓" — reads the dataset the
+  // axis actually points at, so any axis can sit on any dataset/pseudo-dataset.
+  // Delta axes plot the magnitude and always show "↓" (smaller |Δ| is better).
+  function paretoAxisTitle(def) {
+    var label = def.dataset === "delta"
+      ? "|Δ" + I18N.t(def.label) + "|"
+      : I18N.t(def.label);
+    return label + " (" + paretoDatasetLabel(def.dataset) + ") " +
+      (def.minimize ? "↓" : "↑");
+  }
+
+  // Full definition text for a delta axis (used as the option/axis tooltip).
+  // Pareto shows the absolute value, so only the magnitude is traded off.
+  function deltaAxisDefinition(metricKey, metricLabelKey) {
+    return deltaMetricDefinition(metricKey, metricLabelKey) +
+      " " + I18N.t("deltaAbsNote");
   }
 
   // Axis range that follows the actual data (with a little breathing room),
@@ -1952,52 +2685,14 @@
     return { min: lo - pad, max: hi + pad };
   }
 
-  function modelMetric(m, metricKey, set) {
-    var s = set === "verify" ? m.metricsVerify : m.metricsTrain;
-    return s ? s[metricKey] : NaN;
-  }
-
-  function paretoPoints3D() {
-    var res = state.result;
-    var xDef = paretoMetricDef(state.paretoX);
-    var yDef = paretoMetricDef(state.paretoY);
-    var zDef = paretoMetricDef(state.paretoZ.metric);
-    var pts = [];
-    res.models.forEach(function (m) {
-      var x = modelMetric(m, xDef.key, "train");
-      var y = modelMetric(m, yDef.key, "verify");
-      var z = modelMetric(m, zDef.key, state.paretoZ.set);
-      if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
-        pts.push({ rank: m.rank, x: x, y: y, z: z, m: m });
-      }
-    });
-    return { xDef: xDef, yDef: yDef, zDef: zDef, pts: pts };
-  }
-
-  function computeParetoFront3D(pts, xDef, yDef, zDef) {
-    var sx = xDef.minimize ? 1 : -1;
-    var sy = yDef.minimize ? 1 : -1;
-    var sz = zDef.minimize ? 1 : -1;
-    function n(p) { return { x: p.x * sx, y: p.y * sy, z: p.z * sz }; }
-    return pts.filter(function (p) {
-      return !pts.some(function (q) {
-        if (q.rank === p.rank) return false;
-        var a = n(p), b = n(q);
-        return b.x <= a.x && b.y <= a.y && b.z <= a.z && (b.x < a.x || b.y < a.y || b.z < a.z);
-      });
-    });
-  }
-
-  function paretoZLabel(zDef, zSet) {
-    return I18N.t(zDef.label) + " (" + I18N.t(zSet === "verify" ? "detailVerify" : "detailTrain") + ") " + (zDef.minimize ? "↓" : "↑");
-  }
-
   function renderPareto3D() {
-    var computed = paretoPoints3D();
+    var res = state.result;
+    if (!res) return;
+    var computed = paretoComputed();
+    var defs = computed.defs; // x, y, z
     var split = paretoSplit(computed.pts);
     var pts = split.pts, ghosts = split.ghosts;
-    var xDef = computed.xDef, yDef = computed.yDef, zDef = computed.zDef;
-    var front = computeParetoFront3D(pts, xDef, yDef, zDef);
+    var front = computeParetoFront3D(pts, defs[0], defs[1], defs[2]);
     var ghostOn = ghosts.length > 0;
 
     $("#pareto-count").textContent = ghostOn
@@ -2014,9 +2709,9 @@
     var yb = paretoAxisBounds(viewPts.map(function (p) { return p.y; }));
     var zb = paretoAxisBounds(viewPts.map(function (p) { return p.z; }));
 
-    var allData = pts.map(function (p) { return { value: [p.x, p.y, p.z], rank: p.rank }; });
+    var allData = pts.map(function (p) { return withFavMark({ value: [p.x, p.y, p.z], rank: p.rank }, p); });
     var ghostData = ghosts.map(function (p) { return { value: [p.x, p.y, p.z], rank: p.rank, ghost: true }; });
-    var frontData = front.map(function (p) { return { value: [p.x, p.y, p.z], rank: p.rank }; });
+    var frontData = front.map(function (p) { return withFavMark({ value: [p.x, p.y, p.z], rank: p.rank }, p); });
     var frontPath = front.slice().sort(function (a, b) { return a.x - b.x; })
       .map(function (p) { return [p.x, p.y, p.z]; });
 
@@ -2042,9 +2737,9 @@
           if (!d || d.rank == null) return "";
           var rows = [
             "<strong>" + I18N.t("detailRank") + " " + d.rank + "</strong>",
-            paretoAxisName(xDef, "detailTrain") + ": " + fmt(d.value[0], 4),
-            paretoAxisName(yDef, "detailVerify") + ": " + fmt(d.value[1], 4),
-            paretoZLabel(zDef, state.paretoZ.set) + ": " + fmt(d.value[2], 4),
+            paretoAxisTitle(defs[0]) + ": " + fmt(d.value[0], 4),
+            paretoAxisTitle(defs[1]) + ": " + fmt(d.value[1], 4),
+            paretoAxisTitle(defs[2]) + ": " + fmt(d.value[2], 4),
           ];
           if (d.ghost) rows.push('<span style="opacity:.65">' + I18N.t("paretoGhostNote") + "</span>");
           return rows.join("<br/>");
@@ -2068,9 +2763,9 @@
           zoomSensitivity: 1,
         },
       },
-      xAxis3D: axis3D(paretoAxisName(xDef, "detailTrain"), xb),
-      yAxis3D: axis3D(paretoAxisName(yDef, "detailVerify"), yb),
-      zAxis3D: axis3D(paretoZLabel(zDef, state.paretoZ.set), zb),
+      xAxis3D: axis3D(paretoAxisTitle(defs[0]), xb),
+      yAxis3D: axis3D(paretoAxisTitle(defs[1]), yb),
+      zAxis3D: axis3D(paretoAxisTitle(defs[2]), zb),
       legend: {
         data: (function () {
           var names = [I18N.t("paretoAll"), I18N.t("paretoFront")];
@@ -2128,20 +2823,35 @@
       if (rank != null) openDetail(rank);
     });
 
-    renderParetoTable3D(front, xDef, yDef, zDef);
+    renderParetoTable(front, defs);
   }
 
-  function renderParetoTable3D(front, xDef, yDef, zDef) {
+  // Front table shared by the 2D and 3D Pareto views: one numeric column per
+  // axis def (rank + formula + axes + actions), rows open the model detail.
+  function renderParetoTable(front, defs) {
     var wrap = $("#pareto-table-wrap");
     wrap.innerHTML = "";
     var table = el("table", "models-table");
     var thead = el("thead");
     var hr = el("tr");
-    [I18N.t("colRank"), I18N.t("colFormula"),
-     paretoAxisName(xDef, "detailTrain"), paretoAxisName(yDef, "detailVerify"),
-     paretoZLabel(zDef, state.paretoZ.set), I18N.t("colActions")].forEach(function (label, i) {
+
+    // Batch-copy selection column ("select all visible" lives in the header).
+    var entries = [];
+    var selTh = el("th", "batch-th", null);
+    var headBox = document.createElement("input");
+    headBox.type = "checkbox";
+    headBox.className = "batch-check batch-check--head";
+    headBox.setAttribute("aria-label", I18N.t("batchSelAllAria"));
+    if (!front.length) headBox.disabled = true;
+    selTh.appendChild(headBox);
+    hr.appendChild(selTh);
+
+    var headers = [I18N.t("colRank"), I18N.t("colFormula")];
+    defs.forEach(function (d) { headers.push(paretoAxisTitle(d)); });
+    headers.push(I18N.t("colActions"));
+    headers.forEach(function (label, i) {
       var th = el("th", null, label);
-      if (i >= 2 && i <= 4) th.style.textAlign = "right";
+      if (i >= 2 && i <= headers.length - 2) th.style.textAlign = "right";
       hr.appendChild(th);
     });
     thead.appendChild(hr);
@@ -2151,13 +2861,18 @@
       var tr = el("tr");
       tr.tabIndex = 0;
       tr.setAttribute("role", "button");
+      var box = makeBatchCheckbox(p.m, "pareto");
+      var selTd = el("td", "batch-cell");
+      selTd.appendChild(box);
+      tr.appendChild(selTd);
+      entries.push({ m: p.m, box: box });
       tr.appendChild(el("td", "num", String(p.rank)));
       var fcTd = el("td", "formula-cell");
       setFormulaContent(fcTd, p.m.formulaOriginal);
       tr.appendChild(fcTd);
-      tr.appendChild(el("td", "num", fmt(p.x, 4)));
-      tr.appendChild(el("td", "num", fmt(p.y, 4)));
-      tr.appendChild(el("td", "num", fmt(p.z, 4)));
+      defs.forEach(function (d) {
+        tr.appendChild(el("td", "num", fmt(p[d.code], 4)));
+      });
       var td = el("td");
       var btn = el("button", "btn btn--secondary btn--sm", I18N.t("view"));
       btn.type = "button";
@@ -2171,7 +2886,58 @@
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
+    wrap.appendChild(createBatchBar("pareto", entries, headBox));
     wrap.appendChild(table);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pareto CSV export — one shared path for the 2D and 3D charts.
+  //
+  // The export replays the *exact* computations the current chart was rendered
+  // from (paretoComputed -> paretoSplit -> computeParetoFront*) and hands
+  // those same arrays to SissoCore.paretoExportRows, so the exported point
+  // set, metric values and is_pareto flags always match the plot 1:1 — ghosts
+  // (models the active filter excluded from the front) are exported too, with
+  // excluded=1, exactly as they are drawn. Nothing is recomputed here.
+  // ---------------------------------------------------------------------------
+
+  // Text download helper (also usable for other CSV exports later on).
+  function downloadTextFile(fileName, text, mime) {
+    var blob = new Blob([text], { type: mime || "text/plain;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+  }
+
+  function exportParetoCsv() {
+    var res = state.result;
+    if (!res) return;
+    coerceParetoAxes();
+    var computed = paretoComputed();
+    var defs = computed.defs;
+    var split = paretoSplit(computed.pts);
+    var front = defs.length === 3
+      ? computeParetoFront3D(split.pts, defs[0], defs[1], defs[2])
+      : computeParetoFront1(split.pts, defs[0], defs[1]);
+
+    // Axis descriptors mirror the axes currently shown and their dataset /
+    // metric tokens, so the CSV header documents what X/Y(/Z) contain.
+    var axes = defs.map(function (d) {
+      return { code: d.code, dataset: d.dataset, metric: d.metric };
+    });
+
+    var rows = Core.paretoExportRows(split.pts, split.ghosts, front, axes);
+    var mode = state.paretoMode === "3d" ? "3d" : "2d";
+    var fileName = "sisso-pareto-" + mode + "-" + axes
+      .map(function (a) { return a.code + "-" + a.dataset + "-" + a.metric; })
+      .join("_") + ".csv";
+    downloadTextFile(fileName, Core.rowsToCsv(rows), "text/csv;charset=utf-8");
+    toast(I18N.format("paretoCsvExported", { n: rows.length - 1, file: fileName }));
   }
 
   // ---------------------------------------------------------------------------
@@ -2222,6 +2988,7 @@
         renderCount();
       });
       var span = el("span", null, c.label());
+      if (c.hint) span.title = c.hint();
       lab.appendChild(cb);
       lab.appendChild(span);
       list.appendChild(lab);
@@ -2337,6 +3104,7 @@
       var cond = filterDraft.numeric[c.id] || { min: null, max: null };
       var row = el("label", "range-row");
       var lab = el("span", "range-row__label", c.label());
+      if (c.hint) lab.title = c.hint();
       row.appendChild(lab);
       var minIn = el("input", "input range-row__input");
       minIn.type = "number";
@@ -2563,9 +3331,11 @@
   function applyFilterAndRender() {
     renderFilterSummary();
     renderModels();
-    // The Pareto scatter reflects the same filter: filtered-out models stay as
-    // faint ghosts, and the front is rebuilt from the filtered-in set only.
-    if (state.view === "pareto" && state.result && state.result.verify) renderPareto();
+    // The Pareto scatter reflects the same filter: filtered-out / excluded
+    // models stay as faint ghosts, and the front is rebuilt from the eligible
+    // set only.
+    if (state.view === "pareto" && state.result) renderPareto();
+    if (state.view === "compare" && state.result) renderCompare();
   }
 
   // Summary chip next to the Filter button: e.g. "2 in · 3 out · 1 range".
@@ -2586,12 +3356,24 @@
     if (btn) btn.classList.toggle("is-active-filter", f.active && parts.length > 0);
   }
 
+  // ---------------------------------------------------------------------------
+  // Units / dimension view: dimension-group cards (from SISSO.out) + feature &
+  // descriptor usage tables with batch favourite / exclude actions.
+  // ---------------------------------------------------------------------------
+  var USAGE_ROW_CAP = 60; // rows shown per usage panel before "show all"
+
   function renderUnits() {
     var res = state.result;
+    if (!res) return;
+    renderUnitGroups(res);
+    renderUnitsUsage(res);
+  }
+
+  function renderUnitGroups(res) {
     var wrap = $("#units-groups");
     var empty = $("#units-empty");
     if (!wrap) return;
-    if (!res || !res.meta || !res.meta.units) {
+    if (!res.meta || !res.meta.units) {
       wrap.innerHTML = "";
       if (empty) empty.hidden = false;
       return;
@@ -2644,15 +3426,396 @@
     wrap.appendChild(grid);
   }
 
+  // ---- feature & descriptor usage panels ------------------------------------
+
+  // Usage stats are precomputed once per run (state.result.usage); this render
+  // builds the two sortable tables and wires the per-row batch actions and the
+  // undo bar. Matching always goes through Core (identifier-boundary token
+  // match for features, canonical expression compare for descriptors) — never
+  // a raw substring scan.
+  function renderUnitsUsage(res) {
+    var root = $("#units-usage");
+    if (!root) return;
+    root.innerHTML = "";
+    var usage = res && res.usage;
+    if (!usage || !usage.totalModels) return;
+
+    var sec = el("section", "usage");
+    var head = el("div", "usage__head");
+    head.appendChild(el("h3", "usage__title", I18N.t("unitsUsageTitle")));
+    head.appendChild(el("p", "usage__hint", I18N.t("unitsUsageHint")));
+    sec.appendChild(head);
+
+    var undoBar = buildUsageUndoBar();
+    if (undoBar) sec.appendChild(undoBar);
+
+    var grid = el("div", "usage__grid");
+    grid.appendChild(buildUsagePanel("feature", usage));
+    grid.appendChild(buildUsagePanel("descriptor", usage));
+    sec.appendChild(grid);
+    root.appendChild(sec);
+  }
+
+  function usageSortState(kind) {
+    var s = (state.usageSort && state.usageSort[kind]) || null;
+    if (!s) s = { by: "count", asc: false };
+    return s;
+  }
+
+  function sortUsageRows(rows, kind) {
+    var s = usageSortState(kind);
+    var by = s.by;
+    var dir = s.asc ? 1 : -1;
+    var sorted = rows.slice();
+    sorted.sort(function (a, b) {
+      if (by === "name") {
+        var an = a.name != null ? a.name : a.expr;
+        var bn = b.name != null ? b.name : b.expr;
+        return (an < bn ? -1 : an > bn ? 1 : 0) * dir;
+      }
+      var va = by === "count" ? a.count : a.ratio;
+      var vb = by === "count" ? b.count : b.ratio;
+      if (va === vb) return 0;
+      return (va < vb ? -1 : 1) * dir;
+    });
+    return sorted;
+  }
+
+  // A feature name coloured by its dimension group when unit data exists.
+  function usageFeatureLabelNode(name) {
+    var units = state.result && state.result.meta && state.result.meta.units;
+    if (units && units.nameToGroup &&
+        Object.prototype.hasOwnProperty.call(units.nameToGroup, name)) {
+      var gi = units.nameToGroup[name];
+      var span = el("span", "unit-token unit-g" + gi, name);
+      span.title = units.groups[gi].dimensionless
+        ? I18N.t("unitsDimless")
+        : I18N.format("unitsGroupName", { n: gi + 1 });
+      return span;
+    }
+    return document.createTextNode(name);
+  }
+
+  function usageWhatShort(what) {
+    var s = String(what == null ? "" : what);
+    return s.length > 80 ? s.slice(0, 77) + "…" : s;
+  }
+
+  // Count of the matching models that do not already carry the flag `op` sets.
+  function usageWouldChange(op, matching) {
+    var test = op === "favorite" ? isFavoriteModel : isExcludedModel;
+    var n = 0;
+    for (var i = 0; i < matching.length; i++) if (!test(matching[i])) n++;
+    return n;
+  }
+
+  // How many models a batch entry can still restore (i.e. still carry the flag
+  // the batch set). A batch whose flags were all changed by hand since is
+  // "stale" — nothing left to undo.
+  function batchRestorableCount(entry) {
+    var st = modelStates();
+    if (!st || !entry || !entry.entries) return 0;
+    var n = 0;
+    for (var i = 0; i < entry.entries.length; i++) {
+      var e = entry.entries[i];
+      var s = st[e.rank];
+      if (!s) continue;
+      if (e.setFavorite && s.favorite === true) n++;
+      if (e.setExcluded && s.excluded === true) n++;
+    }
+    return n;
+  }
+
+  // Most recent batch entry that can still be undone. `kind`/`what`/`op`
+  // optionally restrict it to one target + flag (the per-row toggles); with
+  // kind == null it is the newest undoable action overall (the undo bar).
+  // Stale entries (nothing left to restore) are dropped while scanning so they
+  // never shadow a fresh batch of the same pairing.
+  function latestRestorableEntry(kind, what, op) {
+    var ops = state.batchOps;
+    if (!ops || !ops.length) return null;
+    for (var i = ops.length - 1; i >= 0; i--) {
+      var e = ops[i];
+      if (batchRestorableCount(e) === 0) { ops.splice(i, 1); continue; }
+      if (kind == null) return e;
+      if (e.kind === kind && e.what === what && e.op === op) return e;
+    }
+    return null;
+  }
+
+  // One usage row's star / eye button works as a toggle: the first click
+  // applies the batch ("select every matching model"), a second click on the
+  // same button undoes that exact batch again — no second state system, both
+  // go through the shared modelStates map.
+  function makeUsageActButton(kind, what, matching, op) {
+    var isFav = op === "favorite";
+    var pending = latestRestorableEntry(kind, what, op);
+    var btn = el("button", "btn btn--secondary btn--sm usage-act", null);
+    btn.type = "button";
+
+    if (pending) {
+      // Undo mode: this batch is applied — clicking again reverts it.
+      var nRestore = batchRestorableCount(pending);
+      btn.classList.add("is-active", isFav ? "usage-act--fav" : "usage-act--excl");
+      var undoIcon = el("span", "usage-act__icon", null);
+      undoIcon.setAttribute("aria-hidden", "true");
+      undoIcon.innerHTML = isFav ? ICON_STAR_FILL : ICON_EYE;
+      btn.appendChild(undoIcon);
+      btn.appendChild(el("span", "usage-act__n", String(nRestore)));
+      var undoTitle = I18N.format(isFav ? "usageUndoFavTitle" : "usageUndoExclTitle", {
+        what: usageWhatShort(what),
+        n: nRestore,
+      });
+      btn.title = undoTitle;
+      btn.setAttribute("aria-label", undoTitle);
+      btn.addEventListener("click", function () {
+        undoUsageEntry(pending);
+      });
+      return btn;
+    }
+
+    // Apply mode (first click = select): number of models that would be newly
+    // flagged; disabled when every matching model already carries the flag.
+    var nWill = usageWouldChange(op, matching);
+    btn.classList.toggle("is-idle", nWill === 0);
+    var icon = el("span", "usage-act__icon", null);
+    icon.setAttribute("aria-hidden", "true");
+    icon.innerHTML = isFav ? ICON_STAR : ICON_EYE_OFF;
+    btn.appendChild(icon);
+    btn.appendChild(el("span", "usage-act__n", String(nWill)));
+    var title = I18N.format(isFav ? "usageFavBtnTitle" : "usageExclBtnTitle", {
+      what: usageWhatShort(what),
+      n: nWill,
+    });
+    btn.title = title;
+    btn.setAttribute("aria-label", title);
+    btn.disabled = nWill === 0;
+    btn.addEventListener("click", function () {
+      usageBatchApply(kind, what, op, matching);
+    });
+    return btn;
+  }
+
+  // The single writer for batch favourite / exclude. It mutates the SAME
+  // modelStates map the table / detail / Pareto / Compare flags read from
+  // (Core.batchSetModelStates), records an undo entry, then refreshStateUI
+  // re-syncs every view.
+  function usageBatchApply(kind, what, op, matching) {
+    var res = state.result;
+    if (!res) return;
+    var ranks = [];
+    for (var i = 0; i < matching.length; i++) {
+      var m = matching[i];
+      var s = res.modelStates && res.modelStates[m.rank];
+      var flagged = op === "favorite" ? !!(s && s.favorite) : !!(s && s.excluded);
+      if (!flagged) ranks.push(m.rank);
+    }
+    if (!ranks.length) { toast(I18N.t("usageNoChange")); return; }
+    var patch = op === "favorite" ? { favorite: true } : { excluded: true };
+    var entries = Core.batchSetModelStates(modelStates(), ranks, patch);
+    if (!entries.length) { toast(I18N.t("usageNoChange")); return; }
+    state.batchOps.push({ kind: kind, what: what, op: op, n: entries.length, entries: entries });
+    if (state.batchOps.length > 20) state.batchOps.shift();
+    scheduleProjectSaveSoon();
+    toast(I18N.format(op === "favorite" ? "usageFavDone" : "usageExclDone", {
+      n: entries.length,
+      what: usageWhatShort(what),
+    }));
+    refreshStateUI();
+  }
+
+  // Undo one batch action (restores the shared map; a flag the user changed
+  // since the batch is preserved), then forgets it so the row button returns
+  // to "apply" mode.
+  function undoUsageEntry(entry) {
+    if (!entry) return;
+    var idx = state.batchOps.indexOf(entry);
+    if (idx >= 0) state.batchOps.splice(idx, 1);
+    var restored = Core.undoBatchModels(modelStates(), entry.entries);
+    scheduleProjectSaveSoon();
+    if (restored) toast(I18N.t("usageUndoOk"));
+    refreshStateUI();
+  }
+
+  // Undo the most recent undoable batch action (the undo bar).
+  function undoLastUsageBatch() {
+    undoUsageEntry(latestRestorableEntry(null));
+  }
+
+  function buildUsageUndoBar() {
+    var rec = latestRestorableEntry(null);
+    if (!rec) return null;
+    var bar = el("div", "usage-undo");
+    var txt = el("span", "usage-undo__text", I18N.format(
+      rec.op === "favorite" ? "usageUndoFav" : "usageUndoExcl", {
+        n: rec.n,
+        what: usageWhatShort(rec.what),
+      }));
+    bar.appendChild(txt);
+    if (state.batchOps.length > 1) {
+      var more = el("span", "usage-undo__more",
+        I18N.format("usageUndoMore", { n: state.batchOps.length - 1 }));
+      bar.appendChild(more);
+    }
+    var btn = el("button", "btn btn--secondary btn--sm", I18N.t("usageUndoBtn"));
+    btn.type = "button";
+    btn.title = I18N.t("usageUndoBtnTitle");
+    btn.addEventListener("click", undoLastUsageBatch);
+    bar.appendChild(btn);
+    return bar;
+  }
+
+  // Sort segmented control inside one usage panel (count / share / name); a
+  // click re-sorts, clicking the active key flips the direction.
+  function buildUsageSortControl(kind, panel) {
+    var seg = el("div", "segmented usage-sort", null);
+    seg.setAttribute("role", "group");
+    seg.setAttribute("aria-label", I18N.t("usageSortLabel"));
+    var defs = [
+      ["count", I18N.t("usageSortCount")],
+      ["share", I18N.t("usageSortShare")],
+      ["name", I18N.t("usageSortName")],
+    ];
+    defs.forEach(function (def) {
+      var cur = usageSortState(kind);
+      var active = cur.by === def[0];
+      var arrow = active ? (cur.asc ? " ↑" : " ↓") : "";
+      var b = el("button", "segmented__btn" + (active ? " is-active" : ""), def[1] + arrow);
+      b.type = "button";
+      b.addEventListener("click", function () {
+        var st = usageSortState(kind);
+        if (st.by === def[0]) {
+          st.asc = !st.asc; // clicking the active key flips the direction
+        } else {
+          state.usageSort[kind] = { by: def[0], asc: def[0] === "name" };
+        }
+        // repaint only the two usage panels (keeps the undo bar + groups)
+        renderUnitsUsage(state.result);
+      });
+      seg.appendChild(b);
+    });
+    return seg;
+  }
+
+  function buildUsagePanel(kind, usage) {
+    var isFeat = kind === "feature";
+    var rows = isFeat ? usage.features : usage.descriptors;
+    var panel = el("article", "usage-panel");
+
+    var head = el("div", "usage-panel__head");
+    head.appendChild(el("h4", "usage-panel__title", I18N.t(
+      isFeat ? "unitsUsageFeatureTitle" : "unitsUsageDescriptorTitle")));
+    var meta = el("div", "usage-panel__meta", isFeat
+      ? I18N.format("usageMetaFeatures", {
+        used: rows.length,
+        total: usage.featureNames.length,
+        n: usage.totalModels,
+      })
+      : I18N.format("usageMetaDescriptors", {
+        n: rows.length,
+        m: usage.totalModels,
+      }));
+    head.appendChild(meta);
+    head.appendChild(buildUsageSortControl(kind, panel));
+    panel.appendChild(head);
+
+    if (!rows.length) {
+      panel.appendChild(el("p", "usage-panel__empty", I18N.t(
+        isFeat ? "usageNoFeatures" : "usageNoDescriptors")));
+      return panel;
+    }
+
+    var expanded = !!(state.usageExpanded && state.usageExpanded[kind]);
+    var sorted = sortUsageRows(rows, kind);
+    var shown = expanded ? sorted : sorted.slice(0, USAGE_ROW_CAP);
+
+    var table = document.createElement("table");
+    table.className = "usage-table";
+    var thead = document.createElement("thead");
+    var thr = document.createElement("tr");
+    var itemColLabel = I18N.t(isFeat ? "usageColItemFeature" : "usageColItemDescriptor");
+    [itemColLabel, I18N.t("usageColCount"), I18N.t("usageColShare"), ""].forEach(function (txt, ci) {
+      var th = document.createElement("th");
+      th.textContent = txt;
+      if (ci === 0) th.className = "usage-table__item";
+      if (ci === 3) th.className = "usage-table__actions";
+      thr.appendChild(th);
+    });
+    thead.appendChild(thr);
+    table.appendChild(thead);
+    var tbody = document.createElement("tbody");
+    shown.forEach(function (row) {
+      tbody.appendChild(buildUsageRow(kind, row, isFeat));
+    });
+    table.appendChild(tbody);
+    panel.appendChild(table);
+
+    if (rows.length > USAGE_ROW_CAP) {
+      var foot = el("div", "usage-panel__foot");
+      var toggle = el("button", "btn btn--ghost btn--sm", I18N.format(
+        expanded ? "usageShowTop" : "usageShowAll", {
+          n: expanded ? USAGE_ROW_CAP : rows.length,
+        }));
+      toggle.type = "button";
+      toggle.addEventListener("click", function () {
+        if (!state.usageExpanded) state.usageExpanded = { feature: false, descriptor: false };
+        state.usageExpanded[kind] = !state.usageExpanded[kind];
+        renderUnitsUsage(state.result);
+      });
+      foot.appendChild(toggle);
+      panel.appendChild(foot);
+    }
+    return panel;
+  }
+
+  function buildUsageRow(kind, row, isFeat) {
+    var what = isFeat ? row.name : row.expr;
+    var tr = document.createElement("tr");
+
+    var itemTd = document.createElement("td");
+    itemTd.className = "usage-table__item";
+    if (isFeat) {
+      itemTd.appendChild(usageFeatureLabelNode(row.name));
+    } else {
+      var code = document.createElement("code");
+      code.className = "usage-table__expr";
+      setFormulaContent(code, row.expr);
+      code.title = row.expr;
+      itemTd.appendChild(code);
+    }
+    tr.appendChild(itemTd);
+
+    var numTd = document.createElement("td");
+    numTd.className = "usage-table__num";
+    numTd.textContent = String(row.count);
+    tr.appendChild(numTd);
+
+    var shareTd = document.createElement("td");
+    shareTd.className = "usage-table__share";
+    shareTd.textContent = (row.ratio * 100).toFixed(1) + "%";
+    tr.appendChild(shareTd);
+
+    var actTd = document.createElement("td");
+    actTd.className = "usage-table__actions";
+    var matching = isFeat
+      ? Core.modelsWithFeature(state.result.models, row.name)
+      : Core.modelsWithDescriptor(state.result.models, row.expr);
+    actTd.appendChild(makeUsageActButton(kind, what, matching, "favorite"));
+    actTd.appendChild(makeUsageActButton(kind, what, matching, "exclude"));
+    tr.appendChild(actTd);
+
+    return tr;
+  }
+
   function renderPareto() {
     var res = state.result;
-    if (!res || !res.verify) return;
+    if (!res) return;
     if (state.paretoMode === "3d") { renderPareto3D(); return; }
-    var computed = paretoPoints();
+    var computed = paretoComputed();
+    var defs = computed.defs; // x, y
     var split = paretoSplit(computed.pts);
     var pts = split.pts, ghosts = split.ghosts;
-    var xDef = computed.xDef, yDef = computed.yDef;
-    var front = computeParetoFront1(pts, xDef, yDef);
+    var front = computeParetoFront1(pts, defs[0], defs[1]);
     var ghostOn = ghosts.length > 0;
 
     $("#pareto-count").textContent = ghostOn
@@ -2664,10 +3827,10 @@
     if (state.paretoChart) { state.paretoChart.dispose(); }
     state.paretoChart = echarts.init(dom);
 
-    var allData = pts.map(function (p) { return { value: [p.x, p.y], rank: p.rank }; });
+    var allData = pts.map(function (p) { return withFavMark({ value: [p.x, p.y], rank: p.rank }, p); });
     var ghostData = ghosts.map(function (p) { return { value: [p.x, p.y], rank: p.rank, ghost: true }; });
     var frontLine = front.map(function (p) { return [p.x, p.y]; });
-    var frontData = front.map(function (p) { return { value: [p.x, p.y], rank: p.rank }; });
+    var frontData = front.map(function (p) { return withFavMark({ value: [p.x, p.y], rank: p.rank }, p); });
     // Axis bounds must cover the ghosts too — they stay visible (faintly) so
     // they must not fall outside the plotted range.
     var viewPts = computed.pts;
@@ -2684,8 +3847,8 @@
           if (!d || d.rank == null) return "";
           var rows = [
             "<strong>" + I18N.t("detailRank") + " " + d.rank + "</strong>",
-            I18N.t("detailTrain") + " " + I18N.t(xDef.label) + ": " + fmt(d.value[0], 4),
-            I18N.t("detailVerify") + " " + I18N.t(yDef.label) + ": " + fmt(d.value[1], 4),
+            paretoAxisTitle(defs[0]) + ": " + fmt(d.value[0], 4),
+            paretoAxisTitle(defs[1]) + ": " + fmt(d.value[1], 4),
           ];
           if (d.ghost) rows.push('<span style="opacity:.65">' + I18N.t("paretoGhostNote") + "</span>");
           return rows.join("<br/>");
@@ -2712,7 +3875,7 @@
       },
       grid: { left: 70, right: 28, top: 48, bottom: 64 },
       xAxis: {
-        name: paretoAxisName(xDef, "detailTrain"),
+        name: paretoAxisTitle(defs[0]),
         type: "value",
         min: xb ? xb.min : undefined,
         max: xb ? xb.max : undefined,
@@ -2724,7 +3887,7 @@
         splitLine: { lineStyle: { color: C.grid } },
       },
       yAxis: {
-        name: paretoAxisName(yDef, "detailVerify"),
+        name: paretoAxisTitle(defs[1]),
         type: "value",
         min: yb ? yb.min : undefined,
         max: yb ? yb.max : undefined,
@@ -2798,47 +3961,243 @@
       if (params.data && params.data.rank != null) openDetail(params.data.rank);
     });
 
-    // front table
-    var wrap = $("#pareto-table-wrap");
-    wrap.innerHTML = "";
-    var table = el("table", "models-table");
+    renderParetoTable(front, defs);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Compare view — two-model scatter first, then formulas, then metrics.
+  //
+  // The picker lists the same eligible model set as the table/grid (feature
+  // filter + model exclusion apply; "show excluded" brings them back for
+  // restore). Selection is kept in state.compareSel (ranks) — no second copy of
+  // model data. The metrics table is built by SissoCore.compareMetricRows (the
+  // same numbers the detail pages show), formulas reuse the existing
+  // setFormulaContent token renderer, and the two-model scatter IS the detail
+  // dialog's chart (buildModelScatterOption) with two models.
+  // ---------------------------------------------------------------------------
+  function candidateCompareModels() {
+    return filteredModels();
+  }
+
+  function comparedModels() {
+    var cand = candidateCompareModels();
+    return cand.filter(function (m) { return state.compareSel.indexOf(m.rank) >= 0; });
+  }
+
+  function disposeCompareChart() {
+    if (state.compareChart) {
+      state.compareChart.dispose();
+      state.compareChart = null;
+    }
+  }
+
+  function renderCompare() {
+    var box = $("#compare-wrap");
+    if (!box || !state.result) return;
+    disposeCompareChart();
+    box.innerHTML = "";
+    box.hidden = false;
+
+    var head = el("div", "compare__head");
+    head.appendChild(el("h2", "compare__title", I18N.t("compareTitle")));
+    head.appendChild(el("p", "compare__hint", I18N.t("compareHint")));
+    box.appendChild(head);
+    box.appendChild(el("p", "compare__count compare__count--line",
+      I18N.format("compareCount", { n: state.compareSel.length, m: candidateCompareModels().length })));
+
+    box.appendChild(buildComparePicker());
+    var body = el("div", "compare__body");
+    body.id = "compare-body";
+    box.appendChild(body);
+    renderComparePanels();
+  }
+
+  function buildComparePicker() {
+    var cand = candidateCompareModels();
+    var wrap = el("div", "compare__picker");
+    var head = el("div", "compare__picker-head");
+    head.appendChild(el("span", "compare__picker-title", I18N.t("comparePick")));
+    var tools = el("div", "compare__picker-tools");
+    var addFav = el("button", "btn btn--secondary btn--sm", I18N.t("compareAddFavs"));
+    addFav.type = "button";
+    addFav.disabled = !cand.some(function (m) { return isFavoriteModel(m); });
+    addFav.addEventListener("click", function () {
+      cand.forEach(function (m) {
+        if (isFavoriteModel(m) && state.compareSel.indexOf(m.rank) < 0) {
+          if (state.compareSel.length < 30) state.compareSel.push(m.rank);
+        }
+      });
+      renderCompare();
+    });
+    tools.appendChild(addFav);
+    var addAll = el("button", "btn btn--secondary btn--sm", I18N.t("compareAddAll"));
+    addAll.type = "button";
+    addAll.addEventListener("click", function () {
+      var wanted = cand.length > 30 ? 30 : cand.length;
+      for (var i = 0; i < cand.length && state.compareSel.length < wanted; i++) {
+        if (state.compareSel.indexOf(cand[i].rank) < 0) state.compareSel.push(cand[i].rank);
+      }
+      renderCompare();
+    });
+    tools.appendChild(addAll);
+    var clear = el("button", "btn btn--ghost btn--sm", I18N.t("compareClear"));
+    clear.type = "button";
+    clear.addEventListener("click", function () {
+      state.compareSel = [];
+      renderCompare();
+    });
+    tools.appendChild(clear);
+    head.appendChild(tools);
+    wrap.appendChild(head);
+
+    var list = el("div", "compare__picker-list");
+    if (!cand.length) {
+      list.appendChild(el("p", "compare__picker-empty", I18N.t("compareNoCandidates")));
+    } else {
+      var shown = cand.length > 1000 ? cand.slice(0, 1000) : cand;
+      if (shown !== cand) {
+        list.appendChild(el("p", "compare__picker-empty",
+          I18N.format("comparePickCapped", { n: cand.length })));
+      }
+      shown.forEach(function (m) {
+        var label = el("label", "compare__row" + (isExcludedModel(m) ? " is-excluded" : ""));
+        var cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = state.compareSel.indexOf(m.rank) >= 0;
+        cb.value = String(m.rank);
+        cb.addEventListener("change", function () {
+          if (cb.checked) {
+            if (state.compareSel.indexOf(m.rank) < 0) state.compareSel.push(m.rank);
+          } else {
+            state.compareSel = state.compareSel.filter(function (r) { return r !== m.rank; });
+          }
+          renderComparePanels();
+        });
+        label.appendChild(cb);
+        var txt = el("span", null, "");
+        var frag = el("span", null, null);
+        var badge = el("span", "compare__rank", "R" + m.rank);
+        txt.appendChild(badge);
+        var formulaPreview = el("span", "compare__preview");
+        setFormulaContent(formulaPreview, m.formulaOriginal);
+        txt.appendChild(formulaPreview);
+        if (isFavoriteModel(m)) txt.appendChild(el("span", "state-tag state-tag--fav", I18N.t("favTag")));
+        if (isExcludedModel(m)) txt.appendChild(el("span", "state-tag state-tag--excl", I18N.t("exclTag")));
+        label.appendChild(txt);
+        label.appendChild(frag);
+        list.appendChild(label);
+      });
+    }
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  function metricLabelOf(row) {
+    var d = I18N.t(row.dataset === "verify" ? "detailVerify" : "detailTrain");
+    var m = row.metric === "rmse" ? I18N.t("metricRMSE")
+      : row.metric === "maxae" ? I18N.t("metricMaxAE")
+      : row.metric === "r2" ? I18N.t("metricR2") : I18N.t("metricRho");
+    return m + " (" + d + ")";
+  }
+
+  // Order on the page: two-model scatter first, then formulas, then metrics.
+  function renderComparePanels() {
+    var body = $("#compare-body");
+    if (!body || !state.result) return;
+    body.innerHTML = "";
+    var models = comparedModels();
+    if (!models.length) {
+      body.appendChild(el("p", "compare__empty", I18N.t("compareEmpty")));
+      return;
+    }
+
+    // 1) two-model overlay scatter (the same chart the detail dialog uses). The
+    // placeholder is attached first; renderCompareScatter() initialises it once
+    // it is part of the live DOM.
+    if (models.length === 2) {
+      var scatterSec = el("div", "compare__section");
+      scatterSec.appendChild(el("h3", "compare__section-title", I18N.t("detailChartTitle")));
+      var chartWrap = el("div", "compare__lines");
+      var chartDom = el("div", "chart chart--compare");
+      chartDom.id = "compare-lines-chart";
+      chartWrap.appendChild(chartDom);
+      scatterSec.appendChild(chartWrap);
+      body.appendChild(scatterSec);
+    }
+
+    // 2) formulas side by side (reuse the token-colouring renderer)
+    var fSec = el("div", "compare__section");
+    fSec.appendChild(el("h3", "compare__section-title", I18N.t("compareFormulas")));
+    var grid = el("div", "compare-formulas");
+    models.forEach(function (m) {
+      var card = el("div", "compare-formula-card");
+      var h = el("div", "compare-formula-card__head");
+      h.appendChild(el("span", "compare__rank", "R" + m.rank));
+      if (isFavoriteModel(m)) h.appendChild(el("span", "state-tag state-tag--fav", I18N.t("favTag")));
+      if (isExcludedModel(m)) h.appendChild(el("span", "state-tag state-tag--excl", I18N.t("exclTag")));
+      card.appendChild(h);
+      var code = el("div", "compare-formula-card__code");
+      setFormulaContent(code, m.formulaOriginal);
+      card.appendChild(code);
+      grid.appendChild(card);
+    });
+    fSec.appendChild(grid);
+    body.appendChild(fSec);
+
+    // 3) metrics side by side
+    var mSec = el("div", "compare__section");
+    mSec.appendChild(el("h3", "compare__section-title", I18N.t("compareMetrics")));
+    var tWrap = el("div", "compare__table-wrap");
+    var table = el("table", "models-table compare-table");
     var thead = el("thead");
     var hr = el("tr");
-    [I18N.t("colRank"), I18N.t("colFormula"),
-     paretoAxisName(xDef, "detailTrain"), paretoAxisName(yDef, "detailVerify"),
-     I18N.t("colActions")].forEach(function (label, i) {
-      var th = el("th", null, label);
-      if (i === 2 || i === 3) th.style.textAlign = "right";
+    hr.appendChild(el("th", null, ""));
+    models.forEach(function (m) {
+      var th = el("th", "num", "R" + m.rank + (isFavoriteModel(m) ? " ★" : ""));
+      th.title = m.formulaOriginal;
       hr.appendChild(th);
     });
     thead.appendChild(hr);
     table.appendChild(thead);
-
+    var rows = Core.compareMetricRows(models);
     var tbody = el("tbody");
-    front.forEach(function (p) {
+    rows.forEach(function (row) {
       var tr = el("tr");
-      tr.tabIndex = 0;
-      tr.setAttribute("role", "button");
-      tr.appendChild(el("td", "num", String(p.rank)));
-      var fcTd = el("td", "formula-cell");
-      setFormulaContent(fcTd, p.m.formulaOriginal);
-      tr.appendChild(fcTd);
-      tr.appendChild(el("td", "num", fmt(p.x, 4)));
-      tr.appendChild(el("td", "num", fmt(p.y, 4)));
-      var td = el("td");
-      var btn = el("button", "btn btn--secondary btn--sm", I18N.t("view"));
-      btn.type = "button";
-      btn.addEventListener("click", function (e) { e.stopPropagation(); openDetail(p.rank); });
-      td.appendChild(btn);
-      tr.appendChild(td);
-      tr.addEventListener("click", function () { openDetail(p.rank); });
-      tr.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetail(p.rank); }
+      tr.appendChild(el("td", null, metricLabelOf(row)));
+      row.values.forEach(function (v) {
+        var td = el("td", "num", fmt(v, 4));
+        if (v === null || Number.isNaN(v) || typeof v !== "number") td.classList.add("is-empty");
+        tr.appendChild(td);
       });
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
-    wrap.appendChild(table);
+    tWrap.appendChild(table);
+    mSec.appendChild(tWrap);
+    body.appendChild(mSec);
+
+    // Everything is attached — safe to init the scatter now.
+    renderCompareScatter();
+  }
+
+  // Draw the shared predicted-vs-true scatter for the two compared models. The
+  // option comes from buildModelScatterOption — the exact function the detail
+  // dialog uses (renderChart) — so there is exactly one scatter implementation.
+  function renderCompareScatter() {
+    var node = document.getElementById("compare-lines-chart");
+    if (!node) return;
+    var models = comparedModels();
+    if (models.length !== 2) return;
+    if (state.compareChart) { state.compareChart.dispose(); }
+    state.compareChart = echarts.init(node);
+    var option = buildModelScatterOption(models, { colorBy: false });
+    if (!option) {
+      state.compareChart.setOption({
+        title: { text: I18N.t("emptyChart"), left: "center", top: "middle", textStyle: { fontSize: 14 } },
+      });
+      return;
+    }
+    state.compareChart.setOption(option);
   }
 
   function openDetail(rank) {
@@ -2853,18 +4212,23 @@
     $("#dialog-title").textContent = I18N.t("detailRank") + " " + m.rank;
     setFormulaContent($("#formula-code"), m.formulaOriginal);
     renderMetricGrid(m);
+    syncDetailStateButtons();
 
     // Make the dialog visible BEFORE initialising ECharts: a chart initialised
     // inside a hidden container gets a 0-height layout and renders squashed.
+    var copyMenu = $("#copy-menu");
+    if (copyMenu) { copyMenu.hidden = true; var copyBtn = $("#btn-copy-as"); if (copyBtn) copyBtn.setAttribute("aria-expanded", "false"); }
     $("#dialog-backdrop").hidden = false;
     document.body.style.overflow = "hidden";
-    renderChart(m);
+    syncDetailTabUI();
+    renderCurrentDetailChart();
   }
 
   function closeDetail() {
     $("#dialog-backdrop").hidden = true;
     document.body.style.overflow = "";
     if (state.chart) { state.chart.dispose(); state.chart = null; }
+    if (state.errorChart) { state.errorChart.dispose(); state.errorChart = null; }
   }
 
   function renderMetricGrid(m) {
@@ -2920,49 +4284,59 @@
     sel.value = state.colorKey || "";
   }
 
-  function renderChart(m) {
+  // Shared "predicted vs true" scatter — ONE implementation used by:
+  //   • the model detail dialog (renderChart with a single model), and
+  //   • the Compare view (renderCompareScatter with exactly two models),
+  // so the two-model overlay is literally the same chart the user sees when
+  // opening a model, not a second scatter implementation.
+  function buildModelScatterOption(models, cfg) {
     var res = state.result;
     var C = getThemeColors();
-    var dom = $("#chart");
-    if (state.chart) { state.chart.dispose(); }
-    state.chart = echarts.init(dom);
+    var single = models.length === 1;
+    var colorBy = !!cfg.colorBy;
+    var m0 = models[0];
 
-    var trainPts = buildPoints(res.train, m.predTrain, "train");
-    var verifyPts = res.verify ? buildPoints(res.verify, m.predVerify, "verify") : [];
+    // Per-model point lists for both datasets.
+    var modelPts = models.map(function (m) {
+      return {
+        m: m,
+        train: buildPoints(res.train, m.predTrain, "train"),
+        verify: res.verify ? buildPoints(res.verify, m.predVerify, "verify") : [],
+      };
+    });
+    var total = modelPts.reduce(function (n, mp) {
+      return n + mp.train.length + mp.verify.length;
+    }, 0);
+    if (total === 0) return null;
 
-    if (!trainPts.length && !verifyPts.length) {
-      state.chart.setOption({
-        title: { text: I18N.t("emptyChart"), left: "center", top: "middle", textStyle: { fontSize: 14, color: C.chartEmpty } },
-      });
-      return;
-    }
-
-    // Optional color-by-parameter mapping. When active, points are coloured by
-    // the chosen column's value; train/verify remain distinguishable by shape.
-    var colorCol = colorSelectCol();
+    // Optional color-by-parameter mapping (single-model detail view only).
+    var colorCol = null;
     var colorRange = null;
     var colorMid = null;
-    if (colorCol) {
-      var cvals = [];
-      function pushColorCol(data) {
-        if (!data || !data.cols) return;
-        var col = data.cols[colorCol.letter];
-        if (!col) return;
-        for (var ci = 0; ci < data.n; ci++) {
-          if (col[ci] !== undefined && Number.isFinite(col[ci])) cvals.push(col[ci]);
+    if (colorBy && single) {
+      colorCol = colorSelectCol();
+      if (colorCol) {
+        var cvals = [];
+        function pushColorCol(data) {
+          if (!data || !data.cols) return;
+          var col = data.cols[colorCol.letter];
+          if (!col) return;
+          for (var ci = 0; ci < data.n; ci++) {
+            if (col[ci] !== undefined && Number.isFinite(col[ci])) cvals.push(col[ci]);
+          }
         }
-      }
-      pushColorCol(res.train);
-      if (res.verify) pushColorCol(res.verify);
-      if (cvals.length) {
-        var cvLo = Math.min.apply(null, cvals);
-        var cvHi = Math.max.apply(null, cvals);
-        if (cvLo === cvHi) {
-          var cvPad = Math.max(Math.abs(cvLo) * 0.01, 1e-12);
-          cvLo -= cvPad; cvHi += cvPad;
+        pushColorCol(res.train);
+        if (res.verify) pushColorCol(res.verify);
+        if (cvals.length) {
+          var cvLo = Math.min.apply(null, cvals);
+          var cvHi = Math.max.apply(null, cvals);
+          if (cvLo === cvHi) {
+            var cvPad = Math.max(Math.abs(cvLo) * 0.01, 1e-12);
+            cvLo -= cvPad; cvHi += cvPad;
+          }
+          colorRange = { min: cvLo, max: cvHi };
+          colorMid = (cvLo + cvHi) / 2;
         }
-        colorRange = { min: cvLo, max: cvHi };
-        colorMid = (cvLo + cvHi) / 2;
       }
     }
     function colorVal(data, row) {
@@ -2972,43 +4346,54 @@
       return (v !== undefined && Number.isFinite(v)) ? v : colorMid;
     }
 
-    var trainData = trainPts.map(function (p) {
-      var item = { value: [p[0], p[1]], name: p[2], raw: p };
-      if (colorRange) item.value.push(colorVal(res.train, p[4]));
-      return item;
-    });
-    var verifyData = verifyPts.map(function (p) {
-      var item = { value: [p[0], p[1]], name: p[2], raw: p };
-      if (colorRange) item.value.push(colorVal(res.verify, p[4]));
-      return item;
-    });
-
+    // Axis range follows all points of every model/dataset.
     var allX = [], allY = [];
-    trainPts.concat(verifyPts).forEach(function (p) { allX.push(p[0]); allY.push(p[1]); });
+    modelPts.forEach(function (mp) {
+      mp.train.concat(mp.verify).forEach(function (p) { allX.push(p[0]); allY.push(p[1]); });
+    });
     var lo = Math.min.apply(null, allX.concat(allY));
     var hi = Math.max.apply(null, allX.concat(allY));
     if (lo === hi) { lo -= 1; hi += 1; }
     var padSpan = (hi - lo) * 0.06;
     lo -= padSpan; hi += padSpan;
 
-    var series = [{
-      name: I18N.t("detailTrain"),
-      type: "scatter",
-      data: trainData,
-      symbol: "circle",
-      symbolSize: 9,
-      itemStyle: colorRange ? { opacity: 0.85 } : { color: C.train, opacity: 0.7 },
-    }];
-    if (verifyData.length) {
-      series.push({
-        name: I18N.t("detailVerify"),
-        type: "scatter",
-        data: verifyData,
-        symbol: "triangle",
-        symbolSize: 11,
-        itemStyle: colorRange ? { opacity: 0.85 } : { color: C.verify, opacity: 0.7 },
+    var MODEL_COLORS = ["#4c8df6", "#e05d44", "#2ea043", "#b58900", "#a371f7", "#12a5b0", "#e06a9e", "#6b8e23"];
+    var series = [];
+    var legendNames = [];
+    var dataSources = ["train", "verify"];
+
+    modelPts.forEach(function (mp, mi) {
+      var modelColor = single ? null : MODEL_COLORS[mi % MODEL_COLORS.length];
+      dataSources.forEach(function (ds) {
+        var pts = mp[ds];
+        if (!pts.length) return;
+        var isV = ds === "verify";
+        var setName = I18N.t(isV ? "detailVerify" : "detailTrain");
+        var sName = single ? setName : "R" + mp.m.rank + " " + setName;
+        var data = pts.map(function (p) {
+          var item = { value: [p[0], p[1]], name: p[2], raw: p };
+          if (colorRange) item.value.push(colorVal(isV ? res.verify : res.train, p[4]));
+          return item;
+        });
+        var itemStyle;
+        if (single) {
+          itemStyle = colorRange
+            ? { opacity: 0.85 }
+            : { color: isV ? C.verify : C.train, opacity: 0.7 };
+        } else {
+          itemStyle = { color: modelColor, opacity: 0.75 };
+        }
+        series.push({
+          name: sName,
+          type: "scatter",
+          data: data,
+          symbol: isV ? "triangle" : "circle",
+          symbolSize: isV ? 11 : 9,
+          itemStyle: itemStyle,
+        });
+        legendNames.push(sName);
       });
-    }
+    });
     series.push({
       name: I18N.t("detailIdentity"),
       type: "line",
@@ -3018,10 +4403,11 @@
       silent: true,
       tooltip: { show: false },
     });
+    legendNames.push(I18N.t("detailIdentity"));
 
     var option = {
       animation: true,
-      color: [C.train, C.verify],
+      color: single ? [C.train, C.verify] : MODEL_COLORS,
       textStyle: { fontFamily: C.font },
       tooltip: {
         trigger: "item",
@@ -3029,23 +4415,24 @@
           if (params.seriesType === "line") return "";
           var p = params.data;
           var pred = p.value[0], truth = p.value[1];
-          var lines = [
-            "<strong>" + (p.name || "") + "</strong>",
+          var lines = [];
+          if (single) {
+            lines.push("<strong>" + (p.name || "") + "</strong>");
+          } else {
+            lines.push("<strong>" + params.seriesName + " · " + (p.name || "") + "</strong>");
+          }
+          lines.push(
             I18N.t("detailPredicted") + ": " + fmt(pred, 4),
             I18N.t("detailTrue") + ": " + fmt(truth, 4),
-            I18N.t("detailError") + ": " + fmt(pred - truth, 4),
-          ];
+            I18N.t("detailError") + ": " + fmt(pred - truth, 4)
+          );
           if (colorRange && p.value && p.value.length > 2) {
             lines.push(colorCol.original + ": " + fmt(p.value[2], 4));
           }
           return lines.join("<br/>");
         },
       },
-      legend: {
-        data: [I18N.t("detailTrain"), I18N.t("detailVerify"), I18N.t("detailIdentity")],
-        top: 8,
-        textStyle: { color: C.chartText },
-      },
+      legend: { data: legendNames, top: 8, type: "scroll", textStyle: { color: C.chartText } },
       grid: { left: 56, right: 24, top: 48, bottom: 64 },
       xAxis: {
         name: I18N.t("detailPredicted"),
@@ -3082,19 +4469,16 @@
           fillerColor: "rgba(100, 116, 139, 0.22)",
           handleStyle: { color: C.axis, borderColor: C.axis },
           textStyle: { color: C.chartText, fontSize: 11 },
-          dataBackground: {
-            lineStyle: { color: C.axis },
-            areaStyle: { color: C.grid },
-          },
-          selectedDataBackground: {
-            lineStyle: { color: C.axis },
-            areaStyle: { color: C.grid },
-          },
+          dataBackground: { lineStyle: { color: C.axis }, areaStyle: { color: C.grid } },
+          selectedDataBackground: { lineStyle: { color: C.axis }, areaStyle: { color: C.grid } },
         },
       ],
       toolbox: {
         feature: {
-          saveAsImage: { title: I18N.t("detailExportPng"), name: "sisso_analyzer_model_" + m.rank },
+          saveAsImage: {
+            title: I18N.t("detailExportPng"),
+            name: single ? "sisso_analyzer_model_" + m0.rank : "sisso_analyzer_compare_" + models.map(function (m) { return m.rank; }).join("_"),
+          },
         },
         right: 12,
         top: 4,
@@ -3102,13 +4486,14 @@
       series: series,
     };
     if (colorRange) {
+      var hasVerifyScatter = modelPts.some(function (mp) { return mp.verify.length > 0; });
       option.grid.right = 70;
       option.visualMap = {
         type: "continuous",
         min: colorRange.min,
         max: colorRange.max,
         dimension: 2,
-        seriesIndex: verifyData.length ? [0, 1] : [0],
+        seriesIndex: hasVerifyScatter ? [0, 1] : [0],
         calculable: true,
         orient: "vertical",
         right: 4,
@@ -3118,6 +4503,273 @@
         formatter: function (v) { return fmtTick(v); },
         inRange: { color: ["#2563eb", "#06b6d4", "#22c55e", "#facc15", "#ef4444"] },
       };
+    }
+    return option;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Detail chart views — segmented "Predicted vs true" / "Error distribution"
+  // switcher plus the residual histogram module. The residual statistics and
+  // binning come from the shared engine helpers (Core.errorSeries / residualStats
+  // / errorHistogram); this section only turns their output into a chart option.
+  // ---------------------------------------------------------------------------
+
+  // Whether the loaded run carries verify predictions for this model.
+  function modelHasVerify(m) {
+    var res = state.result;
+    return !!(res && res.verify && m && m.predVerify && m.metricsVerify);
+  }
+
+  // Which residual dataset is actually available ("verify" collapses to "train"
+  // on a train-only run or when the model has no verify predictions).
+  function availableErrorDataset() {
+    return state.errorDataset === "verify" && modelHasVerify(state.currentModel)
+      ? "verify" : "train";
+  }
+
+  // Show/hide the DOM for the active detail chart view + dataset toggle
+  // (tab active state, scatter vs histogram containers, dataset segmented
+  // control). Never touches chart instances — rendering happens separately.
+  function syncDetailTabUI() {
+    var isErr = state.detailTab === "error";
+    var pred = $("#tab-predicted");
+    var err = $("#tab-error");
+    if (pred) pred.classList.toggle("is-active", !isErr);
+    if (err) err.classList.toggle("is-active", isErr);
+    $("#scatter-controls").hidden = isErr;
+    $("#error-controls").hidden = !isErr;
+    $("#chart").hidden = isErr;
+    $("#error-view").hidden = !isErr;
+    var hasV = modelHasVerify(state.currentModel);
+    $("#ds-verify").hidden = !hasV;
+    if (!hasV && state.errorDataset === "verify") state.errorDataset = "train";
+    $("#ds-train").classList.toggle("is-active", state.errorDataset === "train");
+    $("#ds-verify").classList.toggle("is-active", state.errorDataset === "verify");
+  }
+
+  // Render whichever detail view is active. Both renderers dispose + re-init
+  // their own ECharts instance, so this is safe to call after theme changes and
+  // after opening / switching tabs.
+  function renderCurrentDetailChart() {
+    var m = state.currentModel;
+    if (!m || $("#dialog-backdrop").hidden) return;
+    if (state.detailTab === "error") renderErrorDistribution(m);
+    else renderChart(m);
+  }
+
+  function switchDetailTab(tab) {
+    if (tab !== "scatter" && tab !== "error") tab = "scatter";
+    if (state.detailTab === tab) return;
+    // Dispose the instance of the view being left: ECharts instances must not
+    // survive in a display:none container (resizes would misbehave).
+    if (tab === "error") {
+      if (state.chart) { state.chart.dispose(); state.chart = null; }
+    } else {
+      if (state.errorChart) { state.errorChart.dispose(); state.errorChart = null; }
+    }
+    state.detailTab = tab;
+    syncDetailTabUI();
+    renderCurrentDetailChart();
+  }
+
+  // Human-readable number for stat cards: up to 5 significant digits, keeping
+  // small residuals (e.g. 1.2e-4) readable without fixed-decimal rounding.
+  function fmtSig(v) {
+    if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+    if (v === 0) return "0";
+    return String(Number(v.toPrecision(5)));
+  }
+
+  // Stats column next to the histogram: samples, mean/median error and the
+  // population standard deviation, computed by the engine helpers.
+  function renderErrorStats(stats, hist) {
+    var box = $("#error-stats");
+    if (!box) return;
+    box.innerHTML = "";
+    box.appendChild(el("h4", "error-stats__title", I18N.t("errStatsTitle")));
+    function card(labelKey, value, hintKey) {
+      var c = el("div", "error-stat-card");
+      var lab = el("div", "error-stat-card__label", I18N.t(labelKey));
+      if (hintKey) {
+        lab.title = I18N.t(hintKey);
+        lab.setAttribute("aria-label", I18N.t(hintKey));
+      }
+      c.appendChild(lab);
+      c.appendChild(el("div", "error-stat-card__value", value));
+      box.appendChild(c);
+    }
+    card("errStatSamples", String(hist && hist.ok ? hist.n : 0));
+    card("errStatMean", fmtSig(stats.mean));
+    card("errStatMedian", fmtSig(stats.median));
+    card("errStatStd", fmtSig(stats.std), "errStdHint");
+    if (hist && hist.excluded > 0) {
+      var ig = el("div", "error-stat-card");
+      ig.appendChild(el("div", "error-stat-card__label", I18N.t("errStatIgnored")));
+      ig.appendChild(el("div", "error-stat-card__value", String(hist.excluded)));
+      box.appendChild(ig);
+    }
+  }
+
+  // ECharts option for the residual histogram. Pure formatting: every number
+  // (residuals, bins, stats) was computed by Core helpers, never in here.
+  function buildErrorHistogramOption(m, dataset, stats, hist) {
+    if (!hist || !hist.ok) return null;
+    var C = getThemeColors();
+    var isV = dataset === "verify";
+    var dsColor = isV ? C.verify : C.train;
+    var ZERO_COLOR = "#e11d48"; // red accent marks the 0-error reference
+
+    // x-domain = bin edges plus margin; pull 0 into view when the residuals are
+    // not systematically far away (that would squash the histogram).
+    var spread = hist.max - hist.min;
+    var margin = Math.max(hist.binWidth, spread * 0.05);
+    var lo = hist.min - margin;
+    var hi = hist.max + margin;
+    if (hist.min > 0 && hist.min <= Math.max(spread * 1.5, hist.binWidth * 6)) lo = 0;
+    if (hist.max < 0 && -hist.max <= Math.max(spread * 1.5, hist.binWidth * 6)) hi = 0;
+    var zeroVisible = lo <= 0 && 0 <= hi;
+
+    var data = hist.bins.map(function (b, i) {
+      var item = {
+        value: [b.center, b.count],
+        bin: b,
+        isZeroBin: i === hist.zeroBin,
+      };
+      // Highlight the bin whose half-open range contains 0 (when zero is in range).
+      if (i === hist.zeroBin) item.itemStyle = { color: ZERO_COLOR, opacity: 0.9 };
+      return item;
+    });
+
+    var option = {
+      animation: true,
+      textStyle: { fontFamily: C.font },
+      color: [dsColor],
+      tooltip: {
+        trigger: "item",
+        formatter: function (params) {
+          var d = params.data;
+          if (!d || !d.bin) return "";
+          var bin = d.bin;
+          var pct = stats.n ? (bin.count / stats.n * 100) : 0;
+          var lines = [
+            "<strong>" + I18N.format("errBinRange", { lo: fmtTick(bin.start), hi: fmtTick(bin.end) }) + "</strong>",
+            I18N.format("errBinCount", { n: bin.count, pct: (Math.round(pct * 10) / 10).toString() }),
+          ];
+          if (d.isZeroBin) lines.push(I18N.t("errZeroMark") + " ✓");
+          return lines.join("<br/>");
+        },
+      },
+      grid: { left: 56, right: 24, top: 44, bottom: 56 },
+      xAxis: {
+        name: I18N.t("detailError"),
+        nameLocation: "middle",
+        nameGap: 30,
+        type: "value",
+        min: lo,
+        max: hi,
+        nameTextStyle: { color: C.chartText },
+        axisLabel: { color: C.chartText, formatter: fmtTick, showMinLabel: false, showMaxLabel: false },
+        axisLine: { lineStyle: { color: C.axis } },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        name: I18N.t("errStatSamples"),
+        nameLocation: "middle",
+        nameGap: 38,
+        type: "value",
+        min: 0,
+        nameTextStyle: { color: C.chartText },
+        axisLabel: { color: C.chartText },
+        axisLine: { lineStyle: { color: C.axis } },
+        splitLine: { lineStyle: { color: C.grid } },
+      },
+      series: [{
+        name: isV ? I18N.t("detailVerify") : I18N.t("detailTrain"),
+        type: "bar",
+        data: data,
+        itemStyle: { opacity: 0.9 },
+      }],
+      toolbox: {
+        feature: {
+          saveAsImage: {
+            title: I18N.t("detailExportPng"),
+            name: "sisso_analyzer_error_r" + m.rank + "_" + dataset,
+          },
+        },
+        right: 12,
+        top: 4,
+      },
+    };
+    if (zeroVisible) {
+      option.series[0].markLine = {
+        symbol: ["none", "none"],
+        silent: true,
+        label: { formatter: I18N.t("errZeroMark"), color: ZERO_COLOR, fontSize: 11, position: "insideEndTop" },
+        lineStyle: { color: ZERO_COLOR, type: "dashed", width: 1.2 },
+        data: [{ xAxis: 0 }],
+      };
+    }
+    return option;
+  }
+
+  // After the first setOption, ask ECharts for the exact pixel span of one bin
+  // (convertToPixel reflects the real laid-out grid) and set touching bar
+  // widths so adjacent bins fill the axis without gaps.
+  function fitErrorBarWidths(chart, hist) {
+    if (!chart || !hist || !hist.ok) return;
+    try {
+      var a = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [hist.start, 0]);
+      var b = chart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [hist.start + hist.binWidth, 0]);
+      var w = (b && b[0]) - (a && a[0]);
+      if (Number.isFinite(w) && w > 0.5) {
+        chart.setOption({ series: [{ barWidth: w }] });
+      }
+    } catch (e) { /* non-fatal: default bar width still shows */ }
+  }
+
+  // Compute residuals + stats + histogram from EXISTING predictions (no model
+  // re-run) and draw the error-distribution view into #chart-error.
+  function renderErrorDistribution(m) {
+    var res = state.result;
+    var dom = $("#chart-error");
+    if (!m || !res || !dom) return;
+
+    var dataset = availableErrorDataset();
+    var isV = dataset === "verify";
+    var data = isV ? res.verify : res.train;
+    var pred = isV ? m.predVerify : m.predTrain;
+    var yTrue = Array.from(data.cols[res.meta.targetLetter]);
+    var errors = Core.errorSeries(pred, yTrue);
+    var stats = Core.residualStats(errors);
+    var hist = Core.errorHistogram(errors);
+    errorHistCache = hist;
+    renderErrorStats(stats, hist);
+
+    if (state.errorChart) { state.errorChart.dispose(); }
+    state.errorChart = echarts.init(dom);
+    var option = buildErrorHistogramOption(m, dataset, stats, hist);
+    if (!option) {
+      state.errorChart.setOption({
+        title: { text: I18N.t("emptyChart"), left: "center", top: "middle", textStyle: { fontSize: 14, color: getThemeColors().chartEmpty } },
+      });
+      return;
+    }
+    state.errorChart.setOption(option);
+    fitErrorBarWidths(state.errorChart, hist);
+  }
+
+  function renderChart(m) {
+    var C = getThemeColors();
+    var dom = $("#chart");
+    if (state.chart) { state.chart.dispose(); }
+    state.chart = echarts.init(dom);
+
+    var option = buildModelScatterOption([m], { colorBy: true });
+    if (!option) {
+      state.chart.setOption({
+        title: { text: I18N.t("emptyChart"), left: "center", top: "middle", textStyle: { fontSize: 14, color: C.chartEmpty } },
+      });
+      return;
     }
     state.chart.setOption(option);
     state.chart.on("click", function (params) {
@@ -3129,7 +4781,12 @@
 
   function resizeChart() {
     if (state.chart) state.chart.resize();
+    if (state.errorChart) {
+      state.errorChart.resize();
+      if (errorHistCache) fitErrorBarWidths(state.errorChart, errorHistCache);
+    }
     if (state.paretoChart) state.paretoChart.resize();
+    if (state.compareChart) state.compareChart.resize();
   }
 
   // ---------------------------------------------------------------------------
@@ -3269,6 +4926,10 @@
       state.texts = {};
       state.result = null;
       state.projectId = null;
+      state.health = null;
+      clearHealthPanels();
+      state.compareSel = [];
+      disposeCompareChart();
       state.view = "table";
       state.paretoMode = "2d";
       if (state.paretoChart) { state.paretoChart.dispose(); state.paretoChart = null; }
@@ -3371,48 +5032,88 @@
       renderModels();
     });
     $("#view-pareto-btn").addEventListener("click", function () {
-      if (!state.result || !state.result.verify) {
-        toast(I18N.t("paretoRequireVerify"));
-        return;
-      }
+      if (!state.result) return;
       state.view = "pareto";
       renderControls();
       renderPareto();
     });
+    $("#view-compare-btn").addEventListener("click", function () {
+      if (!state.result) return;
+      state.view = "compare";
+      renderControls();
+      renderCompare();
+    });
     $("#view-units-btn").addEventListener("click", function () {
-      if (!state.result || !state.result.meta || !state.result.meta.units) {
-        toast(I18N.t("unitsRequireOut"));
-        return;
-      }
+      if (!state.result) return;
       state.view = "units";
       renderControls();
       renderUnits();
     });
-    $("#pareto-x").addEventListener("change", function (e) {
-      state.paretoX = e.target.value || "rmse";
-      renderPareto();
+    // "Show excluded" (list views + Compare picker share this single flag).
+    $("#btn-excluded").addEventListener("click", function () {
+      toggleShowExcluded();
     });
-    $("#pareto-y").addEventListener("change", function (e) {
-      state.paretoY = e.target.value || "rmse";
-      renderPareto();
+    // "Favourites only" — the table/grid list narrows to starred models, and
+    // the same table then supports the batch model-copy checkboxes.
+    $("#btn-fav-only").addEventListener("click", function () {
+      toggleFavOnly();
     });
-    $("#pareto-z").addEventListener("change", function (e) {
-      var parts = (e.target.value || "r2|train").split("|");
-      state.paretoZ = { metric: parts[0] || "r2", set: parts[1] || "train" };
+
+    // Pareto axis selects: a value is "<dataset>|<metric>". Selecting the same
+    // dataset + metric on two visible axes is rejected with a toast so the
+    // front always spans distinct objectives.
+    function axisValue(spec) {
+      return (spec && spec.dataset ? spec.dataset : "train") + "|" + (spec && spec.metric ? spec.metric : "rmse");
+    }
+    function setParetoAxis(which, e) {
+      var parts = String(e.target.value || "train|rmse").split("|");
+      var spec = { dataset: parts[0] || "train", metric: parts[1] || "rmse" };
+      var others = [];
+      if (which !== "paretoX") others.push(state.paretoX);
+      if (which !== "paretoY") others.push(state.paretoY);
+      if (state.paretoMode === "3d" && which !== "paretoZ") others.push(state.paretoZ);
+      for (var i = 0; i < others.length; i++) {
+        if (others[i] && others[i].dataset === spec.dataset && others[i].metric === spec.metric) {
+          e.target.value = axisValue(state[which]); // revert — identical axis forbidden
+          toast(I18N.t("paretoDuplicateAxes"));
+          return;
+        }
+      }
+      state[which] = spec;
       renderPareto();
-    });
+    }
+    $("#pareto-x").addEventListener("change", function (e) { setParetoAxis("paretoX", e); });
+    $("#pareto-y").addEventListener("change", function (e) { setParetoAxis("paretoY", e); });
+    $("#pareto-z").addEventListener("change", function (e) { setParetoAxis("paretoZ", e); });
     $("#pareto-mode-btn").addEventListener("click", function () {
       state.paretoMode = state.paretoMode === "2d" ? "3d" : "2d";
+      coerceParetoAxes(); // make the third axis distinct before rendering 3D
       renderControls();
       renderPareto();
     });
+    $("#btn-pareto-export").addEventListener("click", exportParetoCsv);
 
     // color-by-parameter on the detail scatter plot
     $("#color-key").addEventListener("change", function (e) {
       state.colorKey = e.target.value || "";
-      if (state.currentModel && !$("#dialog-backdrop").hidden) {
+      if (state.currentModel && !$("#dialog-backdrop").hidden && state.detailTab !== "error") {
         renderChart(state.currentModel);
       }
+    });
+
+    // detail chart view tabs: Predicted vs true ⇄ Error distribution
+    $("#tab-predicted").addEventListener("click", function () { switchDetailTab("scatter"); });
+    $("#tab-error").addEventListener("click", function () { switchDetailTab("error"); });
+    // residual dataset toggle inside the error view
+    $("#ds-train").addEventListener("click", function () {
+      state.errorDataset = "train";
+      syncDetailTabUI();
+      renderCurrentDetailChart();
+    });
+    $("#ds-verify").addEventListener("click", function () {
+      state.errorDataset = "verify";
+      syncDetailTabUI();
+      renderCurrentDetailChart();
     });
 
     // dialogs
@@ -3420,25 +5121,104 @@
     $("#dialog-backdrop").addEventListener("click", function (e) {
       if (e.target === this) closeDetail();
     });
+    // Favourite / exclude from the detail dialog — same source of truth as the
+    // table rows, so both stay in sync (refreshStateUI re-renders the lists).
+    $("#btn-detail-fav").addEventListener("click", function () {
+      var m = state.currentModel;
+      if (!m) return;
+      applyModelState(m.rank, { favorite: !isFavoriteModel(m) });
+    });
+    $("#btn-detail-excl").addEventListener("click", function () {
+      var m = state.currentModel;
+      if (!m) return;
+      applyModelState(m.rank, { excluded: !isExcludedModel(m) });
+    });
     $("#inspector-close").addEventListener("click", closeInspector);
     $("#inspector-backdrop").addEventListener("click", function (e) {
       if (e.target === this) closeInspector();
     });
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
+        var copyMenu = $("#copy-menu");
+        if (copyMenu && !copyMenu.hidden) { setCopyMenuOpen(false); return; }
         if (!$("#inspector-backdrop").hidden) closeInspector();
         else if (!$("#dialog-backdrop").hidden) closeDetail();
         else if (!$("#cite-popover").hidden) setCiteOpen(false);
       }
     });
 
-    // copy formula
+    // Copy formula — plain text button (unchanged behaviour) plus a small
+    // "Copy as…" dropdown for Plain / LaTeX / Office (UnicodeMath) exports.
+    // All exports derive from ONE parser + AST in the engine (Core.formulaAst
+    // / formulaToPlain / formulaToLatex / formulaToUnicodeMath).
+    // okKey may be a plain key ("copied") or a "{fmt}" template key; when
+    // msgOverride is provided it wins (used by the batch model-copy bar).
+    function copyFormulaText(text, okKey, fmtLabel, msgOverride) {
+      if (text == null || text === "") return;
+      var msg = msgOverride != null
+        ? msgOverride
+        : (fmtLabel ? I18N.format(okKey, { fmt: fmtLabel }) : I18N.t(okKey));
+      writeClipboard(text, msg);
+    }
+
+    function copyFormatLabel(kind) {
+      return I18N.t(kind === "latex" ? "copyLatex" : kind === "office" ? "copyOffice" : "copyPlain");
+    }
+
+    function formulaExportFor(kind) {
+      var m = state.currentModel;
+      if (!m) return null;
+      if (kind === "plain") return m.formulaOriginal; // untouched legacy text
+      try {
+        return kind === "latex" ? Core.formulaToLatex(m.formulaOriginal)
+          : kind === "office" ? Core.formulaToUnicodeMath(m.formulaOriginal)
+          : null;
+      } catch (e) {
+        toast(I18N.format("copyErr", { fmt: copyFormatLabel(kind) }));
+        return null;
+      }
+    }
+
+    function setCopyMenuOpen(open) {
+      var menu = $("#copy-menu");
+      if (!menu) return;
+      menu.hidden = !open;
+      var btn = $("#btn-copy-as");
+      if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
     $("#btn-copy").addEventListener("click", function () {
       var m = state.currentModel;
       if (!m) return;
-      navigator.clipboard.writeText(m.formulaOriginal).then(function () {
-        toast(I18N.t("copied"));
-      });
+      setCopyMenuOpen(false);
+      copyFormulaText(m.formulaOriginal, "copied");
+    });
+
+    $("#btn-copy-as").addEventListener("click", function (e) {
+      e.stopPropagation();
+      var menu = $("#copy-menu");
+      if (menu) setCopyMenuOpen(menu.hidden);
+    });
+
+    $("#copy-menu").addEventListener("click", function (e) {
+      var item = e.target && e.target.closest ? e.target.closest("[data-copy-kind]") : null;
+      if (!item) return;
+      var kind = item.getAttribute("data-copy-kind");
+      var text = formulaExportFor(kind);
+      if (text == null) return; // conversion error already toasted
+      setCopyMenuOpen(false);
+      copyFormulaText(text, "copyToast", copyFormatLabel(kind));
+    });
+
+    // Close the menu on outside clicks / Escape (Escape handler above already
+    // closes dialogs; menu is inside the dialog so handle a global click here).
+    document.addEventListener("click", function (e) {
+      var menu = $("#copy-menu");
+      if (!menu || menu.hidden) return;
+      var anchor = $("#btn-copy-as");
+      if (e.target && anchor && (e.target === anchor || anchor.contains(e.target))) return;
+      if (e.target && anchor && anchor.parentNode && anchor.parentNode.contains(e.target)) return;
+      setCopyMenuOpen(false);
     });
 
     // Persist UI state after any control change/click (view, sort, pareto, …),
