@@ -990,6 +990,9 @@ table.models-table { border-collapse: collapse; width: 100%; font-size: 13px; mi
   color: var(--color-foreground);
 }
 
+/* Export CSV button under the detail metrics */
+.detail-export { margin-top: 12px; display: flex; justify-content: flex-end; }
+
 .chart { width: 100%; height: 520px; }
 .select--sm { min-height: 32px; font-size: 13px; }
 

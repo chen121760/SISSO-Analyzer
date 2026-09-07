@@ -4200,6 +4200,55 @@
     state.compareChart.setOption(option);
   }
 
+  // Export the currently open model's per-sample rows as CSV — TWO files so
+  // train and verify plot cleanly side by side in any tool:
+  //   sisso-model-{rank}-train.csv    sample / true / pred / error (train)
+  //   sisso-model-{rank}-verify.csv   sample / true / pred / error (verify, when loaded)
+  // Each file is rectangular (no empty column blocks to skip while plotting).
+  // Values are the exact numbers behind the predicted-vs-true scatter and the
+  // error-distribution tab, exported with full floating-point precision.
+  function exportModelCsv(m) {
+    var res = state.result;
+    if (!res || !m) return;
+    var target = res.meta.targetLetter;
+    function rowsFor(data, pred) {
+      if (!data || !pred) return null;
+      var rows = [["sample", "true", "pred", "error"]];
+      var y = Array.from(data.cols[target]);
+      var upTo = Math.min(data.n, y.length, pred.length);
+      for (var i = 0; i < upTo; i++) {
+        var t = y[i], p = pred[i];
+        if (!Number.isFinite(t) || !Number.isFinite(p)) continue; // never exported NaN/Inf
+        rows.push([data.names[i], t, p, p - t]);
+      }
+      return rows.length > 1 ? rows : null;
+    }
+    var trainRows = rowsFor(res.train, m.predTrain);
+    var verifyRows = (res.verify && m.predVerify) ? rowsFor(res.verify, m.predVerify) : null;
+    var tN = trainRows ? trainRows.length - 1 : 0;
+    var vN = verifyRows ? verifyRows.length - 1 : 0;
+    if (!tN && !vN) { toast(I18N.t("detailCsvEmpty")); return; }
+    if (trainRows) {
+      downloadTextFile("sisso-model-" + m.rank + "-train.csv",
+        Core.rowsToCsv(trainRows), "text/csv;charset=utf-8");
+    }
+    if (verifyRows) {
+      downloadTextFile("sisso-model-" + m.rank + "-verify.csv",
+        Core.rowsToCsv(verifyRows), "text/csv;charset=utf-8");
+    }
+    if (vN) {
+      toast(I18N.format("detailCsvExportedPair", {
+        rank: m.rank, t: tN, v: vN,
+        tf: "sisso-model-" + m.rank + "-train.csv",
+        vf: "sisso-model-" + m.rank + "-verify.csv",
+      }));
+    } else {
+      toast(I18N.format("detailCsvExported", {
+        n: tN, rank: m.rank, file: "sisso-model-" + m.rank + "-train.csv",
+      }));
+    }
+  }
+
   function openDetail(rank) {
     var res = state.result;
     var m = null;
@@ -5132,6 +5181,10 @@
       var m = state.currentModel;
       if (!m) return;
       applyModelState(m.rank, { excluded: !isExcludedModel(m) });
+    });
+    // Export the open model's per-sample (true / predicted / error) data as CSV.
+    $("#btn-detail-export-csv").addEventListener("click", function () {
+      if (state.currentModel) exportModelCsv(state.currentModel);
     });
     $("#inspector-close").addEventListener("click", closeInspector);
     $("#inspector-backdrop").addEventListener("click", function (e) {

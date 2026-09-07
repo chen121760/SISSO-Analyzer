@@ -24,6 +24,13 @@ Pure client-side — nothing is uploaded to a server; all parsing and computatio
   as compact Passed / Warning / Error rows. Only real blockers stop the run — everything else is a
   warning, and a broken `verify.dat` is simply ignored (train-only mode) instead of failing.
 - Per-model detail: formula, fit statistics, interactive ECharts scatter plot, and point inspector.
+  A **Export CSV** button in the detail dialog downloads the model's per-sample
+  rows as **two CSV files** so train and verify plot cleanly in any tool:
+  `sisso-model-{rank}-train.csv` and `sisso-model-{rank}-verify.csv` (the
+  latter only when a `verify.dat` was analysed). Each file is rectangular
+  (`sample / true / pred / error`) — no empty column blocks to skip — with the
+  exact numbers behind the scatter and the error histogram, exported with full
+  floating-point precision.
 - **Copy models for AI comparison**: the main results table and the Pareto
   front table each get a checkbox column plus a *Copy selected (n)* bar — tick
   the models you want and one click copies a text block per model
