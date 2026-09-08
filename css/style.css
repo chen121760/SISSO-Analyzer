@@ -1657,6 +1657,9 @@ table.models-table { border-collapse: collapse; width: 100%; font-size: 13px; mi
 .compare__table-wrap { overflow-x: auto; }
 .compare-table td, .compare-table th { white-space: nowrap; }
 .compare-table td.num, .compare-table th.num { text-align: right; }
+/* Winning value per metric row in the Compare metrics table — bold so the
+   user can spot the best model at a glance (rmse/maxae low, r2/rho high). */
+.compare-table td.num.is-best { font-weight: 700; }
 .compare-formulas {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));

@@ -4162,11 +4162,22 @@
     var rows = Core.compareMetricRows(models);
     var tbody = el("tbody");
     rows.forEach(function (row) {
+      // Direction-aware winner per row: rmse / maxae — smaller is better,
+      // r2 / rho — larger is better. Missing values (NaN) never win; a tie
+      // bolds every model that shares the best value.
+      var smallerBetter = row.metric === "rmse" || row.metric === "maxae";
+      var best = null, comparable = 0;
+      row.values.forEach(function (v) {
+        if (typeof v !== "number" || !Number.isFinite(v)) return;
+        comparable++;
+        if (best === null || (smallerBetter ? v < best : v > best)) best = v;
+      });
       var tr = el("tr");
       tr.appendChild(el("td", null, metricLabelOf(row)));
       row.values.forEach(function (v) {
         var td = el("td", "num", fmt(v, 4));
         if (v === null || Number.isNaN(v) || typeof v !== "number") td.classList.add("is-empty");
+        else if (comparable > 1 && v === best) td.classList.add("is-best");
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
