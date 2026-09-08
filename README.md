@@ -32,24 +32,6 @@ npx serve .
 
 Open http://localhost:8080.
 
-## Tests
-
-```bash
-node test/pareto_export.test.mjs
-node test/pareto_axes.test.mjs
-node test/health_check.test.mjs
-node test/model_state_compare.test.mjs
-node test/usage_batch.test.mjs
-node test/error_distribution.test.mjs
-node test/formula_export.test.mjs
-node test/delta_metrics.test.mjs
-```
-
-All tests use bundled demo data and run out of the box. `test/verify_against_sisso.mjs` additionally checks the engine against real SISSO numbers and needs a local SISSO run next to the repo.
-
-## Deploy
-
-100% static — no backend. Enable GitHub Pages from the `main` branch root.
 
 ## Citation
 
