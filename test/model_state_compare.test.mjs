@@ -134,7 +134,7 @@ function checkMetricRows(res) {
   const models = res.models.slice(0, 3);
   const rows = core.compareMetricRows(models);
   const expectVerify = !!models[0].metricsVerify;
-  const expectN = (expectVerify ? 2 : 1) * 4;
+  const expectN = (expectVerify ? 2 : 1) * 5;
   assertEq(rows.length, expectN, `${expectVerify ? "both" : "train-only"} metric row count`);
   let ok = true;
   for (const row of rows) {
@@ -146,8 +146,8 @@ function checkMetricRows(res) {
     }
   }
   assert(ok, `${expectVerify ? "both" : "train-only"} compareMetricRows matches metricValue`);
-  assert(rows.every((r) => ["rmse", "maxae", "r2", "rho"].includes(r.metric)),
-    "metric order is stable rmse/maxae/r2/rho");
+  assert(rows.every((r) => ["rmse", "mae", "maxae", "r2", "rho"].includes(r.metric)),
+    "metric order is stable rmse/mae/maxae/r2/rho");
 }
 checkMetricRows(resTrain);
 checkMetricRows(resBoth);

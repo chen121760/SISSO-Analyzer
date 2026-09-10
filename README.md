@@ -11,7 +11,7 @@ Regression tasks only. Multi-objective and classification tasks are not yet supp
 ## Features
 
 - Load the five SISSO result files by drag & drop, folder, or archive (`.zip` / `.tar.gz` / …).
-- Sortable overview table and thumbnail grid (rank, RMSE, MaxAE, R², Spearman's ρ) with favourites-only view.
+- Sortable overview table and thumbnail grid (rank, RMSE, MAE, MaxAE, R², Spearman's ρ) with favourites-only view.
 - Health check before parsing — missing files, misaligned or non-numeric samples, unsafe descriptors — reported as Passed / Warning / Error; only real blockers stop the run.
 - Per-model detail: formula, fit statistics, interactive scatter plot, point inspector, residual histogram, and per-sample CSV export.
 - Copy a formula as plain text, LaTeX, or Word / PowerPoint (UnicodeMath).

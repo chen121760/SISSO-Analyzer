@@ -7,6 +7,7 @@
 //
 // Conventions verified here:
 //   ΔRMSE  = RMSE_verify − RMSE_train
+//   ΔMAE   = MAE_verify − MAE_train
 //   ΔMaxAE = MaxAE_verify − MaxAE_train
 //   ΔR²    = R²_train − R²_verify
 //   Δρ     = ρ_train − ρ_verify
@@ -47,20 +48,21 @@ function fakeModel(train, verify) {
   return {
     rank: 1,
     metricsTrain: train ? {
-      rmse: 1.0, maxae: 2.0, r2: 0.8, rho: 0.7,
+      rmse: 1.0, mae: 1.25, maxae: 2.0, r2: 0.8, rho: 0.7,
     } : null,
     metricsVerify: verify ? {
-      rmse: 1.5, maxae: 2.5, r2: 0.6, rho: 0.5,
+      rmse: 1.5, mae: 1.75, maxae: 2.5, r2: 0.6, rho: 0.5,
     } : null,
   };
 }
 
 // ---------------------------------------------------------------------------
-// 1. delta VALUES: the four formulas, sign convention positive = worse
+// 1. delta VALUES: the five formulas, sign convention positive = worse
 // ---------------------------------------------------------------------------
 {
   const m = fakeModel(true, true); // verify worse on every metric
   assertNear(core.metricValue(m, "delta", "rmse"), 1.5 - 1.0, 1e-12, "ΔRMSE = verify − train");
+  assertNear(core.metricValue(m, "delta", "mae"), 1.75 - 1.25, 1e-12, "ΔMAE = verify − train");
   assertNear(core.metricValue(m, "delta", "maxae"), 2.5 - 2.0, 1e-12, "ΔMaxAE = verify − train");
   assertNear(core.metricValue(m, "delta", "r2"), 0.8 - 0.6, 1e-12, "ΔR² = train − verify (positive ⇒ worse)");
   assertNear(core.metricValue(m, "delta", "rho"), 0.7 - 0.5, 1e-12, "Δρ = train − verify (positive ⇒ worse)");
@@ -70,14 +72,14 @@ function fakeModel(train, verify) {
 {
   // verify better than train ⇒ negative Δ across the board
   const m = fakeModel(true, true);
-  m.metricsVerify = { rmse: 0.6, maxae: 1.2, r2: 0.95, rho: 0.92 };
+  m.metricsVerify = { rmse: 0.6, mae: 0.8, maxae: 1.2, r2: 0.95, rho: 0.92 };
   assert(core.metricValue(m, "delta", "rmse") < 0, "verify-better ⇒ negative ΔRMSE");
   assert(core.metricValue(m, "delta", "r2") < 0, "verify-better ⇒ negative ΔR²");
 }
 {
   // equal ⇒ zero
   const m = fakeModel(true, true);
-  m.metricsVerify = { rmse: 1.0, maxae: 2.0, r2: 0.8, rho: 0.7 };
+  m.metricsVerify = { rmse: 1.0, mae: 1.25, maxae: 2.0, r2: 0.8, rho: 0.7 };
   assertEq(core.metricValue(m, "delta", "rmse"), 0, "equal train/verify ⇒ Δ = 0");
   assertEq(core.metricValue(m, "delta", "r2"), 0, "equal train/verify ⇒ ΔR² = 0");
 }
@@ -88,6 +90,7 @@ function fakeModel(train, verify) {
 {
   const m = fakeModel(true, false);
   assertNaN(core.metricValue(m, "delta", "rmse"), "train-only model ⇒ ΔRMSE NaN");
+  assertNaN(core.metricValue(m, "delta", "mae"), "train-only model ⇒ ΔMAE NaN");
   assertNaN(core.metricValue(m, "delta", "r2"), "train-only model ⇒ ΔR² NaN");
   assertNaN(core.metricValue(m, "delta", "rho"), "train-only model ⇒ Δρ NaN");
 }
@@ -132,17 +135,19 @@ function fakeModel(train, verify) {
   const m0 = res.models[0];
   const exp = {
     rmse: m0.metricsVerify.rmse - m0.metricsTrain.rmse,
+    mae: m0.metricsVerify.mae - m0.metricsTrain.mae,
     maxae: m0.metricsVerify.maxae - m0.metricsTrain.maxae,
     r2: m0.metricsTrain.r2 - m0.metricsVerify.r2,
     rho: m0.metricsTrain.rho - m0.metricsVerify.rho,
   };
   assertNear(core.metricValue(m0, "delta", "rmse"), exp.rmse, 1e-12, "demo ΔRMSE == verify − train");
+  assertNear(core.metricValue(m0, "delta", "mae"), exp.mae, 1e-12, "demo ΔMAE == verify − train");
   assertNear(core.metricValue(m0, "delta", "maxae"), exp.maxae, 1e-12, "demo ΔMaxAE == verify − train");
   assertNear(core.metricValue(m0, "delta", "r2"), exp.r2, 1e-12, "demo ΔR² == train − verify");
   assertNear(core.metricValue(m0, "delta", "rho"), exp.rho, 1e-12, "demo Δρ == train − verify");
   let contractOk = true;
   for (const mm of res.models) {
-    ["rmse", "maxae", "r2", "rho"].forEach((k) => {
+    ["rmse", "mae", "maxae", "r2", "rho"].forEach((k) => {
       const t = mm.metricsTrain && mm.metricsTrain[k];
       const v = mm.metricsVerify && mm.metricsVerify[k];
       const d = core.metricValue(mm, "delta", k);
@@ -162,9 +167,9 @@ function fakeModel(train, verify) {
 {
   const good = fakeModel(true, true); // ΔRMSE = +0.5
   const bad = fakeModel(true, true);  // make verify much worse
-  bad.metricsVerify = { rmse: 3.0, maxae: 4.0, r2: 0.2, rho: 0.1 };
+  bad.metricsVerify = { rmse: 3.0, mae: 3.4, maxae: 4.0, r2: 0.2, rho: 0.1 };
   const noV = fakeModel(true, false);
-  const keys = ["rmse", "maxae", "r2", "rho"];
+  const keys = ["rmse", "mae", "maxae", "r2", "rho"];
   keys.forEach((k) => {
     const goodV = core.metricValue(good, "delta", k);
     const badV = core.metricValue(bad, "delta", k);
@@ -181,6 +186,7 @@ function fakeModel(train, verify) {
     assertEq(core.metricSortEndpoint(k, "delta"), Infinity, `delta ${k} missing → +Infinity (worst)`);
   });
   assertEq(core.metricSortEndpoint("rmse", "train"), Infinity, "train rmse missing → +Infinity");
+  assertEq(core.metricSortEndpoint("mae", "train"), Infinity, "train mae missing → +Infinity");
   assertEq(core.metricSortEndpoint("r2", "train"), -Infinity, "train r2 missing → −Infinity");
   assertEq(core.metricSortEndpoint("rho", "train"), 0, "train rho missing → 0 (existing behaviour)");
   // worst delta endpoint sorts strictly after any finite gap

@@ -232,6 +232,7 @@
   // Pareto metrics: label key + whether smaller-is-better.
   var PARETO_METRICS = [
     { key: "rmse", label: "sortRMSE", minimize: true },
+    { key: "mae", label: "sortMAE", minimize: true },
     { key: "maxae", label: "sortMaxAE", minimize: true },
     { key: "r2", label: "sortR2", minimize: false },
     { key: "rho", label: "sortRho", minimize: false },
@@ -1595,12 +1596,13 @@
   //   id        stable column id, also used as the sort key ("rmse-train")
   //   label()   dynamic i18n label (called with no args)
   //   numeric   true => value comes from model metrics, numeric filterable
-  //   metric    metrics key (rmse/maxae/r2/rho) — undefined for rank/formula
+  //   metric    metrics key (rmse/mae/maxae/r2/rho) — undefined for rank/formula
   //   dataset   "train" | "verify" — undefined for rank/formula
   //   get(m)    returns the raw value of the column for a model
   // ---------------------------------------------------------------------------
   var COL_METRICS = [
     { metric: "rmse", labelKey: "metricRMSE" },
+    { metric: "mae", labelKey: "metricMAE" },
     { metric: "maxae", labelKey: "metricMaxAE" },
     { metric: "r2", labelKey: "metricR2" },
     { metric: "rho", labelKey: "metricRho" },
@@ -1950,13 +1952,13 @@
     var metric = sk[0];
     var dataset = sk.length > 1 ? sk[1] : "";
     var metricKey = (dataset === "verify" || dataset === "delta" || dataset === "train")
-      && (metric === "rmse" || metric === "maxae" || metric === "r2" || metric === "rho")
+      && (metric === "rmse" || metric === "mae" || metric === "maxae" || metric === "r2" || metric === "rho")
       ? metric : null;
 
     // Normalise non-finite metrics to a deterministic endpoint so NaN values
     // never poison the comparator (which would make sort order unstable).
     // Endpoints sit on the metric's own "worse" side; for delta every metric is
-    // smaller-better (a larger gap = worse), matching its rmse/maxae behaviour.
+    // smaller-better (a larger gap = worse), matching its rmse/mae/maxae behaviour.
     function key(m) {
       if (!metricKey) return m.rank;
       var v = Core.metricValue(m, dataset, metricKey);
@@ -2065,7 +2067,7 @@
     var formula = m.formulaOriginal;
     try { formula = Core.formulaToLatex(m.formulaOriginal); } catch (e) { /* unparsable formula → keep original text */ }
     var lines = ["model" + m.rank + "：" + formula];
-    var metricDefs = [["rmse", "RMSE"], ["maxae", "MaxAE"], ["r2", "R2"], ["rho", "rho"]];
+    var metricDefs = [["rmse", "RMSE"], ["mae", "MAE"], ["maxae", "MaxAE"], ["r2", "R2"], ["rho", "rho"]];
     var datasets = ["train"];
     if (m.metricsVerify) datasets.push("verify");
     metricDefs.forEach(function (def) {
@@ -2351,8 +2353,12 @@
       var body = el("div", "model-card__body");
       body.appendChild(el("div", "model-card__title", "Model " + m.rank));
       var metrics = el("div", "model-card__metrics");
+      // Headline metrics on a thumbnail card: mean error (RMSE, and its
+      // outlier-robust companion MAE) plus the rank correlation.
       appendMetricLine(metrics, "RMSE",
         m.metricsTrain.rmse, m.metricsVerify ? m.metricsVerify.rmse : undefined);
+      appendMetricLine(metrics, "MAE",
+        m.metricsTrain.mae, m.metricsVerify ? m.metricsVerify.mae : undefined);
       appendMetricLine(metrics, "ρ",
         m.metricsTrain.rho, m.metricsVerify ? m.metricsVerify.rho : undefined);
       body.appendChild(metrics);
@@ -4095,6 +4101,7 @@
   function metricLabelOf(row) {
     var d = I18N.t(row.dataset === "verify" ? "detailVerify" : "detailTrain");
     var m = row.metric === "rmse" ? I18N.t("metricRMSE")
+      : row.metric === "mae" ? I18N.t("metricMAE")
       : row.metric === "maxae" ? I18N.t("metricMaxAE")
       : row.metric === "r2" ? I18N.t("metricR2") : I18N.t("metricRho");
     return m + " (" + d + ")";
@@ -4162,10 +4169,10 @@
     var rows = Core.compareMetricRows(models);
     var tbody = el("tbody");
     rows.forEach(function (row) {
-      // Direction-aware winner per row: rmse / maxae — smaller is better,
+      // Direction-aware winner per row: rmse / mae / maxae — smaller is better,
       // r2 / rho — larger is better. Missing values (NaN) never win; a tie
       // bolds every model that shares the best value.
-      var smallerBetter = row.metric === "rmse" || row.metric === "maxae";
+      var smallerBetter = row.metric === "rmse" || row.metric === "mae" || row.metric === "maxae";
       var best = null, comparable = 0;
       row.values.forEach(function (v) {
         if (typeof v !== "number" || !Number.isFinite(v)) return;
@@ -4297,6 +4304,7 @@
     var hasVerify = !!m.metricsVerify;
     var rows = [
       ["RMSE", m.metricsTrain.rmse, hasVerify ? m.metricsVerify.rmse : null],
+      ["MAE", m.metricsTrain.mae, hasVerify ? m.metricsVerify.mae : null],
       ["MaxAE", m.metricsTrain.maxae, hasVerify ? m.metricsVerify.maxae : null],
       ["R²", m.metricsTrain.r2, hasVerify ? m.metricsVerify.r2 : null],
       ["ρ", m.metricsTrain.rho, hasVerify ? m.metricsVerify.rho : null],

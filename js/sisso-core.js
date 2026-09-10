@@ -1,9 +1,9 @@
 /*
  * sisso-core.js — pure computation engine for SISSO result analysis.
  *
- * A faithful JavaScript port of the logic in sisso_post.py, with two
- * additions: (1) Spearman's rho, and (2) a safe recursive-descent formula
- * evaluator that replaces Python's eval().
+ * A faithful JavaScript port of the logic in sisso_post.py, with three
+ * additions: (1) Spearman's rho, (2) MAE next to the RMSE / MaxAE pair, and
+ * (3) a safe recursive-descent formula evaluator that replaces Python's eval().
  *
  * It is environment-agnostic (UMD) so the same code runs in the browser and
  * under Node.js for automated testing against SISSO's own numbers.
@@ -677,10 +677,19 @@
     return pearson(rank(x), rank(y));
   }
 
+  // Per-model quality metrics of one prediction series against the target.
+  //   rmse   sqrt(mean(e²))     — mean error, quadratic (outlier-sensitive)
+  //   mae    mean(|e|)          — mean error, linear (outlier-robust)
+  //   maxae  max(|e|)           — worst single deviation
+  //   r2     1 − SSres/SStot    — explained variance (NaN for a constant target)
+  //   rho    Spearman(pred,true)— rank correlation
+  // with e = predicted − true. rmse / mae / maxae are all "smaller is better"
+  // and obey mae ≤ rmse ≤ maxae; a non-finite residual voids the three error
+  // metrics together (ok = false).
   function computeMetrics(yTrue, yPred) {
     var n = yTrue.length;
-    if (n === 0) return { rmse: NaN, maxae: NaN, r2: NaN, rho: NaN, ok: false };
-    var s2 = 0, maxAbs = -Infinity, allFinite = true;
+    if (n === 0) return { rmse: NaN, mae: NaN, maxae: NaN, r2: NaN, rho: NaN, ok: false };
+    var s2 = 0, sAbs = 0, maxAbs = -Infinity, allFinite = true;
     var my = 0;
     for (var i = 0; i < n; i++) my += yTrue[i];
     my /= n;
@@ -690,16 +699,19 @@
       if (!Number.isFinite(e)) allFinite = false;
       s2 += e * e;
       var a = Math.abs(e);
+      sAbs += a;
       if (a > maxAbs) maxAbs = a;
       var d = yTrue[j] - my;
       ssTot += d * d;
     }
     var rmse = Math.sqrt(s2 / n);
+    var mae = sAbs / n;
     var r2 = ssTot === 0 ? NaN : 1 - s2 / ssTot;
     var rho = spearman(yTrue, yPred);
     var ok = allFinite && Number.isFinite(rmse) && Number.isFinite(maxAbs);
     return {
       rmse: ok ? rmse : NaN,
+      mae: ok ? mae : NaN,
       maxae: ok ? maxAbs : NaN,
       r2: Number.isFinite(r2) ? r2 : NaN,
       rho: Number.isFinite(rho) ? rho : NaN,
@@ -995,6 +1007,7 @@
   // POSITIVE means validation performed worse than training, i.e. every delta
   // metric is "smaller = better":
   //     ΔRMSE  = RMSE_validation − RMSE_train
+  //     ΔMAE   = MAE_validation − MAE_train
   //     ΔMaxAE = MaxAE_validation − MaxAE_train
   //     ΔR²    = R²_train − R²_validation
   //     Δρ     = ρ_train − ρ_validation
@@ -1022,14 +1035,14 @@
 
   // Deterministic NaN endpoint used when sorting on a metric column, so missing
   // values never poison the comparator: endpoints sit on the metric's "worse"
-  // side under ascending sort (rmse/maxae → +Infinity, r2 → −Infinity, rho → 0).
+  // side under ascending sort (rmse/mae/maxae → +Infinity, r2 → −Infinity, rho → 0).
   // Delta is smaller-better for every metric, so a missing gap sorts as worst
   // (+Infinity) no matter which underlying metric it belongs to.
   function metricSortEndpoint(metricKey, dataset) {
     if (dataset === "delta") return Infinity;
     if (metricKey === "r2") return -Infinity;
     if (metricKey === "rho") return 0;
-    return Infinity; // rmse / maxae
+    return Infinity; // rmse / mae / maxae
   }
 
   // Unified metric accessor for a model.
@@ -1067,11 +1080,14 @@
 
   // Deterministic default axes for a run with `datasets` (tokens from
   // availableDatasets) and `dim` objectives (2 or 3). Picks metrics in the
-  // usual order (rmse, maxae, r2, rho), interleaving datasets, and never
-  // returns a duplicated (dataset, metric) pair.
+  // usual order (rmse, maxae, r2, rho, then mae), interleaving datasets, and
+  // never returns a duplicated (dataset, metric) pair.
+  // MAE is deliberately last in the priority list: it is fully selectable on
+  // any axis, but it never displaces the historical defaults (so a restored
+  // session or a fresh run keeps exactly the axes it had before MAE existed).
   function paretoDefaultAxes(datasets, dim) {
     var ds = datasets && datasets.length ? datasets.slice() : ["train"];
-    var order = ["rmse", "maxae", "r2", "rho"];
+    var order = ["rmse", "maxae", "r2", "rho", "mae"];
     var axes = [];
     for (var i = 0; i < order.length && axes.length < dim; i++) {
       for (var j = 0; j < ds.length && axes.length < dim; j++) {
@@ -1141,7 +1157,7 @@
   }
 
   // Stable metric row order for the Compare view.
-  var COMPARE_METRIC_ORDER = ["rmse", "maxae", "r2", "rho"];
+  var COMPARE_METRIC_ORDER = ["rmse", "mae", "maxae", "r2", "rho"];
 
   // Metric matrix shared by the Compare view: one row per dataset x metric in a
   // stable order, one value per model (NaN when a model lacks that metric).
