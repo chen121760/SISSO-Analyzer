@@ -134,16 +134,210 @@
     return { ranks: ranks, rmses: rmses, maxaes: maxaes, featureLists: featureLists };
   }
 
+  // Coefficient rows, one per ranked model: the leading model index is dropped
+  // and the remaining numbers are returned in file order.
+  //
+  // SISSO writes a single header line before the rows, but the exact spelling
+  // changed between versions ("Model_ID c0 c1 …" for regression, and
+  // "Model_ID, [(c_i,i=0,n)_j,j=1,ntask]" for multi-task) — so instead of
+  // blindly skipping line 1 we skip every leading line that does not start with
+  // an integer, which is exactly the shape of a data row in both layouts.
   function parseCoeffFile(text) {
     var lines = text.split(/\r?\n/);
     var coeffs = [];
-    for (var i = 1; i < lines.length; i++) {
+    for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
       if (!line || !line.trim()) continue;
-      var parts = line.trim().split(/\s+/);
+      var trimmed = line.trim();
+      if (!/^\d+(\s|$)/.test(trimmed)) continue; // header / footer text
+      var parts = trimmed.split(/\s+/);
       coeffs.push(parts.slice(1).map(Number)); // skip model index
     }
     return coeffs;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Run-settings and multi-task (MT-SISSO) parsing
+  //
+  // MT-SISSO (SISSO 3.5 with ntask > 1) reuses the single-task file names but
+  // changes two things that matter for analysis:
+  //   1. train.dat holds one header followed by the task blocks stacked
+  //      vertically, in the order of SISSO.in's nsample=n1,n2,… list;
+  //   2. the *_coeff file stores, per model row, ntask consecutive coefficient
+  //      blocks of [c0, c1 … cn] — one block per task — while the descriptor set
+  //      (the Uspace feature ids) is shared by every task.
+  // Everything below is pure parsing so the browser and the Node tests agree.
+  // ---------------------------------------------------------------------------
+
+  // "key = value" pairs of a SISSO.in file without Fortran-style comments.
+  function sissoInEntries(text) {
+    var out = [];
+    var lines = String(text == null ? "" : text).split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var cut = line.length;
+      var b1 = line.indexOf("!");
+      var b2 = line.indexOf("#");
+      if (b1 >= 0 && b1 < cut) cut = b1;
+      if (b2 >= 0 && b2 < cut) cut = b2;
+      var core = line.slice(0, cut).trim();
+      if (!core) continue;
+      var eq = core.indexOf("=");
+      if (eq < 1) continue;
+      out.push({
+        key: core.slice(0, eq).trim().toLowerCase().replace(/^[^a-z0-9]+/, ""),
+        value: core.slice(eq + 1).trim(),
+      });
+    }
+    return out;
+  }
+
+  // Numbers inside a value, tolerating Fortran exponents (1.0d-3), comma lists
+  // ("42,33,28") and the parentheses used by the classification syntax.
+  function numberOfList(value) {
+    return (String(value).match(/[+-]?\d+(?:\.\d+)?(?:[de][+-]?\d+)?/gi) || [])
+      .map(function (s) { return parseFloat(s.replace(/[de]/i, "e")); });
+  }
+
+  // SISSO.in settings used by the analyzer. `nsample` keeps its historical
+  // meaning (the first number) while `nsamples` exposes the whole list, which is
+  // what a multi-task run needs to slice train.dat into task blocks.
+  function parseSissoIn(text) {
+    var out = {
+      nsample: null, nsamples: null, ntask: null, taskWeighting: null, scmt: null,
+      nsf: null, descDim: null, fcomplexity: null, ptype: null,
+    };
+    var entries = sissoInEntries(text);
+    for (var i = 0; i < entries.length; i++) {
+      var key = entries[i].key;
+      var val = entries[i].value;
+      // scmt carries no number, so it is handled before the numeric guard.
+      if (key === "scmt" || key === "sign_constrained_mtl" || key === "sign_constrained") {
+        out.scmt = /\.true\./i.test(val) || /^true$/i.test(val) || /^1$/.test(val);
+        continue;
+      }
+      var nums = numberOfList(val);
+      if (!nums.length) continue;
+      // SISSO renamed its keywords over versions, so accept the common aliases.
+      switch (key) {
+        case "nsample": case "n_sample": case "nsamples": case "nsets":
+          out.nsample = nums[0];
+          out.nsamples = nums.slice();
+          break;
+        case "ntask": case "n_task": case "ntasks":
+          out.ntask = nums[0];
+          break;
+        case "task_weighting": case "taskweighting":
+          out.taskWeighting = nums[0];
+          break;
+        case "nsf": case "n_features": case "nsf_":
+          out.nsf = nums[0]; break;
+        case "desc_dim": case "dimension": case "descriptor_dim":
+          out.descDim = nums[0]; break;
+        case "fcomplexity": case "maxcomplexity": case "complexity": case "n_rung":
+          out.fcomplexity = nums[0]; break;
+        case "ptype":
+          out.ptype = nums[0]; break;
+      }
+    }
+    if (out.ntask === null && out.nsamples) out.ntask = out.nsamples.length;
+    if (out.ntask !== null && out.ntask <= 1) out.ntask = 1;
+    return out;
+  }
+
+  // The multi-task bookkeeping SISSO.out prints near the top: task count, the
+  // per-task sample counts, the weighting scheme and the target standard
+  // deviation of every task. Returns null when the file carries no task info.
+  function parseSissoOutTasks(text) {
+    var src = String(text == null ? "" : text);
+    if (!src) return null;
+    var out = { ntask: null, nsamples: null, taskWeighting: null, scmt: null, taskStd: [] };
+    var m = src.match(/Number of tasks:\s*([0-9]+)/i);
+    if (m) out.ntask = parseInt(m[1], 10);
+    m = src.match(/Number of samples for the task(?:\(s\))?:\s*([0-9 \t,]+)/i);
+    if (m) out.nsamples = numberOfList(m[1]).map(function (v) { return Math.round(v); });
+    m = src.match(/Task_weighting:\s*([0-9]+)/i);
+    if (m) out.taskWeighting = parseInt(m[1], 10);
+    m = src.match(/Sign-constrained multi-task learning:\s*([TF])/i);
+    if (m) out.scmt = m[1].toUpperCase() === "T";
+    var re = /Standard Deviation[^\n]*?task\s*([0-9]+)\s*:\s*([0-9eEdD+\-.]+)/g;
+    var mm;
+    while ((mm = re.exec(src)) !== null) {
+      out.taskStd[parseInt(mm[1], 10) - 1] = parseFloat(mm[2].replace(/[dD]/, "e"));
+    }
+    if (out.ntask === null && out.nsamples) out.ntask = out.nsamples.length;
+    if (out.ntask === null && !out.taskStd.length) return null;
+    return out;
+  }
+
+  // Split one coefficient row into ntask blocks of [c0, c1 … cn]. Returns null
+  // when the row length is not a whole multiple of the task count.
+  function taskCoeffBlocks(row, ntask) {
+    if (!row || !(ntask > 0) || row.length % ntask !== 0) return null;
+    var per = row.length / ntask;
+    if (per < 2) return null;
+    var out = [];
+    for (var t = 0; t < ntask; t++) out.push(row.slice(t * per, (t + 1) * per));
+    return out;
+  }
+
+  // A contiguous row slice of a parsed dataset (used for the task blocks of a
+  // stacked train.dat).
+  //
+  // Contract: the returned column arrays are SUBARRAY VIEWS onto the parent's
+  // buffers, not copies — cheap, and safe only because every consumer reads.
+  // Writing into a slice would silently corrupt the pooled dataset and every
+  // other slice, so any future code that wants to mutate a column must call
+  // .slice() on it first.
+  function sliceDataset(data, start, n) {
+    if (!data) return null;
+    var cols = {};
+    Object.keys(data.cols).forEach(function (k) {
+      cols[k] = data.cols[k].subarray(start, start + n);
+    });
+    return {
+      n: n,
+      names: data.names.slice(start, start + n),
+      cols: cols,
+      featureLetters: data.featureLetters,
+      start: start,
+    };
+  }
+
+  // Rebuild SISSO's own overall score of a multi-task model from its per-task
+  // metrics. SISSO.out documents the convention:
+  //   task_weighting = 1 -> RMSE = sqrt(sum_i RMSE_i^2 / ntask)  (every task counts the same)
+  //   task_weighting = 2 -> RMSE = sqrt(sum_i w_i * RMSE_i^2) with w_i = n_i / sum(n),
+  //                         which is exactly the RMSE pooled over all samples.
+  //   MaxAE is max_i MaxAE_i in both schemes.
+  //
+  // The weighting=1 form is verified against the shipped MT-SISSO run: all 1000
+  // ranked models reproduce the RMSE / MaxAE SISSO itself wrote (see
+  // test/mt_sisso.test.mjs). The weighting=2 form is derived from the weighting
+  // SISSO documents rather than observed — no weighting=2 run was available — so
+  // the health check's mt-aggregate probe re-derives it at runtime and says so if
+  // the two disagree. MaxAE is weighting-independent, which is what lets that
+  // probe tell a wrong aggregation *convention* apart from a wrongly read task
+  // *split*.
+  function aggregateTaskMetrics(taskMetrics, nsamples, taskWeighting) {
+    var n = taskMetrics ? taskMetrics.length : 0;
+    if (!n) return { rmse: NaN, maxae: NaN };
+    var weighted = taskWeighting === 2 && nsamples && nsamples.length === n;
+    var total = 0, i;
+    if (weighted) {
+      for (i = 0; i < n; i++) total += nsamples[i];
+    }
+    var acc = 0, maxae = -Infinity;
+    for (i = 0; i < n; i++) {
+      var w = 1 / n;
+      if (weighted && total > 0) w = nsamples[i] / total;
+      var r = taskMetrics[i] ? taskMetrics[i].rmse : NaN;
+      if (!Number.isFinite(r)) return { rmse: NaN, maxae: NaN };
+      acc += w * r * r;
+      var mx = taskMetrics[i].maxae;
+      if (Number.isFinite(mx) && mx > maxae) maxae = mx;
+    }
+    return { rmse: Math.sqrt(acc), maxae: maxae };
   }
 
   // Scan Uspace.expressions and keep only the lines whose feature id is in
@@ -1046,21 +1240,71 @@
   }
 
   // Unified metric accessor for a model.
-  //   dataset:   "train" | "verify" | "delta" (pseudo-dataset)
+  //   dataset:   "train" | "verify" | "delta" | "t1"…"tN" (multi-task tasks)
+  // "train" is the run's primary dataset: the training set of a single-task run,
+  // or the whole (pooled) stacked train.dat of a multi-task run. "t1"…"tN" are
+  // the per-task blocks of a multi-task run.
   // Returns NaN when the model has no such dataset/metric, or when delta is
   // requested for a model/run without validation data.
   function metricValue(model, dataset, metricKey) {
     if (dataset === "delta") return deltaMetricValue(model, metricKey);
+    if (!model) return NaN;
+    // Preferred path: the per-dataset metric map built by runPipeline makes
+    // every dataset (train / verify / task) a plain key lookup, so the UI never
+    // grows per-dataset branches.
+    if (model.metrics && Object.prototype.hasOwnProperty.call(model.metrics, dataset)) {
+      var mapped = model.metrics[dataset];
+      return mapped && typeof mapped[metricKey] === "number" ? mapped[metricKey] : NaN;
+    }
     var set = dataset === "verify" ? model.metricsVerify : model.metricsTrain;
     return set && typeof set[metricKey] === "number" ? set[metricKey] : NaN;
   }
 
-  // Datasets present in a pipeline result: "train" always; "verify" only when
-  // a verify file was analysed (result.verify truthy).
+  // Prediction series of a model for one dataset token (null when absent).
+  function modelPrediction(model, dataset) {
+    if (!model) return null;
+    if (model.pred && Object.prototype.hasOwnProperty.call(model.pred, dataset)) {
+      return model.pred[dataset] || null;
+    }
+    if (dataset === "verify") return model.predVerify || null;
+    if (dataset === "train") return model.predTrain || null;
+    return null;
+  }
+
+  // Datasets present in a pipeline result, in display order: "train" always;
+  // "verify" when a verify file was analysed; then the task blocks "t1"…"tN" of
+  // a multi-task run. Keeping the order here is what makes the table columns,
+  // the Pareto axis groups and the Compare rows agree without extra sorting.
   function availableDatasets(result) {
     var out = ["train"];
     if (result && result.verify) out.push("verify");
+    if (result && result.tasks) {
+      for (var i = 0; i < result.tasks.length; i++) out.push(result.tasks[i].key);
+    }
     return out;
+  }
+
+  // The dataset object behind a token: the row-aligned view the scatter, the
+  // residual histogram and the point inspector read (n / names / cols).
+  function datasetData(result, key) {
+    if (!result) return null;
+    if (key === "train") return result.train || null;
+    if (key === "verify") return result.verify || null;
+    if (result.tasks) {
+      for (var i = 0; i < result.tasks.length; i++) {
+        if (result.tasks[i].key === key) return result.tasks[i].data;
+      }
+    }
+    return null;
+  }
+
+  // Task descriptor behind a token ("t1" -> { key, index, label, n, start, std }).
+  function datasetTask(result, key) {
+    if (!result || !result.tasks) return null;
+    for (var i = 0; i < result.tasks.length; i++) {
+      if (result.tasks[i].key === key) return result.tasks[i];
+    }
+    return null;
   }
 
   // Two axes are the "same" only when dataset AND metric match.
@@ -1161,9 +1405,16 @@
 
   // Metric matrix shared by the Compare view: one row per dataset x metric in a
   // stable order, one value per model (NaN when a model lacks that metric).
-  function compareMetricRows(models) {
-    var datasets = ["train"];
-    if (models.some(function (m) { return !!m.metricsVerify; })) datasets.push("verify");
+  // `result` (optional) supplies the dataset list, so a multi-task run compares
+  // on "train" + "t1"…"tN"; without it the legacy train/verify pair is used.
+  function compareMetricRows(models, result) {
+    var datasets;
+    if (result) {
+      datasets = availableDatasets(result);
+    } else {
+      datasets = ["train"];
+      if (models.some(function (m) { return !!m.metricsVerify; })) datasets.push("verify");
+    }
     var rows = [];
     datasets.forEach(function (ds) {
       COMPARE_METRIC_ORDER.forEach(function (metric) {
@@ -1178,10 +1429,10 @@
   }
 
   // Per-sample prediction matrix for the Compare view.
-  //   result:  runPipeline output (train/verify datasets + models carrying
-  //            predTrain / predVerify arrays)
+  //   result:  runPipeline output (train/verify/task datasets + models carrying
+  //            a pred map keyed by the same dataset tokens)
   //   models:  compared model objects (column order kept)
-  //   dataset: "train" | "verify"
+  //   dataset: "train" | "verify" | "t1"…"tN"
   // Returns { dataset, rows } where rows[i] = { sample, target, preds } and
   // preds is aligned with models: preds[k] = { rank, pred, error } for
   // models[k] (NaN when that model has no prediction array for this dataset,
@@ -1189,8 +1440,7 @@
   // is not available in the result.
   function compareSampleMatrix(result, models, dataset) {
     if (!result) return null;
-    var isV = dataset === "verify";
-    var data = isV ? result.verify : result.train;
+    var data = datasetData(result, dataset);
     if (!data) return null;
     var y = Array.from(data.cols[result.meta.targetLetter]);
     var rows = [];
@@ -1198,7 +1448,7 @@
       var preds = [];
       for (var mi = 0; mi < models.length; mi++) {
         var m = models[mi];
-        var pa = isV ? m.predVerify : m.predTrain;
+        var pa = modelPrediction(m, dataset);
         var pred = (pa && pa.length === data.n) ? pa[i] : NaN;
         var err = (Number.isFinite(pred) && Number.isFinite(y[i])) ? pred - y[i] : NaN;
         preds.push({ rank: m.rank, pred: pred, error: err });
@@ -1589,7 +1839,191 @@
   // Pipeline
   // ---------------------------------------------------------------------------
 
-  // files: { trainText, verifyText?, topText, coeffText, uspaceText }
+  // Resolve the coefficient layout and, for a multi-task run, the task split.
+  //
+  // The layout is decidable from the files themselves: a model uses `descDim`
+  // descriptors, so a single-task coefficient row holds descDim + 1 numbers while
+  // a multi-task row holds ntask × (descDim + 1) of them, stored as one
+  // [c0, c1 … cn] block per task (see SISSO.out's per-task coefficient listing).
+  // The per-task sample counts come from SISSO.in's nsample=n1,n2,… list,
+  // falling back to the "Number of samples for the task(s)" line of SISSO.out.
+  //
+  // This single function is what BOTH the pipeline and the health check call.
+  // It collects problems in `issues` and only throws when `opts.strict` is set
+  // (the pipeline fails fast; the health check wants the full list to show the
+  // user). Having one resolver is deliberate: two implementations of "is this a
+  // task layout?" is exactly how a health check ends up green-lighting a run the
+  // pipeline then refuses to parse.
+  //
+  //   opts.strict  true (default) -> throw on the first error-level issue
+  //   opts.train   optional { n } when the caller has not parsed train.dat
+  //
+  // Returns { multiTask, ntask, descDim, nsamples, taskWeighting, scmt, taskStd,
+  //           taskSizeSource, tasks, issues, declaredDescDim, declaredNtask }
+  function resolveLayout(files, top, coeffs, train, opts) {
+    var strict = !(opts && opts.strict === false);
+    var issues = [];
+    function err(code, message) {
+      issues.push({ code: code, level: "error", message: message });
+      if (strict) {
+        var e = new Error(message);
+        e.code = code;
+        throw e;
+      }
+    }
+    function warn(code, message) {
+      issues.push({ code: code, level: "warning", message: message });
+    }
+
+    var dims = top.featureLists.map(function (l) { return l.length; });
+    var descDim = dims.length ? dims[0] : 0;
+    var mixedDims = dims.some(function (d) { return d !== descDim; });
+    if (mixedDims) {
+      err("mixed-descriptor-dims",
+        "The ranked-model file mixes descriptor dimensions (" + dims.join(", ") +
+        " feature id(s) per model), so the coefficient layout is ambiguous and the models " +
+        "cannot be split into tasks reliably.");
+    }
+
+    var inInfo = files.sissoInText ? parseSissoIn(files.sissoInText) : null;
+    var outInfo = files.sissoOutText ? parseSissoOutTasks(files.sissoOutText) : null;
+
+    // SISSO's ptype=2 is a classification run: its "target" is a class label, so
+    // RMSE / MAE / R² / ρ are not defined. Computing them anyway and showing them
+    // next to genuine regression numbers would be worse than refusing.
+    if (inInfo && inInfo.ptype !== null && inInfo.ptype !== 1) {
+      err("ptype",
+        "SISSO.in declares ptype=" + inInfo.ptype +
+        (inInfo.ptype === 2 ? " (classification)" : "") + ". This analyzer handles regression " +
+        "(ptype=1) only — error metrics such as RMSE / R² / ρ are not defined for class labels.");
+    }
+
+    var declaredNtask = (inInfo && inInfo.ntask) || (outInfo && outInfo.ntask) || null;
+    var info = {
+      multiTask: false, ntask: 1, descDim: descDim, nsamples: null,
+      taskWeighting: (inInfo && inInfo.taskWeighting) || (outInfo && outInfo.taskWeighting) || 1,
+      scmt: !!(inInfo && inInfo.scmt) || !!(outInfo && outInfo.scmt),
+      taskStd: (outInfo && outInfo.taskStd) || [],
+      taskSizeSource: null, tasks: null, issues: issues,
+      declaredDescDim: inInfo && inInfo.descDim !== null ? inInfo.descDim : null,
+      declaredNtask: declaredNtask,
+    };
+
+    var rowLens = coeffs.map(function (c) { return c.length; });
+    var rowLen = rowLens.length ? rowLens[0] : 0;
+    var ragged = -1;
+    for (var i = 1; i < rowLens.length; i++) {
+      if (rowLens[i] !== rowLen) { ragged = i; break; }
+    }
+    if (ragged >= 0) {
+      err("ragged-coeffs",
+        "Coefficient rows have inconsistent lengths (row 1 has " + rowLen + " value(s), row " +
+        (ragged + 1) + " has " + rowLens[ragged] + " value(s)) — the file looks truncated.");
+    }
+    // Nothing below can be decided from an ambiguous layout.
+    if (mixedDims || ragged >= 0) return info;
+
+    if (info.declaredDescDim !== null && info.declaredDescDim !== descDim) {
+      warn("desc-dim-mismatch",
+        "SISSO.in declares desc_dim=" + info.declaredDescDim + " but every ranked model uses " +
+        descDim + " descriptor(s). The ranked-model file wins; check that the loaded files " +
+        "belong to the same run.");
+    }
+
+    var n = train ? train.n : 0;
+
+    if (!rowLen || rowLen === descDim + 1) {
+      // Single-task layout: ntask must not be declared as > 1.
+      if (declaredNtask && declaredNtask > 1) {
+        warn("ntask-mismatch",
+          "SISSO.in / SISSO.out declare ntask=" + declaredNtask + " but the coefficient rows " +
+          "hold a single task's worth of values (" + (descDim + 1) + "). Treated as a " +
+          "single-task run; check that the loaded files belong to the same run.");
+      }
+      return info;
+    }
+
+    if (rowLen % (descDim + 1) !== 0) {
+      err("bad-coeff-length",
+        "Coefficient rows hold " + rowLen + " value(s), which is neither " + (descDim + 1) +
+        " (one task) nor a whole multiple of it. The coefficient file does not belong to " +
+        "this ranked-model file.");
+      return info;
+    }
+
+    var ntask = rowLen / (descDim + 1);
+    info.multiTask = true;
+    info.ntask = ntask;
+
+    if (declaredNtask && declaredNtask !== ntask) {
+      warn("ntask-mismatch",
+        "SISSO.in / SISSO.out declare ntask=" + declaredNtask + " but the coefficient rows " +
+        "carry " + ntask + " task block(s) of " + (descDim + 1) + " value(s) each. The " +
+        "coefficient layout (" + ntask + " tasks) is used; check that the loaded files belong " +
+        "to the same run.");
+    }
+
+    var nsamples = null, source = null;
+    if (inInfo && inInfo.nsamples && inInfo.nsamples.length === ntask) {
+      nsamples = inInfo.nsamples.map(function (v) { return Math.round(v); });
+      source = "SISSO.in";
+    } else if (outInfo && outInfo.nsamples && outInfo.nsamples.length === ntask) {
+      nsamples = outInfo.nsamples.slice();
+      source = "SISSO.out";
+    }
+    if (!nsamples) {
+      var declaredSizes = (inInfo && inInfo.nsamples) || (outInfo && outInfo.nsamples) || null;
+      if (declaredSizes && declaredSizes.length !== ntask) {
+        err("task-count-mismatch",
+          "The task sample list (" + declaredSizes.join(", ") + ") holds " + declaredSizes.length +
+          " value(s) but the coefficient rows imply " + ntask + " task(s).");
+      } else {
+        err("unknown-task-sizes",
+          "Multi-task coefficient layout detected (" + ntask + " tasks × " + (descDim + 1) +
+          " coefficients per model) but the per-task sample counts are unknown. Load SISSO.in " +
+          "(nsample=n1,n2,…) or SISSO.out — both record how train.dat is split into tasks.");
+      }
+      return info;
+    }
+
+    var total = 0;
+    for (var s = 0; s < nsamples.length; s++) total += nsamples[s];
+    if (total !== n) {
+      err("task-size-mismatch",
+        "Multi-task sample counts from " + source + " (" + nsamples.join(" + ") + " = " + total +
+        ") do not add up to the " + n + " data row(s) in train.dat. train.dat must hold the " +
+        "task blocks stacked vertically under a single header.");
+      return info;
+    }
+
+    var tasks = [];
+    var start = 0;
+    for (var t = 0; t < ntask; t++) {
+      tasks.push({
+        key: "t" + (t + 1),
+        index: t + 1,
+        label: "task_" + ("00" + (t + 1)).slice(-3),
+        start: start,
+        n: nsamples[t],
+        std: outInfo && outInfo.taskStd ? outInfo.taskStd[t] : undefined,
+        data: sliceDataset(train, start, nsamples[t]),
+      });
+      start += nsamples[t];
+    }
+    info.nsamples = nsamples;
+    info.taskSizeSource = source;
+    info.tasks = tasks;
+    return info;
+  }
+
+  // Pipeline entry point for the layout question: identical resolution, but it
+  // fails fast so a broken file set surfaces as one clear error.
+  function detectMultiTask(files, top, coeffs, train) {
+    return resolveLayout(files, top, coeffs, train, { strict: true });
+  }
+
+  // files: { trainText, verifyText?, topText, coeffText, uspaceText,
+  //          sissoInText?, sissoOutText? }
   function runPipeline(files) {
     var headerNames = readHeaderNames(files.trainText);
     var nameMap = makeNameMap(headerNames);
@@ -1612,19 +2046,47 @@
     });
     var uspace = parseUspace(files.uspaceText, renamer, needed);
 
+    var train = parseDataFile(files.trainText, nameMap);
+    var verify = files.verifyText ? parseDataFile(files.verifyText, nameMap) : null;
+    var targetLetter = nameMap[1].new_name; // 'b'
+    var yTrain = Array.from(train.cols[targetLetter]);
+    var yVerify = verify ? Array.from(verify.cols[targetLetter]) : null;
+
+    // Single-task vs multi-task (MT-SISSO) layout, resolved from the coefficient
+    // row length + SISSO.in / SISSO.out task bookkeeping.
+    var mt = detectMultiTask(files, top, coeffs, train);
+
+    // MT-SISSO produces no verify.dat, and a hold-out row carries no task
+    // identity — SISSO.in only splits train.dat, so there is no defensible way to
+    // decide which task's coefficients a verify row belongs to. Rather than
+    // emitting permanently empty verify / Δ columns, drop the file and record
+    // that we did (the health check reports it as a warning).
+    var verifyIgnored = false;
+    if (mt.multiTask && verify) {
+      verify = null;
+      yVerify = null;
+      verifyIgnored = true;
+    }
+
+    // `descDim` is taken from the first ranked model (a top file holds one
+    // descriptor dimension; resolveLayout rejects a file whose models disagree).
     var models = [];
     for (var mi = 0; mi < top.ranks.length; mi++) {
       var ids = top.featureLists[mi];
       var co = coeffs[mi];
-      if (co.length !== ids.length + 1) {
+      var perTask = mt.ntask > 1 ? taskCoeffBlocks(co, mt.ntask) : [co];
+      if (!perTask || perTask[0].length !== ids.length + 1) {
         throw new Error(
           "Model " + (mi + 1) + ": expected " + (ids.length + 1) +
-          " coefficients (intercept + " + ids.length + " features) but found " +
-          co.length + "."
+          " coefficients per task (intercept + " + ids.length + " features) but found " +
+          co.length + " value(s) across " + mt.ntask + " task(s)."
         );
       }
-      var const0 = co[0];
-      var termsNew = [], termsOrig = [], descRecs = [];
+
+      // The descriptor set is shared by every task, so the term list is built
+      // once and only the coefficients differ per task.
+      var descRecs = [];
+      var termBodies = [];
       for (var k = 0; k < ids.length; k++) {
         var fid = ids[k];
         var fNew = uspace.idToRenamed.get(fid);
@@ -1632,22 +2094,43 @@
         if (fNew === undefined) {
           throw new Error("Model " + (mi + 1) + ": feature id " + fid + " missing from Uspace.expressions.");
         }
-        termsNew.push("(" + co[k + 1] + ")*(" + fNew + ")");
-        termsOrig.push("(" + co[k + 1] + ")*(" + fOrig + ")");
+        termBodies.push({ renamed: fNew, original: fOrig });
         // Structured per-term record: the Uspace id plus the descriptor
         // expression in original- and renamed-feature spelling. Feature /
         // descriptor usage statistics and "contains" matching are built from
         // these records (never from the formatted coefficient string).
         descRecs.push({ id: fid, original: fOrig, renamed: fNew });
       }
+
+      // One formula per task: c0 + c1·d1 + … with that task's own coefficients.
+      var formulasNew = [], formulasOrig = [];
+      for (var ti = 0; ti < perTask.length; ti++) {
+        var tc = perTask[ti];
+        var tNew = [], tOrig = [];
+        for (var q = 0; q < ids.length; q++) {
+          tNew.push("(" + tc[q + 1] + ")*(" + termBodies[q].renamed + ")");
+          tOrig.push("(" + tc[q + 1] + ")*(" + termBodies[q].original + ")");
+        }
+        formulasNew.push("(" + tc[0] + ") + " + tNew.join(" + "));
+        formulasOrig.push("(" + tc[0] + ") + " + tOrig.join(" + "));
+      }
+
       models.push({
         rank: top.ranks[mi],
-        formula: "(" + const0 + ") + " + termsNew.join(" + "),
-        formulaOriginal: "(" + const0 + ") + " + termsOrig.join(" + "),
+        // `formula` / `formulaOriginal` stay a single expression for the legacy
+        // single-formula UI. A multi-task model additionally carries the full
+        // per-task list (formulasByTask / coefficientsByTask).
+        formula: formulasNew[0],
+        formulaOriginal: formulasOrig[0],
+        formulasByTask: mt.ntask > 1 ? formulasNew : null,
+        formulasOriginalByTask: mt.ntask > 1 ? formulasOrig : null,
+        coefficientsByTask: mt.ntask > 1 ? perTask : null,
         descriptors: descRecs,
         featureIds: ids.slice(),
         rmseSisso: top.rmses[mi],
         maxaeSisso: top.maxaes[mi],
+        pred: {},
+        metrics: {},
         predTrain: null,
         predVerify: null,
         metricsTrain: null,
@@ -1655,43 +2138,91 @@
       });
     }
 
-    var train = parseDataFile(files.trainText, nameMap);
-    var verify = files.verifyText ? parseDataFile(files.verifyText, nameMap) : null;
-    var targetLetter = nameMap[1].new_name; // 'b'
-    var yTrain = Array.from(train.cols[targetLetter]);
-    var yVerify = verify ? Array.from(verify.cols[targetLetter]) : null;
-
     // The formula evaluator must only ever see the *feature* columns, never the
     // sample-id or the target property. This prevents a malformed formula from
     // silently reading the answer it is supposed to predict.
     var featureSet = {};
     train.featureLetters.forEach(function (letter) { featureSet[letter] = true; });
 
-    models.forEach(function (model) {
+    // Predict one model over one dataset slice with one formula.
+    function predictOver(model, formulaText, data, label) {
       var fn;
       try {
-        fn = compileFormula(model.formula);
+        fn = compileFormula(formulaText);
       } catch (err) {
-        model.error = "formula compile failed: " + err.message;
+        model.error = model.error || ("formula compile failed (" + label + "): " + err.message);
+        return null;
+      }
+      var pred = new Float64Array(data.n);
+      for (var i = 0; i < data.n; i++) {
+        pred[i] = fn(makeFeatureGetter(data.cols, featureSet, i));
+      }
+      return pred;
+    }
+
+    models.forEach(function (model) {
+      if (mt.ntask > 1) {
+        // Per-task predictions, then the pooled series over the stacked rows so
+        // the "train" dataset (and its scatter / residual histogram) covers
+        // every sample exactly once, in train.dat order.
+        var pooled = new Float64Array(train.n);
+        var anyTask = false;
+        for (var t = 0; t < mt.tasks.length; t++) {
+          var task = mt.tasks[t];
+          var predTask = predictOver(model, model.formulasByTask[t], task.data, task.label);
+          if (!predTask) continue;
+          anyTask = true;
+          pooled.set(predTask, task.start);
+          model.pred[task.key] = predTask;
+          model.metrics[task.key] = computeMetrics(
+            Array.from(task.data.cols[targetLetter]), predTask);
+        }
+        if (anyTask) {
+          model.pred.train = pooled;
+          model.metrics.train = computeMetrics(yTrain, pooled);
+        } else {
+          model.metrics.train = computeMetrics(yTrain, new Float64Array(train.n).fill(NaN));
+        }
+        if (!model.metrics.train.ok) {
+          model.error = model.error || "non-finite predictions on the pooled train set";
+        }
+        // Legacy aliases: "train" is the pooled dataset, there is no verify.dat
+        // in an MT-SISSO run.
+        model.predTrain = model.pred.train || null;
+        model.metricsTrain = model.metrics.train;
+        model.metricsVerify = null;
+        model.predVerify = null;
+        // SISSO's own overall score (task-balanced / sample-weighted aggregate).
+        var agg = aggregateTaskMetrics(
+          mt.tasks.map(function (tk) { return model.metrics[tk.key]; }),
+          mt.nsamples, mt.taskWeighting);
+        model.overallRmse = agg.rmse;
+        model.overallMaxae = agg.maxae;
         return;
       }
-      var predTrain = new Float64Array(train.n);
-      for (var i = 0; i < train.n; i++) {
-        predTrain[i] = fn(makeFeatureGetter(train.cols, featureSet, i));
-      }
-      model.predTrain = predTrain;
-      model.metricsTrain = computeMetrics(yTrain, predTrain);
-      if (!model.metricsTrain.ok) {
-        model.error = model.error || "non-finite predictions on train set";
+
+      var predTrain = predictOver(model, model.formula, train, "train");
+      if (predTrain) {
+        model.pred.train = predTrain;
+        model.predTrain = predTrain;
+        model.metrics.train = computeMetrics(yTrain, predTrain);
+        model.metricsTrain = model.metrics.train;
+        if (!model.metricsTrain.ok) {
+          model.error = model.error || "non-finite predictions on train set";
+        }
+      } else {
+        model.metrics.train = computeMetrics(yTrain, new Float64Array(train.n).fill(NaN));
+        model.metricsTrain = model.metrics.train;
       }
 
       if (verify) {
-        var predVerify = new Float64Array(verify.n);
-        for (var j = 0; j < verify.n; j++) {
-          predVerify[j] = fn(makeFeatureGetter(verify.cols, featureSet, j));
+        var predVerify = predictOver(model, model.formula, verify, "verify");
+        if (predVerify) {
+          model.pred.verify = predVerify;
+          model.predVerify = predVerify;
+          model.metrics.verify = computeMetrics(yVerify, predVerify);
+          model.metricsVerify = model.metrics.verify;
         }
-        model.predVerify = predVerify;
-        model.metricsVerify = computeMetrics(yVerify, predVerify);
       }
     });
 
@@ -1705,10 +2236,30 @@
         targetLetter: targetLetter,
         targetName: nameMap[1].original_name,
         validationNote: sameAsTrain ? "in-sample" : null,
+        // Multi-task bookkeeping (null/false for an ordinary single-task run).
+        multiTask: mt.multiTask,
+        ntask: mt.ntask,
+        nsamples: mt.nsamples,
+        taskWeighting: mt.taskWeighting,
+        scmt: mt.scmt,
+        taskStd: mt.taskStd,
+        taskSizeSource: mt.taskSizeSource,
+        // True when a verify.dat was supplied for a multi-task run and dropped.
+        verifyIgnored: verifyIgnored,
+        // SISSO.in's declared desc_dim when it disagrees with the ranked-model
+        // file (the file wins; this is what the health check reports on).
+        declaredDescDim: mt.declaredDescDim === undefined ? null : mt.declaredDescDim,
+        declaredNtask: mt.declaredNtask === undefined ? null : mt.declaredNtask,
+        tasks: mt.tasks
+          ? mt.tasks.map(function (t) {
+            return { key: t.key, index: t.index, label: t.label, start: t.start, n: t.n, std: t.std };
+          })
+          : null,
       },
       columns: makeColumns(nameMap),
       train: train,
       verify: verify,
+      tasks: mt.tasks || null,
       models: models,
     };
   }
@@ -1722,6 +2273,14 @@
     parseTopFile: parseTopFile,
     parseCoeffFile: parseCoeffFile,
     parseUspace: parseUspace,
+    parseSissoIn: parseSissoIn,
+    parseSissoOutTasks: parseSissoOutTasks,
+    sissoInEntries: sissoInEntries,
+    taskCoeffBlocks: taskCoeffBlocks,
+    sliceDataset: sliceDataset,
+    aggregateTaskMetrics: aggregateTaskMetrics,
+    detectMultiTask: detectMultiTask,
+    resolveLayout: resolveLayout,
     compileFormula: compileFormula,
     formulaAst: formulaAst,
     formulaToPlain: formulaToPlain,
@@ -1748,10 +2307,13 @@
     csvField: csvField,
     rowsToCsv: rowsToCsv,
     metricValue: metricValue,
+    modelPrediction: modelPrediction,
     metricSortEndpoint: metricSortEndpoint,
     deltaMetricValue: deltaMetricValue,
     deltaDirection: deltaDirection,
     availableDatasets: availableDatasets,
+    datasetData: datasetData,
+    datasetTask: datasetTask,
     paretoAxesEqual: paretoAxesEqual,
     paretoAxesDistinct: paretoAxesDistinct,
     paretoDefaultAxes: paretoDefaultAxes,

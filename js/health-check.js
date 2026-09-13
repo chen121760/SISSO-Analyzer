@@ -22,7 +22,10 @@
  *   check(files) -> { level: "pass"|"warning"|"error",
  *                     dropVerify: boolean,
  *                     checks: [{ id, level: "pass"|"warning"|"error", message }] }
- *   where files = { train, verify?, top, coeff, uspace } (raw texts).
+ *   where files = { train, verify?, top, coeff, uspace, sissoIn?, sissoOut? }
+ *   (raw texts). SISSO.in / SISSO.out are optional for a single-task run but are
+ *   what lets a multi-task (MT-SISSO) run be split back into its tasks, so the
+ *   check asks for them by name when the coefficient file shows a task layout.
  */
 (function (root, factory) {
   if (typeof module === "object" && module.exports) {
@@ -194,6 +197,7 @@
   }
 
   // top / coeff / Uspace cross-checks + descriptor probes.
+  // `trainData` is the pooled train.dat (all task blocks for an MT-SISSO run).
   function checkModels(F, nameMap, report, trainData) {
     var top = Core.parseTopFile(F.top);
     var coeffs = Core.parseCoeffFile(F.coeff);
@@ -208,6 +212,23 @@
       addWarn(report, "models", "The top-ranked file contains no models — nothing to analyse.");
       return;
     }
+
+    // --- coefficient layout (single-task vs multi-task) ----------------------
+    // Resolved by the SAME function the pipeline uses (non-strict here so we can
+    // report every problem at once). Sharing the resolver is what guarantees the
+    // health check can never green-light a file set the pipeline then refuses.
+    // The health check names its inputs differently (F.sissoIn / F.sissoOut), so
+    // map them onto the pipeline's keys explicitly rather than teaching the core
+    // two spellings for the same thing.
+    var layoutFiles = { sissoInText: F.sissoIn, sissoOutText: F.sissoOut };
+    var mt = Core.resolveLayout(layoutFiles, top, coeffs, trainData, { strict: false });
+    var layoutError = false;
+    for (var li = 0; li < mt.issues.length; li++) {
+      var issue = mt.issues[li];
+      if (issue.level === "error") { addErr(report, "models", issue.message); layoutError = true; }
+      else addWarn(report, "models", issue.message);
+    }
+    if (layoutError) return;
 
     // Every feature id referenced by the top models must exist in Uspace.
     var needed = new Set();
@@ -247,10 +268,183 @@
       return;
     }
 
+    if (mt.multiTask) reportTaskSplit(F, mt, trainData, report);
+
     probeDescriptors(present, trainData, nameMap, report);
+    if (mt.multiTask && mt.nsamples) {
+      probeTaskAggregate(top, coeffs, present, mt, trainData, nameMap, report);
+      probeTaskHeterogeneity(mt, trainData, nameMap, report);
+    }
     addPass(report, "models",
       top.ranks.length + " model(s) read; coefficient rows match and every referenced " +
       "descriptor exists in Uspace.expressions.");
+  }
+
+  // Pass row describing the resolved multi-task split, plus the two facts a user
+  // has to know about an MT-SISSO run: there is no verify.dat, and one that was
+  // dropped anyway.
+  function reportTaskSplit(F, mt, trainData, report) {
+    addPass(report, "mt-tasks",
+      "Multi-task (MT-SISSO) run: " + mt.ntask + " task(s) of " + mt.nsamples.join(" + ") +
+      " = " + trainData.n + " sample(s), read from " + mt.taskSizeSource +
+      " · task_weighting=" + mt.taskWeighting + ". verify.dat is not part of an MT-SISSO run, " +
+      "so no hold-out metrics are expected.");
+    if (F.verify !== undefined && F.verify !== null && String(F.verify).trim()) {
+      addWarn(report, "mt-verify",
+        "A verify.dat was loaded alongside this multi-task run, but a hold-out row carries no " +
+        "task identity (only train.dat is split into tasks), so it cannot be scored and has " +
+        "been ignored.");
+    }
+  }
+
+  // Are the tasks plausibly the SAME property, so that the pooled ("all samples")
+  // R² / ρ mean anything?
+  //
+  // R² and ρ are computed around the pooled mean, so between-task variance lands
+  // in SS_tot: if the task targets sit far apart relative to how much they vary
+  // internally, the pooled R² is inflated — it measures "can I tell the tasks
+  // apart", not "does the model fit". Per-task R² / ρ are unaffected and are the
+  // numbers to read. A cheap between/within spread comparison is enough to warn.
+  function probeTaskHeterogeneity(mt, trainData, nameMap, report) {
+    var target = nameMap[1].new_name;
+    var col = trainData.cols[target];
+    if (!col) return;
+    var means = [], stds = [];
+    for (var t = 0; t < mt.tasks.length; t++) {
+      var tk = mt.tasks[t];
+      var sum = 0, sum2 = 0, n = tk.n;
+      for (var i = tk.start; i < tk.start + n; i++) { sum += col[i]; sum2 += col[i] * col[i]; }
+      var mean = sum / n;
+      means.push(mean);
+      stds.push(Math.sqrt(Math.max(0, sum2 / n - mean * mean)));
+    }
+    var between = Math.max.apply(null, means) - Math.min.apply(null, means);
+    var within = stds.reduce(function (a, v) { return a + v; }, 0) / stds.length;
+    if (!(within > 0)) return;
+    if (between > within) {
+      addWarn(report, "mt-pooled",
+        "The task targets sit further apart than they vary internally (between-task mean spread " +
+        between.toPrecision(4) + " vs average within-task std " + within.toPrecision(4) +
+        "), so the tasks look like different properties or scales. The pooled R² / ρ are then " +
+        "inflated by the between-task spread and should not be read as a fit quality — use the " +
+        "per-task R² / ρ and SISSO's task-aggregated RMSE instead.");
+    } else {
+      addPass(report, "mt-pooled",
+        "The task targets overlap (between-task mean spread " + between.toPrecision(4) +
+        " vs average within-task std " + within.toPrecision(4) +
+        "), so the pooled R² / ρ remain comparable across tasks.");
+    }
+  }
+
+  // Re-compute SISSO's own overall score for a few ranked models straight from
+  // the coefficient blocks, and compare it with the RMSE / MaxAE columns of the
+  // ranked-model file. This is the decisive check on the multi-task layout: the
+  // top file's scores are the task-aggregated ones, so a misread block order (or
+  // a wrong task split) shows up immediately as a mismatch.
+  //
+  // Two things make the verdict trustworthy rather than brittle:
+  //  * the tolerance is relative (1e-5 of the value), because the ranked-model
+  //    file only prints a fixed number of decimals — an absolute tolerance would
+  //    be either too tight for large scores or too loose for small ones;
+  //  * the two metrics are read separately. MaxAE = maxᵢ MaxAEᵢ is unambiguous in
+  //    every weighting scheme, while RMSE depends on the aggregation convention.
+  //    So "MaxAE matches, RMSE does not" means the aggregation convention differs
+  //    (per-task numbers still fine → Warning), whereas "MaxAE also differs"
+  //    means the task blocks themselves were read wrongly (→ Error).
+  function probeTaskAggregate(top, coeffs, present, mt, trainData, nameMap, report) {
+    var target = nameMap[1].new_name;
+    var y = trainData.cols[target];
+    var featureSet = {};
+    for (var fi = 2; fi < nameMap.length; fi++) featureSet[nameMap[fi].new_name] = true;
+
+    var fnById = {};
+    for (var p = 0; p < present.length; p++) {
+      try {
+        fnById[present[p].id] = Core.compileFormula(present[p].renamed);
+      } catch (err) { /* the descriptor probe already reported this */ }
+    }
+
+    var nModels = top.ranks.length;
+    var probes = [0, Math.floor(nModels / 2), nModels - 1].filter(function (v, i, a) {
+      return v >= 0 && v < nModels && a.indexOf(v) === i;
+    });
+
+    // Relative differences (floor 1 so a score near 0 is still compared
+    // meaningfully). A misread layout is off by whole percent, not by 1e-5, so
+    // this keeps full detection power while tolerating however many decimals the
+    // ranked-model file happens to print.
+    var worstRmse = 0, worstMaxae = 0, worstRank = null, checked = 0;
+    for (var pi = 0; pi < probes.length; pi++) {
+      var mi = probes[pi];
+      var ids = top.featureLists[mi];
+      var blocks = Core.taskCoeffBlocks(coeffs[mi], mt.ntask);
+      if (!blocks || blocks[0].length !== ids.length + 1) continue;
+      var perTask = [];
+      var start = 0, usable = true;
+      for (var t = 0; t < mt.ntask && usable; t++) {
+        var n = mt.nsamples[t];
+        var sse = 0, maxAbs = -Infinity;
+        for (var r = start; r < start + n; r++) {
+          var v = blocks[t][0];
+          for (var k = 0; k < ids.length; k++) {
+            var fn = fnById[ids[k]];
+            if (!fn) { usable = false; break; }
+            v += blocks[t][k + 1] * fn(Core.makeFeatureGetter(trainData.cols, featureSet, r));
+          }
+          if (!usable) break;
+          var e = v - y[r];
+          sse += e * e;
+          if (Math.abs(e) > maxAbs) maxAbs = Math.abs(e);
+        }
+        if (!usable) break;
+        perTask.push({ rmse: Math.sqrt(sse / n), maxae: maxAbs });
+        start += n;
+      }
+      if (!usable || perTask.length !== mt.ntask) continue;
+      var agg = Core.aggregateTaskMetrics(perTask, mt.nsamples, mt.taskWeighting);
+      if (!Number.isFinite(agg.rmse)) continue;
+      checked++;
+      var dR = Math.abs(agg.rmse - top.rmses[mi]) / Math.max(1, Math.abs(top.rmses[mi]));
+      var dM = Math.abs(agg.maxae - top.maxaes[mi]) / Math.max(1, Math.abs(top.maxaes[mi]));
+      if (dR > worstRmse || dM > worstMaxae) worstRank = top.ranks[mi];
+      if (dR > worstRmse) worstRmse = dR;
+      if (dM > worstMaxae) worstMaxae = dM;
+    }
+
+    if (!checked) {
+      addWarn(report, "mt-aggregate",
+        "Could not recompute SISSO's overall RMSE for any sampled model — the per-task split " +
+        "could not be verified.");
+      return;
+    }
+    var FLOOR = 1e-5; // matches tol() at |value| <= 1
+    if (worstRmse <= FLOOR && worstMaxae <= FLOOR) {
+      addPass(report, "mt-aggregate",
+        "Task aggregation verified on " + checked + " sampled model(s): the recomputed overall " +
+        "RMSE / MaxAE reproduce the ranked-model file to " +
+        Math.max(worstRmse, worstMaxae).toExponential(1) + " (relative; task_weighting=" +
+        mt.taskWeighting + ").");
+      return;
+    }
+    var where = worstRank !== null ? " (e.g. model " + worstRank + ")" : "";
+    if (worstMaxae <= FLOOR) {
+      // MaxAE = maxᵢ MaxAEᵢ is weighting-independent, so the task blocks were read
+      // correctly; only the RMSE aggregation convention disagrees.
+      addWarn(report, "mt-aggregate",
+        "The task blocks read correctly — recomputed MaxAE = maxᵢ MaxAEᵢ matches the ranked-model " +
+        "file" + where + " — but the recomputed overall RMSE differs by " +
+        worstRmse.toExponential(2) + " (relative). SISSO's aggregation convention for " +
+        "task_weighting=" + mt.taskWeighting + " therefore differs from the documented one " +
+        "(sqrt(Σ wᵢ·RMSEᵢ²)); the per-task metrics below are unaffected and correct.");
+      return;
+    }
+    addErr(report, "mt-aggregate",
+      "The recomputed overall RMSE and MaxAE do not reproduce the ranked-model file (relative " +
+      "differences " + worstRmse.toExponential(2) + " / " + worstMaxae.toExponential(2) + where +
+      "). MaxAE is weighting-independent, so this points at the task split or the coefficient " +
+      "block order rather than at the aggregation formula — the per-task metrics would be " +
+      "misattributed. Check that SISSO.in's nsample list and the coefficient file belong to " +
+      "this run.");
   }
 
   // Compile each needed descriptor and evaluate it over the train samples to

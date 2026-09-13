@@ -31,7 +31,9 @@
     colorKey: "",   // "" = class colors; otherwise a column letter to color by
     detailTab: "scatter",   // detail dialog chart view: "scatter" (predicted vs
                             // true) or "error" (residual histogram)
-    errorDataset: "train",  // residual histogram dataset: "train" | "verify"
+    detailDataset: "all",     // dataset shown by the detail dialog: "all" draws
+                              // every dataset at once (the default), otherwise a
+                              // specific "train" | "verify" | "t1"…"tN"
     errorChart: null,       // echarts instance for the residual histogram
     paretoX: null,  // Pareto axis spec: { dataset, metric } — e.g. {train, rmse}
     paretoY: null,  // (legacy sessions stored bare metric keys; coerceParetoAxes migrates)
@@ -245,44 +247,14 @@
   }
 
   // ---------------------------------------------------------------------------
-  // SISSO.in parsing (run settings: features / dimension / complexity)
+  // SISSO.in parsing (run settings: features / dimension / complexity / tasks)
   // ---------------------------------------------------------------------------
+  // The parsing itself lives in the engine (SissoCore.parseSissoIn) because the
+  // pipeline needs ntask / nsample / task_weighting to split a multi-task run
+  // into its task blocks; this stays a thin wrapper so the UI keeps one entry
+  // point for the run-settings cards.
   function parseSissoIn(text) {
-    var out = { nsample: null, nsf: null, descDim: null, fcomplexity: null, ptype: null };
-    var lines = String(text).split(/\r?\n/);
-    for (var i = 0; i < lines.length; i++) {
-      // strip comments: '!' (Fortran style) and '#' / '//' as tolerated extras
-      var line = lines[i];
-      var cut = line.length;
-      var b1 = line.indexOf("!");
-      var b2 = line.indexOf("#");
-      if (b1 >= 0 && b1 < cut) cut = b1;
-      if (b2 >= 0 && b2 < cut) cut = b2;
-      var core = line.slice(0, cut).trim();
-      if (!core) continue;
-      var eq = core.indexOf("=");
-      if (eq < 1) continue;
-      var key = core.slice(0, eq).trim().toLowerCase().replace(/^[^a-z0-9]+/, "");
-      var val = core.slice(eq + 1).trim();
-      // accept numbers that may sit inside parens / comma lists / trailing ';'
-      var nums = (val.match(/[+-]?\d+(?:\.\d+)?(?:[de][+-]?\d+)?/gi) || [])
-        .map(function (s) { return parseFloat(s.replace(/[de]/i, "e")); });
-      if (!nums.length) continue;
-      // SISSO renamed its keywords over versions, so accept the common aliases.
-      switch (key) {
-        case "nsample": case "n_sample": case "nsamples": case "nsets":
-          out.nsample = nums[0]; break;
-        case "nsf": case "n_features": case "nsf_":
-          out.nsf = nums[0]; break;
-        case "desc_dim": case "dimension": case "descriptor_dim":
-          out.descDim = nums[0]; break;
-        case "fcomplexity": case "maxcomplexity": case "complexity": case "n_rung":
-          out.fcomplexity = nums[0]; break;
-        case "ptype":
-          out.ptype = nums[0]; break;
-      }
-    }
-    return out;
+    return Core.parseSissoIn(text);
   }
 
   // Complexity fallback: when SISSO.in did not provide fcomplexity, estimate the
@@ -1382,6 +1354,11 @@
         top: roleTexts.top,
         coeff: roleTexts.coeff,
         uspace: roleTexts.uspace,
+        // SISSO.in / SISSO.out are optional for a single-task run, but they are
+        // what tells a multi-task (MT-SISSO) run how train.dat is split into
+        // tasks — the check reports their absence as a blocker in that case.
+        sissoIn: roleTexts.sissoin,
+        sissoOut: roleTexts.sissoout,
       });
       if (state.health.level === "error") {
         renderHealthReport(state.health, $("#health-block"));
@@ -1413,6 +1390,11 @@
     files.coeffText = roleTexts.coeff;
     files.topText = roleTexts.top;
     if (roleTexts.verify !== undefined) files.verifyText = roleTexts.verify;
+    // Passed through so the pipeline can detect and split a multi-task
+    // (MT-SISSO) run: ntask / nsample / task_weighting live in SISSO.in and
+    // SISSO.out, and the coefficient file only stores the interleaved blocks.
+    if (roleTexts.sissoin !== undefined) files.sissoInText = roleTexts.sissoin;
+    if (roleTexts.sissoout !== undefined) files.sissoOutText = roleTexts.sissoout;
 
     // keep the raw texts so the project can be saved / re-exported later
     state.texts = {};
@@ -1462,6 +1444,11 @@
     state.usageExpanded = { feature: false, descriptor: false };
     state.compareSel = [];
     disposeCompareChart();
+    // A fresh analysis starts with the detail dialog on "all datasets", so a
+    // dataset picked in a previous run can never leave a new one showing a
+    // single task.
+    state.detailDataset = "all";
+    state.detailTab = "scatter";
 
     // Enrich the run metadata with SISSO.in settings, with safe fallbacks so
     // the dimension / complexity cards still show when SISSO.in is missing or
@@ -1533,6 +1520,7 @@
     if (ctx) {
       var label = res.meta.targetName || "";
       if (res.meta.sissoIn && res.meta.sissoIn.descDim !== null) label += " · " + res.meta.sissoIn.descDim + "D";
+      if (res.meta.multiTask) label += " · MT ×" + res.meta.ntask;
       ctx.textContent = label;
       ctx.hidden = !label;
     }
@@ -1559,11 +1547,23 @@
     strip.innerHTML = "";
     var info = res.meta.sissoIn || null;
     var fromIn = I18N.t("projectFromSissoIn");
-    var kpis = [
-      [I18N.t("kpiModels"), res.meta.nModels],
-      [I18N.t("kpiTrain"), res.meta.nTrain],
-      [I18N.t("kpiVerify"), res.meta.nVerify || I18N.t("noVerify")],
-    ];
+    var kpis;
+    if (res.meta.multiTask) {
+      // MT-SISSO: train.dat holds every task stacked, and there is no verify.dat.
+      // Show the pooled sample count, the task count (with the split as a
+      // tooltip) and the target standard deviation of each task.
+      kpis = [
+        [I18N.t("kpiModels"), res.meta.nModels],
+        [I18N.t("kpiTrain"), res.meta.nTrain],
+        [I18N.t("kpiTasks"), res.meta.ntask],
+      ];
+    } else {
+      kpis = [
+        [I18N.t("kpiModels"), res.meta.nModels],
+        [I18N.t("kpiTrain"), res.meta.nTrain],
+        [I18N.t("kpiVerify"), res.meta.nVerify || I18N.t("noVerify")],
+      ];
+    }
     // Number of features: prefer SISSO.in's nsf when the file was uploaded,
     // otherwise fall back to the column count of train.dat.
     if (info && info.nsf !== null) {
@@ -1588,6 +1588,121 @@
       if (k[2]) card.title = k[2];
       strip.appendChild(card);
     });
+
+    if (res.meta.multiTask) {
+      // One extra card spelling out the task split (counts + weighting), which
+      // is the single most important piece of run bookkeeping for MT-SISSO.
+      var card = el("div", "kpi");
+      card.appendChild(el("div", "kpi__label", I18N.t("kpiTaskSplit")));
+      card.appendChild(el("div", "kpi__value", (res.meta.nsamples || []).join(" + ")));
+      card.title = I18N.format("kpiTaskSplitHint", {
+        n: res.meta.ntask,
+        weighting: res.meta.taskWeighting,
+        source: res.meta.taskSizeSource || "—",
+      });
+      strip.appendChild(card);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Datasets — one addressing scheme for single-task and multi-task runs.
+  //
+  // The engine hands out a dataset token per view of the data:
+  //   "train"  the training set, or the whole *pooled* stacked train.dat of a
+  //            multi-task (MT-SISSO) run,
+  //   "t1"…"tN" the per-task blocks of a multi-task run,
+  //   "verify" the hold-out file of a single-task run,
+  //   "delta"  the train → verify generalization gap (single-task only).
+  // Table columns, Pareto axes, Compare rows, thumbnails, the detail dialog and
+  // every CSV export read the data through these helpers, so support for the
+  // next dataset shape never turns into a per-view branch.
+  // ---------------------------------------------------------------------------
+
+  function runDatasets() {
+    return state.result ? Core.availableDatasets(state.result) : ["train"];
+  }
+
+  // Datasets drawn *together* in a predicted-vs-true scatter (detail dialog and
+  // Compare). A multi-task run plots its task blocks: the pooled "train" dataset
+  // is their exact concatenation, so drawing it as well would put a second,
+  // redundant point under every task point. A single-task run keeps the
+  // historical train + verify pair.
+  function scatterDatasets() {
+    var keys = runDatasets();
+    if (isMultiTask()) {
+      return keys.filter(function (k) { return k !== "train"; });
+    }
+    return keys;
+  }
+
+  function isMultiTask() {
+    return !!(state.result && state.result.meta && state.result.meta.multiTask);
+  }
+
+  function multiTaskInfo() {
+    return state.result && state.result.meta ? state.result.meta : null;
+  }
+
+  // Human label of a dataset token: "train" / "pooled" / "verify" / "task 2".
+  // The special token "all" is only used by the detail dialog's selector.
+  function datasetLabel(key) {
+    if (key === "all") return I18N.t("dsAll");
+    if (key === "verify") return I18N.t("detailVerify");
+    if (key === "delta") return I18N.t("detailDeltaShort");
+    var task = state.result ? Core.datasetTask(state.result, key) : null;
+    if (task) return I18N.format("dsTask", { n: task.index });
+    return I18N.t(isMultiTask() ? "dsPooled" : "detailTrain");
+  }
+
+  // Longer, self-explanatory label used in tooltips ("task 2 · 33 samples").
+  function datasetLongLabel(key) {
+    if (key === "all") return I18N.t("dsAllHint");
+    var task = state.result ? Core.datasetTask(state.result, key) : null;
+    if (task) return I18N.format("dsTaskSamples", { n: task.index, count: task.n });
+    var data = datasetData(key);
+    return datasetLabel(key) + (data ? " · " + I18N.format("dsSamples", { count: data.n }) : "");
+  }
+
+  // Per-dataset colours and point symbols. The first two keep the historical
+  // train (blue) / verify (amber) identity, so single-task runs look unchanged;
+  // the task blocks of a multi-task run get the colours after those.
+  var DATASET_SYMBOLS = ["circle", "triangle", "rect", "diamond", "roundRect", "pin"];
+  var DATASET_EXTRA_COLORS = ["#0d9488", "#9333ea", "#be123c", "#2563eb", "#65a30d", "#c2410c"];
+
+  function datasetColor(key) {
+    var C = getThemeColors();
+    if (key === "verify") return C.verify;
+    if (key === "train") return C.train;
+    var idx = 0;
+    var res = state.result;
+    if (res && res.tasks) {
+      for (var i = 0; i < res.tasks.length; i++) {
+        if (res.tasks[i].key === key) { idx = i; break; }
+      }
+    }
+    return DATASET_EXTRA_COLORS[idx % DATASET_EXTRA_COLORS.length];
+  }
+
+  function datasetSymbol(key) {
+    var keys = runDatasets();
+    var i = keys.indexOf(key);
+    return DATASET_SYMBOLS[(i < 0 ? 0 : i) % DATASET_SYMBOLS.length];
+  }
+
+  // Dataset object (n / names / cols) and prediction series behind a token.
+  function datasetData(key) {
+    return state.result ? Core.datasetData(state.result, key) : null;
+  }
+
+  function datasetPrediction(m, key) {
+    return Core.modelPrediction(m, key);
+  }
+
+  function datasetSampleCount(key) {
+    var task = state.result ? Core.datasetTask(state.result, key) : null;
+    if (task) return task.n;
+    var data = datasetData(key);
+    return data ? data.n : 0;
   }
 
   // ---------------------------------------------------------------------------
@@ -1607,6 +1722,8 @@
     { metric: "r2", labelKey: "metricR2" },
     { metric: "rho", labelKey: "metricRho" },
   ];
+  // Metric token list — the same keys Core.metricValue / metricSortEndpoint use.
+  var METRIC_KEYS = COL_METRICS.map(function (d) { return d.metric; });
 
   function metricValue(m, metric, dataset) {
     // Single source of truth: everything reads through SissoCore.metricValue
@@ -1633,27 +1750,46 @@
   function buildTableColumns() {
     var hasVerify = !!(state.result && state.result.verify);
     // Column order in the overview table: batch-check, rank, model formula,
-    // ACTIONS, then the train / verify / Δ metric columns — the row actions
+    // ACTIONS, then the dataset metric columns — the row actions
     // (View · favourite · exclude) sit right after the formula, not at the end.
+    //
+    // The dataset list drives the columns: a single-task run yields
+    // train / verify (/ Δ) exactly as before, and a multi-task run yields the
+    // pooled dataset plus one column per task, so "the same metric across
+    // tasks" reads across the row.
+    var datasets = runDatasets();
     var cols = [
       { id: "rank", label: function () { return I18N.t("colRank"); }, numeric: false, get: function (m) { return m.rank; } },
-      { id: "formula", label: function () { return I18N.t("colFormula"); }, numeric: false, get: function (m) { return m.formulaOriginal; } },
+      {
+        id: "formula",
+        // A multi-task model has one coefficient set per task; the table shows
+        // the first task's formula (the dialog lists them all).
+        label: function () {
+          return isMultiTask() ? I18N.t("colFormulaMT") : I18N.t("colFormula");
+        },
+        numeric: false,
+        get: function (m) { return m.formulaOriginal; },
+      },
       {
         id: "actions", label: function () { return I18N.t("colActions"); }, numeric: false, get: function () { return null; },
       },
     ];
     COL_METRICS.forEach(function (d) {
-      cols.push({
-        id: d.metric + "-train", label: function () { return I18N.t(d.labelKey) + " (" + I18N.t("detailTrain") + ")"; },
-        numeric: true, metric: d.metric, dataset: "train",
-        get: function (m) { return metricValue(m, d.metric, "train"); },
+      datasets.forEach(function (ds) {
+        // On a multi-task run the pooled R² / ρ absorb the between-task spread
+        // (they are computed around the pooled mean), so they read optimistically.
+        // The column stays — with a tooltip — because it is still the only
+        // single-number summary of the whole stacked file.
+        var relative = isMultiTask() && ds === "train" && (d.metric === "r2" || d.metric === "rho");
+        cols.push({
+          id: d.metric + "-" + ds,
+          label: function () { return I18N.t(d.labelKey) + " (" + datasetLabel(ds) + ")"; },
+          hint: relative ? function () { return I18N.t("pooledRelativeHint"); } : null,
+          numeric: true, metric: d.metric, dataset: ds,
+          get: function (m) { return metricValue(m, d.metric, ds); },
+        });
       });
       if (hasVerify) {
-        cols.push({
-          id: d.metric + "-verify", label: function () { return I18N.t(d.labelKey) + " (" + I18N.t("detailVerify") + ")"; },
-          numeric: true, metric: d.metric, dataset: "verify",
-          get: function (m) { return metricValue(m, d.metric, "verify"); },
-        });
         cols.push({
           id: d.metric + "-delta", label: function () { return deltaColLabel(d.labelKey); },
           hint: function () { return deltaMetricDefinition(d.metric, d.labelKey); },
@@ -1745,8 +1881,7 @@
       for (var di = 0; di < datasets.length; di++) {
         var isDeltaGroup = datasets[di] === "delta";
         var group = el("optgroup");
-        group.label = isDeltaGroup ? I18N.t("paretoDeltaGroup")
-          : I18N.t(datasets[di] === "verify" ? "detailVerify" : "detailTrain");
+        group.label = isDeltaGroup ? I18N.t("paretoDeltaGroup") : datasetLabel(datasets[di]);
         for (var mi = 0; mi < PARETO_METRICS.length; mi++) {
           var d = PARETO_METRICS[mi];
           // Delta is defined "smaller = better" for all four metrics, so the
@@ -1951,8 +2086,8 @@
     var sk = state.sortKey.split("-");
     var metric = sk[0];
     var dataset = sk.length > 1 ? sk[1] : "";
-    var metricKey = (dataset === "verify" || dataset === "delta" || dataset === "train")
-      && (metric === "rmse" || metric === "mae" || metric === "maxae" || metric === "r2" || metric === "rho")
+    var metricKey = METRIC_KEYS.indexOf(metric) >= 0 &&
+      (dataset === "delta" || runDatasets().indexOf(dataset) >= 0)
       ? metric : null;
 
     // Normalise non-finite metrics to a deterministic endpoint so NaN values
@@ -2063,19 +2198,28 @@
   }
 
   // One text block per model (see the function header for the format).
+  // A multi-task model lists its per-task formulas and carries one metric line
+  // per dataset, so a pasted comparison shows the task spread too.
   function batchModelText(m) {
-    var formula = m.formulaOriginal;
-    try { formula = Core.formulaToLatex(m.formulaOriginal); } catch (e) { /* unparsable formula → keep original text */ }
-    var lines = ["model" + m.rank + "：" + formula];
+    var lines = [];
+    var formulas = modelFormulaLines(m);
+    formulas.forEach(function (row, i) {
+      var latex = row.text;
+      try { latex = Core.formulaToLatex(row.text); } catch (e) { /* unparsable → keep original */ }
+      var tag = formulas.length > 1 ? "[" + (row.label || (i + 1)) + "]" : "";
+      lines.push("model" + m.rank + tag + "：" + latex);
+    });
     var metricDefs = [["rmse", "RMSE"], ["mae", "MAE"], ["maxae", "MaxAE"], ["r2", "R2"], ["rho", "rho"]];
-    var datasets = ["train"];
-    if (m.metricsVerify) datasets.push("verify");
+    var datasets = runDatasets();
     metricDefs.forEach(function (def) {
       datasets.forEach(function (ds) {
-        var ms = ds === "verify" ? m.metricsVerify : m.metricsTrain;
-        lines.push(def[1] + "_" + ds + ": " + fmtBatchMetric(ms ? ms[def[0]] : NaN));
+        lines.push(def[1] + "_" + ds + ": " + fmtBatchMetric(Core.metricValue(m, ds, def[0])));
       });
     });
+    if (Number.isFinite(m.overallRmse)) {
+      lines.push("RMSE_sisso_overall: " + fmtBatchMetric(m.overallRmse));
+      lines.push("MaxAE_sisso_overall: " + fmtBatchMetric(m.overallMaxae));
+    }
     return lines.join("\n");
   }
 
@@ -2317,19 +2461,33 @@
     }, { rootMargin: "200px" });
   }
 
-  // One metric row on a thumbnail card: label + train value + verify value.
-  // Train / verify numbers are tinted like the scatter points (blue/amber).
-  function appendMetricLine(container, label, trainValue, verifyValue) {
+  // One metric row on a thumbnail card: label + one value chip per dataset.
+  // A single-task run passes the historical train / verify pair; a multi-task run
+  // passes the pooled value followed by one chip per task. The chips are tinted
+  // like the scatter points of the matching dataset.
+  function appendMetricLine(container, label, values) {
     var row = el("div", "metric-line");
     row.appendChild(el("span", "metric-line__label", label));
     var vals = el("span", "metric-line__values");
-    vals.appendChild(el("span", "metric-line__val is-train", fmt(trainValue, 3)));
-    if (verifyValue !== undefined) {
-      vals.appendChild(el("span", "metric-line__sep", "/"));
-      vals.appendChild(el("span", "metric-line__val is-verify", fmt(verifyValue, 3)));
-    }
+    values.forEach(function (v, i) {
+      if (i > 0) vals.appendChild(el("span", "metric-line__sep", "/"));
+      var chip = el("span", "metric-line__val " + (v.cls || "is-train"), fmt(v.value, 3));
+      if (v.title) chip.title = v.title;
+      vals.appendChild(chip);
+    });
     row.appendChild(vals);
     container.appendChild(row);
+  }
+
+  // Value chips for one metric over every dataset of the run.
+  function metricLineValues(m, metric) {
+    return runDatasets().map(function (ds) {
+      return {
+        value: Core.metricValue(m, ds, metric),
+        cls: ds === "verify" ? "is-verify" : ds === "train" ? "is-train" : "is-task",
+        title: datasetLongLabel(ds),
+      };
+    });
   }
 
   function renderGrid() {
@@ -2354,13 +2512,11 @@
       body.appendChild(el("div", "model-card__title", "Model " + m.rank));
       var metrics = el("div", "model-card__metrics");
       // Headline metrics on a thumbnail card: mean error (RMSE, and its
-      // outlier-robust companion MAE) plus the rank correlation.
-      appendMetricLine(metrics, "RMSE",
-        m.metricsTrain.rmse, m.metricsVerify ? m.metricsVerify.rmse : undefined);
-      appendMetricLine(metrics, "MAE",
-        m.metricsTrain.mae, m.metricsVerify ? m.metricsVerify.mae : undefined);
-      appendMetricLine(metrics, "ρ",
-        m.metricsTrain.rho, m.metricsVerify ? m.metricsVerify.rho : undefined);
+      // outlier-robust companion MAE) plus the rank correlation, each shown for
+      // every dataset of the run (pooled + tasks on a multi-task run).
+      appendMetricLine(metrics, "RMSE", metricLineValues(m, "rmse"));
+      appendMetricLine(metrics, "MAE", metricLineValues(m, "mae"));
+      appendMetricLine(metrics, "ρ", metricLineValues(m, "rho"));
       body.appendChild(metrics);
       card.appendChild(body);
 
@@ -2388,10 +2544,20 @@
     svg.setAttribute("height", "100%");
     svg.classList.add("model-card__thumb");
 
+    // One point group per dataset, so a multi-task model shows every task
+    // block overlaid (each in its own colour / symbol) and a single-task run
+    // keeps the familiar train + verify pair.
+    var groups = [];
     var allX = [], allY = [];
-    var trainPts = buildPoints(res.train, m.predTrain, "train");
-    var verifyPts = res.verify ? buildPoints(res.verify, m.predVerify, "verify") : [];
-    trainPts.concat(verifyPts).forEach(function (p) { allX.push(p[0]); allY.push(p[1]); });
+    runDatasets().forEach(function (ds) {
+      var data = datasetData(ds);
+      var pred = datasetPrediction(m, ds);
+      if (!data || !pred) return;
+      var pts = buildPoints(data, pred, ds);
+      if (!pts.length) return;
+      groups.push({ key: ds, pts: pts });
+      pts.forEach(function (p) { allX.push(p[0]); allY.push(p[1]); });
+    });
     if (!allX.length) return svg;
 
     var x0 = Math.min.apply(null, allX), x1 = Math.max.apply(null, allX);
@@ -2411,27 +2577,40 @@
     line.setAttribute("stroke-width", "1");
     svg.appendChild(line);
 
-    drawPts(svg, trainPts, C.train, "circle", sx, sy);
-    drawPts(svg, verifyPts, C.verify, "triangle", sx, sy);
+    groups.forEach(function (g) {
+      drawPts(svg, g.pts, datasetColor(g.key), datasetSymbol(g.key), sx, sy);
+    });
 
     return svg;
   }
 
+  // Mini-SVG marker for one point. Shapes mirror the ECharts symbols used by the
+  // big scatter, so a dataset keeps its identity across both views.
   function drawPts(svg, pts, color, shape, sx, sy) {
     var cap = 400;
+    var NS = "http://www.w3.org/2000/svg";
     for (var i = 0; i < pts.length && i < cap; i++) {
+      var x = sx(pts[i][0]), y = sy(pts[i][1]), r = 2.6;
       var node;
       if (shape === "circle") {
-        node = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        node.setAttribute("r", "2.2");
-        node.setAttribute("cx", sx(pts[i][0]));
-        node.setAttribute("cy", sy(pts[i][1]));
+        node = document.createElementNS(NS, "circle");
+        node.setAttribute("r", String(r));
+        node.setAttribute("cx", String(x));
+        node.setAttribute("cy", String(y));
       } else {
-        node = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        var x = sx(pts[i][0]), y = sy(pts[i][1]), r = 3;
-        node.setAttribute("d",
-          "M" + x + " " + (y - r) + " L" + (x + r) + " " + (y + r) +
-          " L" + (x - r) + " " + (y + r) + " Z");
+        node = document.createElementNS(NS, "path");
+        var d;
+        if (shape === "rect") {
+          d = "M" + (x - r) + " " + (y - r) + " h" + (2 * r) + " v" + (2 * r) +
+            " h" + (-2 * r) + " Z";
+        } else if (shape === "diamond") {
+          d = "M" + x + " " + (y - r * 1.3) + " L" + (x + r * 1.3) + " " + y +
+            " L" + x + " " + (y + r * 1.3) + " L" + (x - r * 1.3) + " " + y + " Z";
+        } else { // triangle
+          d = "M" + x + " " + (y - r * 1.2) + " L" + (x + r * 1.2) + " " + (y + r) +
+            " L" + (x - r * 1.2) + " " + (y + r) + " Z";
+        }
+        node.setAttribute("d", d);
       }
       node.setAttribute("fill", color);
       node.setAttribute("opacity", "0.65");
@@ -2552,7 +2731,14 @@
     if (!res) return;
     var datasets = paretoDatasets();
     var dim = state.paretoMode === "3d" ? 3 : 2;
-    var fallbackDs = datasets.indexOf("verify") >= 0 ? "verify" : "train";
+    // Default Y dataset: the first non-primary dataset in the run — "verify" for
+    // a single-task run (unchanged) and "t1" for a multi-task run, so the default
+    // 2D view contrasts the pooled score against the first task rather than two
+    // metrics of the same dataset.
+    var fallbackDs = "train";
+    for (var fi = 0; fi < datasets.length; fi++) {
+      if (datasets[fi] !== "train" && datasets[fi] !== "delta") { fallbackDs = datasets[fi]; break; }
+    }
     var specs = [
       paretoNormalizeAxis(state.paretoX, { dataset: "train", metric: "rmse" }),
       paretoNormalizeAxis(state.paretoY, { dataset: fallbackDs, metric: "rmse" }),
@@ -2599,8 +2785,8 @@
     for (var i = 0; i < dim; i++) {
       var a = state[keys[i]] || { dataset: "train", metric: "rmse" };
       var d = paretoMetricDef(a.metric);
-      var dataset = a.dataset === "verify" ? "verify"
-        : a.dataset === "delta" ? "delta" : "train";
+      var dataset = a.dataset === "delta" ? "delta"
+        : (runDatasets().indexOf(a.dataset) >= 0 ? a.dataset : "train");
       defs.push({
         code: codes[i],
         dataset: dataset,
@@ -2653,10 +2839,10 @@
     return Core.paretoFront3D(pts, xDef.minimize, yDef.minimize, zDef.minimize);
   }
 
-  // Short axis dataset tag: Train / Verify / Δ (validation − train).
+  // Short axis dataset tag: train / pooled / verify / task n / Δ (validation − train).
   function paretoDatasetLabel(dataset) {
     if (dataset === "delta") return I18N.t("detailDelta");
-    return I18N.t(dataset === "verify" ? "detailVerify" : "detailTrain");
+    return datasetLabel(dataset);
   }
 
   // Dataset-aware axis display name: "RMSE (Train) ↓" — reads the dataset the
@@ -4099,7 +4285,7 @@
   }
 
   function metricLabelOf(row) {
-    var d = I18N.t(row.dataset === "verify" ? "detailVerify" : "detailTrain");
+    var d = datasetLabel(row.dataset);
     var m = row.metric === "rmse" ? I18N.t("metricRMSE")
       : row.metric === "mae" ? I18N.t("metricMAE")
       : row.metric === "maxae" ? I18N.t("metricMaxAE")
@@ -4144,7 +4330,7 @@
       if (isExcludedModel(m)) h.appendChild(el("span", "state-tag state-tag--excl", I18N.t("exclTag")));
       card.appendChild(h);
       var code = el("div", "compare-formula-card__code");
-      setFormulaContent(code, m.formulaOriginal);
+      renderFormulaBlock(code, m);
       card.appendChild(code);
       grid.appendChild(card);
     });
@@ -4166,7 +4352,7 @@
     });
     thead.appendChild(hr);
     table.appendChild(thead);
-    var rows = Core.compareMetricRows(models);
+    var rows = Core.compareMetricRows(models, state.result);
     var tbody = el("tbody");
     rows.forEach(function (row) {
       // Direction-aware winner per row: rmse / mae / maxae — smaller is better,
@@ -4218,10 +4404,12 @@
     state.compareChart.setOption(option);
   }
 
-  // Export the currently open model's per-sample rows as CSV — TWO files so
-  // train and verify plot cleanly side by side in any tool:
-  //   sisso-model-{rank}-train.csv    sample / true / pred / error (train)
-  //   sisso-model-{rank}-verify.csv   sample / true / pred / error (verify, when loaded)
+  // Export the currently open model's per-sample rows as CSV — one file per
+  // dataset, so every slice plots cleanly on its own:
+  //   sisso-model-{rank}-train.csv    sample / true / pred / error (pooled rows)
+  //   sisso-model-{rank}-verify.csv   … (verify, single-task runs)
+  //   sisso-model-{rank}-t1.csv       … (task 1 of a multi-task run)
+  //   …
   // Each file is rectangular (no empty column blocks to skip while plotting).
   // Values are the exact numbers behind the predicted-vs-true scatter and the
   // error-distribution tab, exported with full floating-point precision.
@@ -4241,30 +4429,81 @@
       }
       return rows.length > 1 ? rows : null;
     }
-    var trainRows = rowsFor(res.train, m.predTrain);
-    var verifyRows = (res.verify && m.predVerify) ? rowsFor(res.verify, m.predVerify) : null;
-    var tN = trainRows ? trainRows.length - 1 : 0;
-    var vN = verifyRows ? verifyRows.length - 1 : 0;
-    if (!tN && !vN) { toast(I18N.t("detailCsvEmpty")); return; }
-    if (trainRows) {
-      downloadTextFile("sisso-model-" + m.rank + "-train.csv",
-        Core.rowsToCsv(trainRows), "text/csv;charset=utf-8");
-    }
-    if (verifyRows) {
-      downloadTextFile("sisso-model-" + m.rank + "-verify.csv",
-        Core.rowsToCsv(verifyRows), "text/csv;charset=utf-8");
-    }
-    if (vN) {
-      toast(I18N.format("detailCsvExportedPair", {
-        rank: m.rank, t: tN, v: vN,
-        tf: "sisso-model-" + m.rank + "-train.csv",
-        vf: "sisso-model-" + m.rank + "-verify.csv",
-      }));
-    } else {
+
+    var written = [];
+    runDatasets().forEach(function (ds) {
+      var rows = rowsFor(datasetData(ds), datasetPrediction(m, ds));
+      if (!rows) return;
+      var file = "sisso-model-" + m.rank + "-" + ds + ".csv";
+      downloadTextFile(file, Core.rowsToCsv(rows), "text/csv;charset=utf-8");
+      written.push({ file: file, n: rows.length - 1, dataset: ds });
+    });
+    if (!written.length) { toast(I18N.t("detailCsvEmpty")); return; }
+
+    if (written.length === 1) {
       toast(I18N.format("detailCsvExported", {
-        n: tN, rank: m.rank, file: "sisso-model-" + m.rank + "-train.csv",
+        n: written[0].n, rank: m.rank, file: written[0].file,
       }));
+      return;
     }
+    // Two datasets keep the historical train/verify wording; three or more
+    // (a multi-task run) list every file that was written.
+    if (written.length === 2 &&
+        written[0].dataset === "train" && written[1].dataset === "verify") {
+      toast(I18N.format("detailCsvExportedPair", {
+        rank: m.rank, t: written[0].n, v: written[1].n,
+        tf: written[0].file, vf: written[1].file,
+      }));
+      return;
+    }
+    toast(I18N.format("detailCsvExportedMany", {
+      rank: m.rank,
+      files: written.map(function (w) {
+        return w.file + " (" + datasetLabel(w.dataset) + ", " + w.n + ")";
+      }).join(" · "),
+    }));
+  }
+
+  // The formula text shown / copied for a model, as { label, text } rows. A
+  // multi-task model has one coefficient set per task; the whole set is what a
+  // user wants to copy, so every task gets its own labelled row.
+  function modelFormulaLines(m) {
+    var tasks = m && m.formulasOriginalByTask;
+    if (tasks && tasks.length > 1) {
+      return tasks.map(function (f, i) {
+        var task = Core.datasetTask(state.result, "t" + (i + 1));
+        return { label: task ? task.label : "task " + (i + 1), text: f };
+      });
+    }
+    return [{ label: "", text: m ? m.formulaOriginal : "" }];
+  }
+
+  function modelFormulaText(m) {
+    return modelFormulaLines(m).map(function (row) {
+      return row.label ? row.label + ":  " + row.text : row.text;
+    }).join("\n");
+  }
+
+  // Render the formula block of a model: a single line for a single-task model,
+  // one labelled line per task for a multi-task (MT-SISSO) model.
+  function renderFormulaBlock(node, m) {
+    if (!node) return;
+    node.textContent = "";
+    var rows = modelFormulaLines(m);
+    if (rows.length < 2) {
+      setFormulaContent(node, rows.length ? rows[0].text : "");
+      return;
+    }
+    rows.forEach(function (row, i) {
+      var tag = el("span", "formula-block__task", row.label + "  ");
+      var task = Core.datasetTask(state.result, "t" + (i + 1));
+      if (task) {
+        tag.title = I18N.format("detailTaskFormulaHint", { n: task.index, count: task.n });
+      }
+      node.appendChild(tag);
+      node.appendChild(colorizeFormula(row.text));
+      node.appendChild(document.createTextNode("\n"));
+    });
   }
 
   function openDetail(rank) {
@@ -4277,7 +4516,7 @@
     state.currentModel = m;
 
     $("#dialog-title").textContent = I18N.t("detailRank") + " " + m.rank;
-    setFormulaContent($("#formula-code"), m.formulaOriginal);
+    renderFormulaBlock($("#formula-code"), m);
     renderMetricGrid(m);
     syncDetailStateButtons();
 
@@ -4298,28 +4537,65 @@
     if (state.errorChart) { state.errorChart.dispose(); state.errorChart = null; }
   }
 
+  // Fit-statistics cards of the open model.
+  //   • single-task: one card per metric and per dataset (train / verify),
+  //     exactly as before;
+  //   • multi-task: the five metrics of the pooled dataset plus one RMSE card
+  //     per task, so the task spread is visible without opening the table.
   function renderMetricGrid(m) {
     var grid = $("#metric-grid");
     grid.innerHTML = "";
-    var hasVerify = !!m.metricsVerify;
-    var rows = [
-      ["RMSE", m.metricsTrain.rmse, hasVerify ? m.metricsVerify.rmse : null],
-      ["MAE", m.metricsTrain.mae, hasVerify ? m.metricsVerify.mae : null],
-      ["MaxAE", m.metricsTrain.maxae, hasVerify ? m.metricsVerify.maxae : null],
-      ["R²", m.metricsTrain.r2, hasVerify ? m.metricsVerify.r2 : null],
-      ["ρ", m.metricsTrain.rho, hasVerify ? m.metricsVerify.rho : null],
-    ];
-    rows.forEach(function (r) {
-      var card = el("div", "metric-card");
-      card.appendChild(el("div", "metric-card__label", r[0] + " · " + I18N.t("detailTrain")));
-      card.appendChild(el("div", "metric-card__value", fmt(r[1], 4)));
-      grid.appendChild(card);
-      if (hasVerify) {
-        var vc = el("div", "metric-card");
-        vc.appendChild(el("div", "metric-card__label", r[0] + " · " + I18N.t("detailVerify")));
-        vc.appendChild(el("div", "metric-card__value", fmt(r[2], 4)));
-        grid.appendChild(vc);
+    function card(label, value, title) {
+      var c = el("div", "metric-card");
+      var lab = el("div", "metric-card__label", label);
+      if (title) lab.title = title;
+      c.appendChild(lab);
+      c.appendChild(el("div", "metric-card__value", fmt(value, 4)));
+      grid.appendChild(c);
+    }
+    var res = state.result;
+    var tasks = res && res.tasks ? res.tasks : null;
+    if (tasks && tasks.length > 1) {
+      var pooled = ["train"];
+      pooled.forEach(function (ds) {
+        if (!modelHasDataset(m, ds)) return;
+        COL_METRICS.forEach(function (d) {
+          // R² and ρ are computed around the POOLED mean, so on a multi-task run
+          // they absorb the between-task spread and read better than the model
+          // really is. Flag those two rather than quietly presenting them as a
+          // fit quality (the health check calls out genuinely heterogeneous
+          // tasks; this hint is the standing caveat).
+          var relative = d.metric === "r2" || d.metric === "rho";
+          card(I18N.t(d.labelKey) + " · " + datasetLabel(ds),
+            Core.metricValue(m, ds, d.metric),
+            I18N.format("dsSamples", { count: datasetSampleCount(ds) }) + " · " +
+            I18N.t("dsPooledHint") + (relative ? " · " + I18N.t("pooledRelativeHint") : ""));
+        });
+      });
+      tasks.forEach(function (tk) {
+        if (!modelHasDataset(m, tk.key)) return;
+        card("RMSE · " + datasetLabel(tk.key), Core.metricValue(m, tk.key, "rmse"),
+          I18N.format("dsTaskCardHint", {
+            n: tk.index, count: tk.n,
+            std: Number.isFinite(tk.std) ? fmt(tk.std, 4) : "—",
+          }));
+      });
+      // SISSO's own overall score, as printed in the ranked-model file. The
+      // analyzer recomputes it from the per-task metrics as well, but only to
+      // cross-check the interpretation (the health check reports any gap) — the
+      // authoritative number is the one SISSO wrote, so that is what is shown.
+      if (Number.isFinite(m.rmseSisso)) {
+        card(I18N.t("detailSissoOverall") + " · RMSE", m.rmseSisso, I18N.t("detailSissoOverallHint"));
+        card(I18N.t("detailSissoOverall") + " · MaxAE", m.maxaeSisso, I18N.t("detailSissoOverallHint"));
       }
+      return;
+    }
+    var datasets = runDatasets();
+    COL_METRICS.forEach(function (d) {
+      datasets.forEach(function (ds) {
+        if (!modelHasDataset(m, ds)) return;
+        card(I18N.t(d.labelKey) + " · " + datasetLabel(ds), Core.metricValue(m, ds, d.metric));
+      });
     });
   }
 
@@ -4362,19 +4638,28 @@
     var C = getThemeColors();
     var single = models.length === 1;
     var colorBy = !!cfg.colorBy;
-    var m0 = models[0];
 
-    // Per-model point lists for both datasets.
+    // Which datasets to draw: by default every dataset of the run at once —
+    // train + verify for a single-task run, and one series per task for a
+    // multi-task run — so the dialog is not blind to any task. The selector can
+    // still narrow it to a single dataset when a closer look is wanted.
+    var dsList = (cfg.datasets && cfg.datasets.length) ? cfg.datasets : scatterDatasets();
+    dsList = dsList.filter(function (ds) { return !!datasetData(ds); });
+
+    // Per-model point lists, one entry per dataset.
     var modelPts = models.map(function (m) {
-      return {
-        m: m,
-        train: buildPoints(res.train, m.predTrain, "train"),
-        verify: res.verify ? buildPoints(res.verify, m.predVerify, "verify") : [],
-      };
+      var byDs = {};
+      dsList.forEach(function (ds) {
+        var data = datasetData(ds);
+        var pred = datasetPrediction(m, ds);
+        byDs[ds] = (data && pred) ? buildPoints(data, pred, ds) : [];
+      });
+      return { m: m, byDs: byDs };
     });
-    var total = modelPts.reduce(function (n, mp) {
-      return n + mp.train.length + mp.verify.length;
-    }, 0);
+    var total = 0;
+    modelPts.forEach(function (mp) {
+      dsList.forEach(function (ds) { total += mp.byDs[ds].length; });
+    });
     if (total === 0) return null;
 
     // Optional color-by-parameter mapping (single-model detail view only).
@@ -4385,16 +4670,15 @@
       colorCol = colorSelectCol();
       if (colorCol) {
         var cvals = [];
-        function pushColorCol(data) {
+        dsList.forEach(function (ds) {
+          var data = datasetData(ds);
           if (!data || !data.cols) return;
           var col = data.cols[colorCol.letter];
           if (!col) return;
           for (var ci = 0; ci < data.n; ci++) {
             if (col[ci] !== undefined && Number.isFinite(col[ci])) cvals.push(col[ci]);
           }
-        }
-        pushColorCol(res.train);
-        if (res.verify) pushColorCol(res.verify);
+        });
         if (cvals.length) {
           var cvLo = Math.min.apply(null, cvals);
           var cvHi = Math.max.apply(null, cvals);
@@ -4417,7 +4701,9 @@
     // Axis range follows all points of every model/dataset.
     var allX = [], allY = [];
     modelPts.forEach(function (mp) {
-      mp.train.concat(mp.verify).forEach(function (p) { allX.push(p[0]); allY.push(p[1]); });
+      dsList.forEach(function (ds) {
+        mp.byDs[ds].forEach(function (p) { allX.push(p[0]); allY.push(p[1]); });
+      });
     });
     var lo = Math.min.apply(null, allX.concat(allY));
     var hi = Math.max.apply(null, allX.concat(allY));
@@ -4428,26 +4714,24 @@
     var MODEL_COLORS = ["#4c8df6", "#e05d44", "#2ea043", "#b58900", "#a371f7", "#12a5b0", "#e06a9e", "#6b8e23"];
     var series = [];
     var legendNames = [];
-    var dataSources = ["train", "verify"];
 
     modelPts.forEach(function (mp, mi) {
       var modelColor = single ? null : MODEL_COLORS[mi % MODEL_COLORS.length];
-      dataSources.forEach(function (ds) {
-        var pts = mp[ds];
+      dsList.forEach(function (ds) {
+        var pts = mp.byDs[ds];
         if (!pts.length) return;
-        var isV = ds === "verify";
-        var setName = I18N.t(isV ? "detailVerify" : "detailTrain");
+        var setName = datasetLabel(ds);
         var sName = single ? setName : "R" + mp.m.rank + " " + setName;
         var data = pts.map(function (p) {
           var item = { value: [p[0], p[1]], name: p[2], raw: p };
-          if (colorRange) item.value.push(colorVal(isV ? res.verify : res.train, p[4]));
+          if (colorRange) item.value.push(colorVal(datasetData(ds), p[4]));
           return item;
         });
         var itemStyle;
         if (single) {
           itemStyle = colorRange
             ? { opacity: 0.85 }
-            : { color: isV ? C.verify : C.train, opacity: 0.7 };
+            : { color: datasetColor(ds), opacity: 0.7 };
         } else {
           itemStyle = { color: modelColor, opacity: 0.75 };
         }
@@ -4455,8 +4739,8 @@
           name: sName,
           type: "scatter",
           data: data,
-          symbol: isV ? "triangle" : "circle",
-          symbolSize: isV ? 11 : 9,
+          symbol: datasetSymbol(ds),
+          symbolSize: ds === "verify" ? 11 : 9,
           itemStyle: itemStyle,
         });
         legendNames.push(sName);
@@ -4475,7 +4759,7 @@
 
     var option = {
       animation: true,
-      color: single ? [C.train, C.verify] : MODEL_COLORS,
+      color: single ? dsList.map(datasetColor) : MODEL_COLORS,
       textStyle: { fontFamily: C.font },
       tooltip: {
         trigger: "item",
@@ -4484,11 +4768,7 @@
           var p = params.data;
           var pred = p.value[0], truth = p.value[1];
           var lines = [];
-          if (single) {
-            lines.push("<strong>" + (p.name || "") + "</strong>");
-          } else {
-            lines.push("<strong>" + params.seriesName + " · " + (p.name || "") + "</strong>");
-          }
+          lines.push("<strong>" + params.seriesName + " · " + (p.name || "") + "</strong>");
           lines.push(
             I18N.t("detailPredicted") + ": " + fmt(pred, 4),
             I18N.t("detailTrue") + ": " + fmt(truth, 4),
@@ -4545,7 +4825,7 @@
         feature: {
           saveAsImage: {
             title: I18N.t("detailExportPng"),
-            name: single ? "sisso_analyzer_model_" + m0.rank : "sisso_analyzer_compare_" + models.map(function (m) { return m.rank; }).join("_"),
+            name: single ? "sisso_analyzer_model_" + models[0].rank : "sisso_analyzer_compare_" + models.map(function (m) { return m.rank; }).join("_"),
           },
         },
         right: 12,
@@ -4582,17 +4862,75 @@
   // / errorHistogram); this section only turns their output into a chart option.
   // ---------------------------------------------------------------------------
 
-  // Whether the loaded run carries verify predictions for this model.
-  function modelHasVerify(m) {
-    var res = state.result;
-    return !!(res && res.verify && m && m.predVerify && m.metricsVerify);
+  // Whether the loaded run carries both metrics and predictions for this
+  // model / dataset pair (a model whose formula failed to compile has neither).
+  function modelHasDataset(m, key) {
+    if (!m || !m.metrics) return false;
+    return !!(m.metrics[key] && datasetPrediction(m, key));
   }
 
-  // Which residual dataset is actually available ("verify" collapses to "train"
-  // on a train-only run or when the model has no verify predictions).
-  function availableErrorDataset() {
-    return state.errorDataset === "verify" && modelHasVerify(state.currentModel)
-      ? "verify" : "train";
+  // Datasets of the current model that the dialog can show.
+  function modelDatasets(m) {
+    return runDatasets().filter(function (k) { return modelHasDataset(m, k); });
+  }
+
+  // Entries of the detail dialog's dataset selector: the "all" pseudo-token
+  // first (the default, meaning "draw every dataset at once") followed by each
+  // dataset on its own. A model with a single dataset gets no choice at all.
+  function detailDatasetChoices() {
+    var keys = modelDatasets(state.currentModel);
+    if (keys.length > 1) return ["all"].concat(keys);
+    return keys;
+  }
+
+  // Which entry the selector is actually on: the requested one when it is
+  // available, otherwise the first available choice. Falls back gracefully when
+  // a restored session points at a dataset the current run does not have.
+  function detailDatasetKey() {
+    var choices = detailDatasetChoices();
+    if (choices.indexOf(state.detailDataset) >= 0) return state.detailDataset;
+    return choices.length ? choices[0] : "train";
+  }
+
+  // Datasets the "Predicted vs true" tab draws for the current selection.
+  // "all" means every dataset of the model at once — the default, so opening a
+  // model never hides a task.
+  function detailScatterDatasets() {
+    if (detailDatasetKey() !== "all") return [detailDatasetKey()];
+    var keys = scatterDatasets().filter(function (k) { return modelHasDataset(state.currentModel, k); });
+    return keys.length ? keys : modelDatasets(state.currentModel);
+  }
+
+  // Dataset the residual histogram uses. "all" means every sample, which is
+  // exactly the run's primary (pooled) dataset.
+  function detailHistogramDataset() {
+    var key = detailDatasetKey();
+    return key === "all" ? "train" : key;
+  }
+
+  // Dataset segmented control shared by the scatter and the residual histogram.
+  // Only rendered when the model has more than one dataset (a train-only
+  // single-task run keeps the dialog exactly as it was).
+  function renderDetailDatasetSeg() {
+    var seg = $("#detail-ds-seg");
+    if (!seg) return;
+    seg.innerHTML = "";
+    var real = modelDatasets(state.currentModel);
+    var current = detailDatasetKey();
+    state.detailDataset = current;
+    seg.hidden = real.length <= 1;
+    if (real.length <= 1) return;
+    detailDatasetChoices().forEach(function (k) {
+      var btn = el("button", "segmented__btn" + (k === current ? " is-active" : ""), datasetLabel(k));
+      btn.type = "button";
+      btn.title = datasetLongLabel(k);
+      btn.addEventListener("click", function () {
+        state.detailDataset = k;
+        syncDetailTabUI();
+        renderCurrentDetailChart();
+      });
+      seg.appendChild(btn);
+    });
   }
 
   // Show/hide the DOM for the active detail chart view + dataset toggle
@@ -4608,11 +4946,7 @@
     $("#error-controls").hidden = !isErr;
     $("#chart").hidden = isErr;
     $("#error-view").hidden = !isErr;
-    var hasV = modelHasVerify(state.currentModel);
-    $("#ds-verify").hidden = !hasV;
-    if (!hasV && state.errorDataset === "verify") state.errorDataset = "train";
-    $("#ds-train").classList.toggle("is-active", state.errorDataset === "train");
-    $("#ds-verify").classList.toggle("is-active", state.errorDataset === "verify");
+    renderDetailDatasetSeg();
   }
 
   // Render whichever detail view is active. Both renderers dispose + re-init
@@ -4650,11 +4984,19 @@
 
   // Stats column next to the histogram: samples, mean/median error and the
   // population standard deviation, computed by the engine helpers.
-  function renderErrorStats(stats, hist) {
+  // `dataset` names the slice the residuals come from, so a multi-task run can
+  // tell "all samples" apart from "task 2".
+  function renderErrorStats(stats, hist, dataset) {
     var box = $("#error-stats");
     if (!box) return;
     box.innerHTML = "";
-    box.appendChild(el("h4", "error-stats__title", I18N.t("errStatsTitle")));
+    var title = el("h4", "error-stats__title", I18N.t("errStatsTitle"));
+    if (dataset) {
+      var tag = el("span", "error-stats__dataset", datasetLabel(dataset));
+      tag.title = datasetLongLabel(dataset);
+      title.appendChild(tag);
+    }
+    box.appendChild(title);
     function card(labelKey, value, hintKey) {
       var c = el("div", "error-stat-card");
       var lab = el("div", "error-stat-card__label", I18N.t(labelKey));
@@ -4683,8 +5025,7 @@
   function buildErrorHistogramOption(m, dataset, stats, hist) {
     if (!hist || !hist.ok) return null;
     var C = getThemeColors();
-    var isV = dataset === "verify";
-    var dsColor = isV ? C.verify : C.train;
+    var dsColor = datasetColor(dataset);
     var ZERO_COLOR = "#e11d48"; // red accent marks the 0-error reference
 
     // x-domain = bin edges plus margin; pull 0 into view when the residuals are
@@ -4752,7 +5093,7 @@
         splitLine: { lineStyle: { color: C.grid } },
       },
       series: [{
-        name: isV ? I18N.t("detailVerify") : I18N.t("detailTrain"),
+        name: datasetLabel(dataset),
         type: "bar",
         data: data,
         itemStyle: { opacity: 0.9 },
@@ -4802,16 +5143,16 @@
     var dom = $("#chart-error");
     if (!m || !res || !dom) return;
 
-    var dataset = availableErrorDataset();
-    var isV = dataset === "verify";
-    var data = isV ? res.verify : res.train;
-    var pred = isV ? m.predVerify : m.predTrain;
+    var dataset = detailHistogramDataset();
+    var data = datasetData(dataset);
+    var pred = datasetPrediction(m, dataset);
+    if (!data || !pred) return;
     var yTrue = Array.from(data.cols[res.meta.targetLetter]);
     var errors = Core.errorSeries(pred, yTrue);
     var stats = Core.residualStats(errors);
     var hist = Core.errorHistogram(errors);
     errorHistCache = hist;
-    renderErrorStats(stats, hist);
+    renderErrorStats(stats, hist, dataset);
 
     if (state.errorChart) { state.errorChart.dispose(); }
     state.errorChart = echarts.init(dom);
@@ -4832,7 +5173,10 @@
     if (state.chart) { state.chart.dispose(); }
     state.chart = echarts.init(dom);
 
-    var option = buildModelScatterOption([m], { colorBy: true });
+    // The scatter follows the dialog's dataset selector: "all" (the default)
+    // overlays every dataset — train + verify, or one series per task — and a
+    // specific entry zooms in on that one dataset.
+    var option = buildModelScatterOption([m], { colorBy: true, datasets: detailScatterDatasets() });
     if (!option) {
       state.chart.setOption({
         title: { text: I18N.t("emptyChart"), left: "center", top: "middle", textStyle: { fontSize: 14, color: C.chartEmpty } },
@@ -4861,15 +5205,16 @@
   // Point inspector
   // ---------------------------------------------------------------------------
   function openInspector(point) {
-    // point = [pred, true, sampleName, source, rowIndex]
+    // point = [pred, true, sampleName, datasetToken, rowIndex]
     var res = state.result;
     var pred = point[0], truth = point[1], name = point[2];
     var source = point[3], rowIndex = point[4];
 
-    var data = source === "verify" && res.verify ? res.verify : res.train;
-    if (rowIndex < 0 || rowIndex >= data.n) return;
+    var data = datasetData(source);
+    if (!data || rowIndex < 0 || rowIndex >= data.n) return;
 
-    $("#inspector-title").textContent = I18N.t("detailPointTitle") + " · " + name;
+    $("#inspector-title").textContent = I18N.t("detailPointTitle") + " · " + name +
+      " · " + datasetLabel(source);
 
     var body = $("#inspector-body");
     body.innerHTML = "";
@@ -5169,20 +5514,12 @@
       }
     });
 
-    // detail chart view tabs: Predicted vs true ⇄ Error distribution
+    // detail chart view tabs: Predicted vs true ⇄ Error distribution.
+    // The dataset selector shared by both tabs is rebuilt by
+    // syncDetailTabUI()/renderDetailDatasetSeg(), so it needs no static markup
+    // and works for train/verify as well as pooled + task datasets.
     $("#tab-predicted").addEventListener("click", function () { switchDetailTab("scatter"); });
     $("#tab-error").addEventListener("click", function () { switchDetailTab("error"); });
-    // residual dataset toggle inside the error view
-    $("#ds-train").addEventListener("click", function () {
-      state.errorDataset = "train";
-      syncDetailTabUI();
-      renderCurrentDetailChart();
-    });
-    $("#ds-verify").addEventListener("click", function () {
-      state.errorDataset = "verify";
-      syncDetailTabUI();
-      renderCurrentDetailChart();
-    });
 
     // dialogs
     $("#dialog-close").addEventListener("click", closeDetail);
@@ -5240,11 +5577,18 @@
     function formulaExportFor(kind) {
       var m = state.currentModel;
       if (!m) return null;
-      if (kind === "plain") return m.formulaOriginal; // untouched legacy text
+      if (kind === "plain") return modelFormulaText(m); // untouched legacy text
+      // A multi-task model carries one formula per task: convert each and keep
+      // the task label so the exported block stays self-explanatory.
+      var rows = modelFormulaLines(m);
       try {
-        return kind === "latex" ? Core.formulaToLatex(m.formulaOriginal)
-          : kind === "office" ? Core.formulaToUnicodeMath(m.formulaOriginal)
-          : null;
+        return rows.map(function (row, i) {
+          var out = kind === "latex" ? Core.formulaToLatex(row.text)
+            : kind === "office" ? Core.formulaToUnicodeMath(row.text)
+            : null;
+          if (rows.length < 2) return out;
+          return (row.label || (i + 1)) + ":  " + out;
+        }).join(rows.length < 2 ? "" : "\n");
       } catch (e) {
         toast(I18N.format("copyErr", { fmt: copyFormatLabel(kind) }));
         return null;
@@ -5263,7 +5607,7 @@
       var m = state.currentModel;
       if (!m) return;
       setCopyMenuOpen(false);
-      copyFormulaText(m.formulaOriginal, "copied");
+      copyFormulaText(modelFormulaText(m), "copied");
     });
 
     $("#btn-copy-as").addEventListener("click", function (e) {

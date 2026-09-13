@@ -350,6 +350,11 @@
               <button type="button" class="chart-tab is-active" id="tab-predicted" data-chart-tab="scatter" data-i18n="detailChartTitle">Predicted vs true</button>
               <button type="button" class="chart-tab" id="tab-error" data-chart-tab="error" data-i18n="detailErrorTitle">Error distribution</button>
             </div>
+            <!-- Dataset selector shared by both chart tabs. Filled in by
+                 renderDetailDatasetSeg(): train / verify for a single-task run,
+                 pooled + task 1…N for an MT-SISSO run, hidden when the run has
+                 only one dataset. -->
+            <div class="segmented chart-datasets" id="detail-ds-seg" role="group" aria-label="Dataset" hidden></div>
             <div class="chart-controls" id="scatter-controls">
               <label class="chart-controls__field">
                 <span class="chart-controls__label" data-i18n="colorBy">Color by</span>
@@ -357,10 +362,6 @@
               </label>
             </div>
             <div class="error-controls" id="error-controls" hidden>
-              <div class="segmented" id="error-ds-seg" role="group" aria-label="Error distribution dataset">
-                <button type="button" class="segmented__btn is-active" id="ds-train" data-i18n="detailTrain">train</button>
-                <button type="button" class="segmented__btn" id="ds-verify" data-i18n="detailVerify" hidden>verify</button>
-              </div>
               <span class="error-controls__hint" data-i18n="errHint">error = predicted − true</span>
             </div>
             <div id="chart" class="chart" role="img" aria-label="Predicted vs true scatter plot"></div>

@@ -39,7 +39,10 @@
       fileSissoIn: "SISSO.in (run settings)",
       fileSissoOut: "SISSO.out (unit matrix)",
       missingFiles: "Missing required files:",
-      verifyOptionalNote: "verify.dat is optional — if omitted, only train metrics are shown.",
+      verifyOptionalNote:
+        "verify.dat is optional — if omitted, only training metrics are shown. A multi-task " +
+        "(MT-SISSO) run has no verify.dat at all: its per-task metrics come from the task " +
+        "blocks of the stacked train.dat, so SISSO.in or SISSO.out is needed to split them.",
       run: "Analyze",
       analyzing: "Analyzing…",
       rendering: "Rendering models…",
@@ -92,6 +95,22 @@
       kpiDim: "Dimension",
       kpiComplexity: "Complexity",
       kpiTopRho: "Best ρ",
+      // multi-task (MT-SISSO)
+      kpiTasks: "Tasks",
+      kpiTaskSplit: "Task split",
+      kpiTaskSplitHint:
+        "MT-SISSO: {n} task(s), task_weighting={weighting}; the sample counts were read from {source}.",
+      dsPooled: "pooled",
+      dsPooledHint: "pooled over every task",
+      dsAll: "all",
+      dsAllHint: "every dataset at once (train + verify, or one series per task)",
+      dsTask: "task {n}",
+      dsSamples: "{count} samples",
+      dsTaskSamples: "task {n} · {count} samples",
+      dsTaskCardHint: "Task {n} · {count} samples · target std {std}",
+      pooledRelativeHint:
+        "R² and ρ are computed around the pooled mean, so on a multi-task run they also measure " +
+        "the spread between tasks and read better than the actual fit — compare the per-task values.",
 
       // controls
       sortBy: "Sort by",
@@ -232,6 +251,7 @@
       // table
       colRank: "Rank",
       colFormula: "Model formula",
+      colFormulaMT: "Model formula (task 1 coefficients)",
       colFeatures: "Feature ids",
       colTrain: "train",
       colVerify: "verify",
@@ -287,6 +307,12 @@
       detailExportCsv: "Export CSV",
       detailCsvExported: "Exported {n} samples of model {rank} to {file}",
       detailCsvExportedPair: "Exported model {rank}: {t} train samples to {tf} and {v} verify samples to {vf}",
+      detailCsvExportedMany: "Exported model {rank}: {files}",
+      detailTaskFormulaHint: "Task {n} · {count} samples",
+      detailSissoOverall: "SISSO overall",
+      detailSissoOverallHint:
+        "The task-aggregated score SISSO itself writes in the ranked-model file (RMSE = " +
+        "sqrt(Σ wᵢ·RMSEᵢ²), MaxAE = maxᵢ MaxAEᵢ).",
       detailCsvEmpty: "Nothing to export — this model has no finite predictions.",
       detailChartTitle: "Predicted vs true",
       detailErrorTitle: "Error distribution",
@@ -361,7 +387,9 @@
       fileSissoIn: "SISSO.in（运行设置）",
       fileSissoOut: "SISSO.out（量纲矩阵）",
       missingFiles: "缺少必填文件：",
-      verifyOptionalNote: "verify.dat 为可选——若省略，只展示训练集指标。",
+      verifyOptionalNote:
+        "verify.dat 为可选——若省略，只展示训练集指标。多任务（MT-SISSO）运行没有 verify.dat：" +
+        "其各任务指标来自纵向堆叠的 train.dat 的任务分块，因此需要 SISSO.in 或 SISSO.out 来切分。",
       run: "开始分析",
       analyzing: "分析中…",
       rendering: "正在渲染模型…",
@@ -411,6 +439,21 @@
       kpiDim: "维度",
       kpiComplexity: "复杂度",
       kpiTopRho: "最佳 ρ",
+      // 多任务（MT-SISSO）
+      kpiTasks: "任务数",
+      kpiTaskSplit: "任务划分",
+      kpiTaskSplitHint: "MT-SISSO：{n} 个任务，task_weighting={weighting}；样本数来自 {source}。",
+      dsPooled: "合并",
+      dsPooledHint: "跨全部任务合并",
+      dsAll: "全部",
+      dsAllHint: "一次显示全部数据集（训练+验证，或每个任务一条系列）",
+      dsTask: "任务 {n}",
+      dsSamples: "{count} 个样本",
+      dsTaskSamples: "任务 {n} · {count} 个样本",
+      dsTaskCardHint: "任务 {n} · {count} 个样本 · 目标标准差 {std}",
+      pooledRelativeHint:
+        "R² 与 ρ 以合并均值为基准计算，多任务下它们同时度量了任务之间的差异，因此会偏乐观——" +
+        "请以各任务自身的数值为准。",
 
       sortBy: "排序依据",
       sortDir: "排序方向",
@@ -547,6 +590,7 @@
 
       colRank: "排名",
       colFormula: "模型公式",
+      colFormulaMT: "模型公式（任务 1 系数）",
       colFeatures: "特征编号",
       colTrain: "训练",
       colVerify: "验证",
@@ -600,6 +644,12 @@
       detailExportCsv: "导出 CSV",
       detailCsvExported: "已导出模型 {rank} 的 {n} 个样本至 {file}",
       detailCsvExportedPair: "已导出模型 {rank}：{t} 个训练样本至 {tf}，{v} 个验证样本至 {vf}",
+      detailCsvExportedMany: "已导出模型 {rank}：{files}",
+      detailTaskFormulaHint: "任务 {n} · {count} 个样本",
+      detailSissoOverall: "SISSO 总体",
+      detailSissoOverallHint:
+        "SISSO 自身写在排名文件中的跨任务汇总得分（RMSE = sqrt(Σ wᵢ·RMSEᵢ²)，" +
+        "MaxAE = maxᵢ MaxAEᵢ）。",
       detailCsvEmpty: "没有可导出的内容——该模型没有有限的预测值。",
       detailChartTitle: "预测值 vs 真实值",
       detailErrorTitle: "误差分布",
