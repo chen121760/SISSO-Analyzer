@@ -19,9 +19,9 @@
       themeSystem: "Follow system theme",
 
       // cite & author
-      citeTitle: "Cite SISSO",
-      citeIntro: "If this tool helps your research, please cite SISSO:",
-      citeCopy: "Copy citation",
+      citeTitle: "SISSO method reference",
+      citeIntro: "This analyzer processes output from the SISSO method. The method is described in:",
+      citeCopy: "Copy reference",
       citeCopied: "Copied",
       contactAuthor: "Contact author",
 
@@ -369,9 +369,9 @@
       themeDark: "深色主题",
       themeSystem: "跟随系统主题",
 
-      citeTitle: "引用 SISSO",
-      citeIntro: "如果本工具对您的研究有帮助，请引用 SISSO：",
-      citeCopy: "复制引用",
+      citeTitle: "SISSO 方法文献",
+      citeIntro: "本工具用于分析 SISSO 方法产生的结果。该方法的原始论文为：",
+      citeCopy: "复制文献",
       citeCopied: "已复制",
       contactAuthor: "联系作者",
 
