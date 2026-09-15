@@ -114,11 +114,10 @@ SISSO's own overall RMSE / MaxAE for **all 1000** ranked models to within the
 the multi-task coefficient layout is read correctly.
 
 
-## SISSO method reference
+## About SISSO
 
-SISSO-Analyzer is an independent tool for examining output produced by the
-[SISSO method](https://github.com/rouyang2017/SISSO). The method itself is
-described in the original paper:
+SISSO-Analyzer works with output from [SISSO](https://github.com/rouyang2017/SISSO).
+For details of the method, see:
 
 > R. Ouyang, S. Curtarolo, E. Ahmetcik, M. Scheffler, and L. M. Ghiringhelli, Phys. Rev. Mater. 2, 083802 (2018).
 
