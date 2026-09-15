@@ -4,6 +4,12 @@ Interactive web analyzer for [SISSO](https://github.com/rouyang2017/SISSO) resul
 
 **Live demo**: https://chen121760.github.io/SISSO-Analyzer/
 
+> **Companion tool:** Use [SISSO-Sage](https://github.com/chen121760/SISSO-Sage)
+> when you want an AI assistant to review several candidate formulas using
+> predictive evidence, feature metadata, and extraction code. Analyzer is for
+> visual, manual exploration; Sage is for AI-assisted scientific review. The two
+> tools are separate but can examine the same SISSO results.
+
 ## Scope
 
 Single-target and multi-task (MT-SISSO) **regression**. Multi-objective and

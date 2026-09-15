@@ -299,10 +299,27 @@ html, body {
   color: var(--color-foreground);
 }
 .upload-card__subtitle {
-  margin: 0 0 22px;
+  margin: 0 0 12px;
   font-size: 15px;
   color: var(--color-text-soft);
 }
+.sage-recommendation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 22px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--color-secondary) 28%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--color-secondary) 6%, var(--color-surface));
+  color: var(--color-secondary);
+  font-size: 14px;
+  font-weight: 650;
+  text-decoration: none;
+}
+.sage-recommendation:hover { background: color-mix(in srgb, var(--color-secondary) 11%, var(--color-surface)); }
+.sage-recommendation:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
 @media (max-width: 1020px) {
   .view--upload, .view--upload.has-recent { max-width: 780px; }
   .view--upload.has-recent .upload-layout { grid-template-columns: minmax(0, 1fr); }

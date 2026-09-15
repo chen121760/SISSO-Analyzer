@@ -11,6 +11,7 @@
     en: {
       appTitle: "SISSO-Analyzer",
       appSubtitle: "Interactive analyzer for SISSO regression results",
+      sageRecommendation: "Need AI-assisted scientific review? Try the companion tool SISSO-Sage",
 
       // theme
       themeLight: "Light theme",
@@ -362,6 +363,7 @@
     zh: {
       appTitle: "SISSO-Analyzer",
       appSubtitle: "SISSO 回归结果的交互式分析工具",
+      sageRecommendation: "需要 AI 老师进一步审查候选公式？试试配套工具 SISSO-Sage",
 
       themeLight: "浅色主题",
       themeDark: "深色主题",
