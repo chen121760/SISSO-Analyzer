@@ -10,6 +10,14 @@ Interactive web analyzer for [SISSO](https://github.com/rouyang2017/SISSO) resul
 > visual, manual exploration; Sage is for AI-assisted scientific review. The two
 > tools are separate but can examine the same SISSO results.
 
+## Watch the video
+
+[![Watch SISSO-Analyzer and SISSO-Sage in action](promo/cover.png)](https://chen121760.github.io/SISSO-Analyzer/promo/)
+
+**[Watch the overview](https://chen121760.github.io/SISSO-Analyzer/promo/)** · English narration · 1080p · 48 sec
+
+[Download MP4](https://chen121760.github.io/SISSO-Analyzer/promo/sisso-promo-en.mp4) · [English subtitles](promo/sisso-promo-en.srt)
+
 ## Scope
 
 Single-target and multi-task (MT-SISSO) **regression**. Multi-objective and

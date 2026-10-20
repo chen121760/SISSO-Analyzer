@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="See SISSO-Analyzer and SISSO-Sage turn one SISSO run into figures, formulas, and evidence an AI assistant can cite.">
+  <meta property="og:title" content="SISSO-Analyzer × SISSO-Sage — see it in action">
+  <meta property="og:description" content="One SISSO result, two readers. Watch the overview.">
+  <meta property="og:image" content="https://chen121760.github.io/SISSO-Analyzer/promo/cover.png">
+  <meta property="og:type" content="website">
+  <title>SISSO-Analyzer × SISSO-Sage — see it in action</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #F6F4EF;
+      --surface: #FFFDF9;
+      --ink: #232019;
+      --muted: #5D564A;
+      --line: #DDD8CB;
+      --cobalt: #3C5488;
+      --amber: #B45309;
+      font-family: Inter, "Segoe UI", system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    a { color: var(--cobalt); text-underline-offset: .2em; }
+    a:focus-visible, video:focus-visible { outline: 3px solid var(--amber); outline-offset: 5px; }
+    .wrap { width: min(1120px, calc(100% - 48px)); margin-inline: auto; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 22px; }
+    header a { display: inline-flex; align-items: center; min-height: 44px; text-decoration: none; }
+    .brand { font-weight: 800; font-size: 19px; letter-spacing: -.02em; color: var(--ink); }
+    .repo { font-size: 15px; }
+    main { padding-top: 18px; }
+    .eyebrow { color: var(--amber); font-weight: 750; font-size: 13px; letter-spacing: .11em; text-transform: uppercase; margin: 0 0 14px; }
+    h1 { font-size: clamp(30px, 4.4vw, 52px); line-height: 1.12; letter-spacing: -.035em; margin: 0; text-wrap: balance; }
+    .intro { max-width: 780px; font-size: 18px; line-height: 1.65; color: var(--muted); margin: 18px 0 26px; }
+    .player { background: var(--ink); border-radius: 14px; overflow: hidden; box-shadow: 0 30px 70px rgba(35, 32, 25, .18); }
+    video { display: block; width: 100%; height: auto; background: #000; }
+    .downloads { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; padding-block: 14px; }
+    .downloads a { display: inline-flex; align-items: center; min-height: 44px; font-size: 14px; }
+    .note { color: var(--muted); font-size: 14px; line-height: 1.6; margin: 4px 0 34px; }
+    footer { border-top: 1px solid var(--line); margin-top: 18px; padding-block: 22px 36px; color: var(--muted); font-size: 14px; }
+    footer .row { display: flex; flex-wrap: wrap; gap: 10px 24px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <a class="brand" href="https://chen121760.github.io/SISSO-Analyzer/">SISSO-Analyzer</a>
+      <a class="repo" href="https://github.com/chen121760/SISSO-Analyzer">GitHub &rarr;</a>
+    </header>
+    <main>
+      <p class="eyebrow">Promo &middot; English narration &middot; 1080p</p>
+      <h1>Two readers for one SISSO run.</h1>
+      <p class="intro">The Analyzer turns the run into figures, formulas and a table you can sort. Sage turns the same run into evidence your AI assistant can cite and trace.</p>
+      <div class="player">
+        <video controls playsinline preload="metadata" poster="cover.png" width="1920" height="1080" aria-label="SISSO-Analyzer and SISSO-Sage promotional video, English narration">
+          <source src="sisso-promo-en.mp4" type="video/mp4">
+          <track kind="captions" src="sisso-promo-en.vtt" srclang="en" label="English" default>
+          <p><a href="sisso-promo-en.mp4">Download the video</a> to watch it on your device.</p>
+        </video>
+      </div>
+      <nav class="downloads" aria-label="Video downloads">
+        <a href="sisso-promo-en.mp4" download>Download MP4 (1080p)</a>
+        <a href="sisso-promo-en.srt" download>Download English subtitles</a>
+      </nav>
+      <p class="note">48 seconds. Both tools read the same SISSO output: Analyzer for manual, visual review; Sage for AI-assisted scientific review. Open source, MIT.</p>
+    </main>
+    <footer>
+      <div class="row">
+        <a href="https://chen121760.github.io/SISSO-Analyzer/">Live demo</a>
+        <a href="https://github.com/chen121760/SISSO-Analyzer">SISSO-Analyzer on GitHub</a>
+        <a href="https://github.com/chen121760/SISSO-Sage">SISSO-Sage on GitHub</a>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>
