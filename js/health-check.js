@@ -513,7 +513,7 @@
           classified.train.n + " training samples, category blocks " + classified.meta.sissoIn.classCounts.join(" + ") + ".");
         addPass(report, "classification-semantics", "Official overlap statistics; descriptors have no regression coefficients or target column.");
         if (classified.models[0].official) addPass(report, "classification-top1", "Official top1 descriptor coordinates match the input features.");
-        if (classified.verify && !classified.verify.labels) addWarn(report, "classification-verify-labels", "No verify_labels.json: verification points are shown without class labels.");
+        if (classified.verify && !Classification.hasVerificationLabels(classified)) addPass(report, "classification-verify-labels", "Showing training only. Assign verification classes in the classification view to include those samples.");
       } catch (err) {
         addErr(report, "classification", err.message);
       }

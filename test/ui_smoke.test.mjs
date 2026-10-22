@@ -99,6 +99,8 @@ class El {
   blur() {}
   click() { this.dispatch("click"); }
   scrollIntoView() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
   getBoundingClientRect() { return { width: 600, height: 400, top: 0, left: 0 }; }
   get offsetWidth() { return 600; }
   get offsetHeight() { return 400; }
@@ -519,6 +521,67 @@ if (!fs.existsSync(path.join(DIR, "train.dat"))) {
     const circles = svg.children.filter((n) => n.tagName === "CIRCLE");
     check(circles.every((n) => Number(n.getAttribute("cx")) >= 0 && Number(n.getAttribute("cx")) <= 300 && Number(n.getAttribute("cy")) >= 0 && Number(n.getAttribute("cy")) <= 180), "Classification: thumbnail covers combined data ranges");
     check(svg.children.some((n) => n.getAttribute("fill") === "none" && n.getAttribute("stroke")), "Classification: thumbnail includes hollow verification markers");
+  });
+  attempt("Classification: verification label controls and persistence", () => {
+    const nodes = (root) => [root, ...root.children.flatMap(nodes)];
+    const find = (predicate) => nodes(reg("#view-classification")).find(predicate);
+    const button = (key) => find((n) => n.tagName === "BUTTON" && n.textContent === window.I18N.t(key));
+    const chartCount = () => window.__lastChart.option.series.filter((s) => s.type === "scatter").reduce((n, s) => n + s.data.length, 0);
+    app.processTexts({ ...CLASS_TEXTS, trainlabels: undefined, classhull: undefined, classdesc: undefined, verifylabels: undefined,
+      verify: "name x z\ng2 2 3\ng1 6 4\ng3 10 10\n",
+      sissoin: CLASS_TEXTS.sissoin.replace("(3,3)", "(2,2,2)").replace("isconvex=(1,1)", "isconvex=(1,1,1)") });
+    const originalHulls = JSON.stringify(app.classificationGeometry(app.state.result.models[0]).hulls);
+    check(chartCount() === 6 && app.state.classDataset === "train", "Classification labels: unlabeled verification shows training only");
+    app.state.classDataset = "both"; app.renderClassification();
+    check(chartCount() === 6 && app.state.classDataset === "train", "Classification labels: invalid saved dataset is coerced to training");
+    check(app.classificationGeometry(app.state.result.models[0]).verify.length === 0, "Classification labels: unlabeled verification is absent from preview geometry");
+    const inputs = () => nodes(reg("#view-classification")).filter((n) => n.classList.contains("class-counts-input"));
+    const input = inputs()[0], second = inputs()[1], last = inputs()[2];
+    check(inputs().length === 3 && last.readOnly, "Classification labels: one box per category, last is automatic");
+    input.value = "209"; second.value = "122"; input.dispatch("input");
+    check(button("verificationFill").disabled && button("verificationSave").disabled && button("verificationExport").disabled && !app.state.result.verify.labels,
+      "Classification labels: wrong counts disable apply and export without mutating classes");
+    check(last.value === "", "Classification labels: overfilled counts never show a negative remainder");
+    for (const invalid of ["-1", "0.5", "1e0", ""]) {
+      input.value = invalid; second.value = "0"; input.dispatch("input");
+      check(button("verificationSave").disabled && last.value === "", "Classification labels: invalid or missing count cannot be saved: " + invalid);
+    }
+    input.value = "3"; second.value = "0"; input.dispatch("input");
+    check(last.value === "0" && !button("verificationSave").disabled, "Classification labels: automatic remainder can be zero");
+    input.value = "1"; second.value = "0"; input.dispatch("input");
+    check(last.value === "2", "Classification labels: final category receives remaining verification samples");
+    check(!button("verificationFill").disabled, "Classification labels: zero-sized verification category accepted");
+    check(nodes(find((n) => n.classList.contains("class-count-ranges"))).some((n) => n.textContent.includes("g2")), "Classification labels: counts preview identifies original row IDs");
+    button("verificationFill").click();
+    check(!app.state.result.verify.labels, "Classification labels: count preview remains a draft until saved");
+    button("verificationSave").click();
+    check(JSON.stringify(app.state.result.verify.labels) === "[0,2,2]" && chartCount() === 9, "Classification labels: counts save updates every chart category");
+    check(app.classificationGeometry(app.state.result.models[0]).verify[1].classIndex === 2, "Classification labels: geometry cache refreshes after assignment");
+    button("verificationEdit").click(); button("verificationManualMode").click();
+    const rowClass = find((n) => n.tagName === "SELECT" && n.getAttribute("aria-label") === window.I18N.t("classificationCategories") + " · g1");
+    rowClass.value = "1"; rowClass.dispatch("change");
+    for (const id of ["g2", "g3"]) {
+      const checkBox = find((n) => n.tagName === "INPUT" && n.getAttribute("aria-label") === window.I18N.t("verificationSelect") + " " + id);
+      checkBox.checked = true; checkBox.dispatch("change");
+    }
+    const bulk = find((n) => n.tagName === "LABEL" && n.firstChild && n.firstChild.textContent === window.I18N.t("verificationBulkCategory")).lastChild;
+    bulk.value = ""; bulk.dispatch("change"); button("verificationAssign").click(); button("verificationSave").click();
+    check(JSON.stringify(app.state.result.verify.labels) === "[null,1,null]" && chartCount() === 6, "Classification labels: manual assignment follows IDs and partial labels hide verification");
+    const partialProject = app.makeProjectJson(); app.applyProject(partialProject);
+    check(JSON.stringify(app.state.result.verify.labels) === "[null,1,null]" && chartCount() === 6, "Classification labels: partial labels persist through project reload");
+    button("verificationSetup").click(); button("verificationManualMode").click();
+    const selectAll = find((n) => n.tagName === "INPUT" && n.getAttribute("aria-label") === window.I18N.t("verificationSelectAll"));
+    selectAll.checked = true; selectAll.dispatch("change"); button("verificationAssign").click(); button("verificationSave").click();
+    check(JSON.stringify(app.state.result.verify.labels) === "[0,0,0]" && chartCount() === 9, "Classification labels: bulk assignment completes verification labels");
+    check(JSON.stringify(app.classificationGeometry(app.state.result.models[0]).hulls) === originalHulls, "Classification labels: verification edits leave training hulls unchanged");
+    check(JSON.stringify(app.state.result.meta.sissoIn.classCounts) === "[2,2,2]", "Classification labels: training nsample stays unchanged");
+    const completeProject = app.makeProjectJson(); app.applyProject(completeProject);
+    check(chartCount() === 9, "Classification labels: complete classes restore the verification overlay");
+    button("verificationEdit").click();
+    button("verificationCountsMode").click();
+    const countsInput = inputs()[0];
+    countsInput.value = "0"; inputs()[1].value = "1"; countsInput.dispatch("input"); button("verificationSave").click();
+    check(JSON.stringify(app.state.result.verify.labels) === "[1,2,2]", "Classification labels: count mode saves preview directly without manual adjustment");
   });
   reg("#btn-reset").dispatch("click");
   check(app.state.result === null && reg("#view-classification").hidden, "Classification: reset returns to upload");

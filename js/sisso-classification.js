@@ -106,8 +106,10 @@
     }
     var byId = new Map();
     doc.rows.forEach(function (row) {
-      if (!row || typeof row.id !== "string" || byId.has(row.id) || !Number.isInteger(row.class) ||
-          row.class < 0 || row.class >= nClasses) throw new Error("Invalid or duplicate ID/class in labels JSON.");
+      if (!row || typeof row.id !== "string" || byId.has(row.id) ||
+          !(row.class === null && !expected || Number.isInteger(row.class) && row.class >= 0 && row.class < nClasses)) {
+        throw new Error("Invalid or duplicate ID/class in labels JSON.");
+      }
       byId.set(row.id, row);
     });
     data.labels = data.names.map(function (name, i) {
@@ -132,6 +134,37 @@
         finite: coords.every(Number.isFinite),
         classified: dataset === "train" && model.official ? model.official[i].classified : null };
     });
+  }
+
+  function hasVerificationLabels(result) {
+    return !!(result.verify && Array.isArray(result.verify.labels) && result.verify.labels.length === result.verify.n &&
+      Array.from(result.verify.labels).every(function (c) { return Number.isInteger(c) && c >= 0 && c < result.classes.length; }));
+  }
+
+  function labelsFromCounts(text, nClasses, nSamples) {
+    var value = String(text).trim().replace(/^nsample\s*=\s*/i, "");
+    if (/^\(.*\)$/.test(value)) value = value.slice(1, -1).trim();
+    if (!/^\d+(?:\s*,\s*\d+)*$/.test(value)) throw new Error("verificationCountsFormat");
+    var counts = value.split(",").map(Number);
+    if (counts.length !== nClasses || counts.some(function (n) { return !Number.isSafeInteger(n); })) {
+      throw new Error("verificationCountsFormat");
+    }
+    var total = counts.reduce(function (a, b) { return a + b; }, 0);
+    if (total !== nSamples) {
+      var error = new Error("verificationCountsTotal"); error.total = total; throw error;
+    }
+    var labels = [];
+    counts.forEach(function (n, c) { for (var i = 0; i < n; i++) labels.push(c); });
+    return labels;
+  }
+
+  function verificationLabelText(result, labels) {
+    if (!result.verify || !Array.isArray(labels) || labels.length !== result.verify.n || Array.from(labels).some(function (c) {
+      return c !== null && !(Number.isInteger(c) && c >= 0 && c < result.classes.length);
+    })) throw new Error("Invalid verification classes.");
+    return JSON.stringify({ class_order: result.classes, rows: result.verify.names.map(function (id, i) {
+      return { id: id, class: labels[i] };
+    }) });
   }
 
   function parseOfficial(text, points, dim) {
@@ -270,11 +303,12 @@
   }
 
   function exportRows(result, model, dataset) {
+    if (dataset === "verify" && !hasVerificationLabels(result)) throw new Error("Verification requires complete class labels.");
     var rows = [["sample_id", "class_index", "class_label", "descriptor_1"]];
     if (result.meta.sissoIn.descDim === 2) rows[0].push("descriptor_2");
     rows[0].push("official_classified", "finite");
     if (dataset === "both") rows[0].unshift("dataset");
-    (dataset === "both" ? (result.verify ? ["train", "verify"] : ["train"]) : [dataset]).forEach(function (key) {
+    (dataset === "both" ? (hasVerificationLabels(result) ? ["train", "verify"] : ["train"]) : [dataset]).forEach(function (key) {
       projectModel(result, model, key).forEach(function (p) {
         var row = [p.name, p.classIndex === null ? "" : p.classIndex,
           p.classIndex === null ? "" : "Category " + (p.classIndex + 1)].concat(p.coords, [p.classified || "", p.finite]);
@@ -286,5 +320,6 @@
   }
 
   return { isClassification: isClassification, runPipeline: runPipeline, projectModel: projectModel,
-    convexHull: convexHull, rebuildHulls: rebuildHulls, exportRows: exportRows };
+    convexHull: convexHull, rebuildHulls: rebuildHulls, exportRows: exportRows,
+    hasVerificationLabels: hasVerificationLabels, labelsFromCounts: labelsFromCounts, verificationLabelText: verificationLabelText };
 });

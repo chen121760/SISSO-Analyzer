@@ -65,6 +65,31 @@ assert.deepEqual(reversedAxes.train.labels, result.train.labels);
 assert.equal(Class.projectModel(reversedAxes, reversedAxes.models[0], "train")[1].coords[0], -1);
 const generic = Class.runPipeline({ ...CLASS_TEXTS, trainlabels: undefined, verifylabels: undefined });
 assert.equal(generic.hasClassNames, false);
+assert.equal(Class.hasVerificationLabels(generic), false);
+assert.equal(Class.hasVerificationLabels(result), true);
+assert.deepEqual(Class.labelsFromCounts("nsample=(2,0,1)", 3, 3), [0, 0, 2]);
+assert.deepEqual(Class.labelsFromCounts(" ( 0, 1 ) ", 2, 1), [1]);
+assert.deepEqual(Class.labelsFromCounts("1,0", 2, 1), [0]);
+for (const text of ["", "1,-1", "1.5,0", "(1,0", "1,0,0", "Infinity,0", "9007199254740992,0", "1e0,0"]) {
+  assert.throws(() => Class.labelsFromCounts(text, 2, 1), /verificationCountsFormat/);
+}
+assert.throws(() => Class.labelsFromCounts("nsample=(209,122)", 2, 77), /verificationCountsTotal/);
+const partialText = Class.verificationLabelText(result, [null]);
+const partial = Class.runPipeline({ ...CLASS_TEXTS, verifylabels: partialText });
+assert.equal(Class.hasVerificationLabels(partial), false);
+assert.deepEqual(partial.verify.labels, [null]);
+assert.equal(Class.exportRows(partial, partial.models[0], "both").length, 7);
+assert.throws(() => Class.exportRows(partial, partial.models[0], "verify"), /complete class labels/);
+assert.throws(() => Class.verificationLabelText(result, []), /Invalid verification/);
+assert.throws(() => Class.verificationLabelText(result, [2]), /Invalid verification/);
+assert.throws(() => Class.verificationLabelText(result, Array(1)), /Invalid verification/);
+assert.throws(() => Class.runPipeline({ ...CLASS_TEXTS, trainlabels: CLASS_TEXTS.trainlabels.replace('"class":1', '"class":null') }), /Invalid/);
+const reorderedVerify = Class.runPipeline({ ...CLASS_TEXTS, verify: "name x z\nv2 9 9\nv1 1 1\n", verifylabels: JSON.stringify({
+  class_order: ["low", "high"], rows: [{ id: "v1", class: 0 }, { id: "v2", class: 1 }]
+}) });
+const savedVerify = Class.verificationLabelText(reorderedVerify, [0, 1]);
+const reloadedVerify = Class.runPipeline({ ...CLASS_TEXTS, verify: "name x z\nv1 1 1\nv2 9 9\n", verifylabels: savedVerify });
+assert.deepEqual(reloadedVerify.verify.labels, [1, 0]);
 assert.deepEqual(generic.classes, ["Class 1", "Class 2"]);
 assert.equal(result.models[0].sizeOverlap, -5.25);
 assert.deepEqual(Class.projectModel(result, result.models[0], "verify")[0], {
@@ -105,7 +130,7 @@ assert.equal(multiClass.models[0].dataOverlap, 6);
 assert.equal(Health.check({ ...CLASS_TEXTS, sissoIn: CLASS_TEXTS.sissoin }).level, "pass");
 const unlabeled = Class.runPipeline({ ...CLASS_TEXTS, verifylabels: undefined });
 assert.equal(Class.projectModel(unlabeled, unlabeled.models[0], "verify")[0].classIndex, null);
-assert.equal(Health.check({ ...CLASS_TEXTS, sissoIn: CLASS_TEXTS.sissoin, verifylabels: undefined }).level, "warning");
+assert.equal(Health.check({ ...CLASS_TEXTS, sissoIn: CLASS_TEXTS.sissoin, verifylabels: undefined }).level, "pass");
 assert.throws(() => Class.runPipeline({ ...CLASS_TEXTS, sissoin: CLASS_TEXTS.sissoin.replace("(3,3)", "(2,3)") }), /add up/);
 assert.throws(() => Class.runPipeline({ ...CLASS_TEXTS, trainlabels: CLASS_TEXTS.trainlabels.replace('"class":1', '"class":0') }), /mismatch/);
 assert.throws(() => Class.runPipeline({ ...CLASS_TEXTS, classdesc: CLASS_TEXTS.classdesc.replace("YES 0 0", "YES 9 0") }), /do not match/);

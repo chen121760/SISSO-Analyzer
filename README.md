@@ -54,7 +54,7 @@ in the SISSO 3.5 guide, section 4.1. Optional `train_labels.json` and
 `verify_labels.json` supply category mapping and validation labels. Their format is
 `{"class_order":["A","B"],"rows":[{"id":"sample-id","class":0},…]}`;
 rows are joined by ID, and training labels must agree with the category blocks.
-Without validation labels, verification points remain unlabeled.
+Without complete validation labels, only training samples are shown.
 The page and CSV use **Category 1, Category 2, …** as stable group labels.
 Names from `class_order` are used to validate category mapping.
 Reversing a descriptor axis does not change categories. Reordering category
@@ -68,7 +68,21 @@ non-convex categories are shown as sample envelopes. Thumbnail previews always
 use training reconstructions, are drawn when visible, and are paged in groups
 of 100 models.
 
-**Training + verification.** With `verify.dat`, the default plot overlays both
+**Verification classes.** Use **Set classes / Edit classes** in the page header to assign
+labels without writing JSON. Each training category has a count box; the last
+category automatically receives the remaining samples. This fills consecutive
+groups in `verify.dat` row order, like `nsample=(n1,n2,…)`. The preview shows row
+ranges and boundary sample IDs.
+Save that grouping directly, or choose **Adjust samples** for individual changes.
+Counts must match the training category count and total the verification sample
+count; zero is allowed for an absent category. Alternatively, select samples
+and assign their category in bulk, or edit individual rows. **Save classes**
+applies the labels and saves them with the project. **Export labels JSON** writes
+an ID-based `verify_labels.json` for reuse. Partial labels can be saved with
+`class:null`; only training data is displayed until every validation sample is
+labeled. These assignments leave the training `nsample` and hulls unchanged.
+
+**Training + verification.** With a fully labeled `verify.dat`, the default plot overlays both
 datasets: category color/shape stays the same, filled markers are training and
 hollow markers are verification. The dataset selector also supports either set
 alone. Verification points never participate in hull construction. The sample

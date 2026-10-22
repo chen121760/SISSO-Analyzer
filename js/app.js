@@ -29,6 +29,7 @@
     classSort: "rank",
     classView: "grid",
     classHullMode: "rebuilt",
+    classLabelDraft: null,
     projectId: null,
     sortKey: "rank",
     sortAsc: true,
@@ -512,7 +513,7 @@
         if (isClassification()) {
           var cs = saved.classification || {};
           if (state.result.models.some(function (m) { return m.rank === cs.rank; })) state.classRank = cs.rank;
-          state.classDataset = ["train", "verify", "both"].includes(cs.dataset) && (cs.dataset !== "verify" || state.result.verify) ? cs.dataset : state.classDataset;
+          state.classDataset = ["train", "verify", "both"].includes(cs.dataset) && (cs.dataset === "train" || Classification.hasVerificationLabels(state.result)) ? cs.dataset : state.classDataset;
           state.classPage = Number.isInteger(cs.page) && cs.page >= 0 ? cs.page : 0;
           state.classSort = ["rank", "dataOverlap", "sizeOverlap"].includes(cs.sort) ? cs.sort : "rank";
           state.classView = cs.view === "table" ? "table" : "grid";
@@ -1452,7 +1453,8 @@
       state.result = classified;
       state.texts = Object.assign({}, roleTexts);
       state.classRank = classified.models[0].rank;
-      state.classDataset = classified.verify ? "both" : "train";
+      state.classDataset = Classification.hasVerificationLabels(classified) ? "both" : "train";
+      state.classLabelDraft = null;
       state.classPage = 0;
       state.classSort = "rank";
       state.classView = "grid";
@@ -1595,6 +1597,7 @@
     var field = el("label", "field");
     field.appendChild(el("span", "field__label", label));
     var select = el("select", "select");
+    select.setAttribute("aria-label", label);
     options.forEach(function (o) {
       var option = el("option", "", o[1]); option.value = o[0]; select.appendChild(option);
       option.disabled = !!o[2];
@@ -1608,7 +1611,7 @@
   function classificationGeometry(model) {
     if (classGeometryCache.has(model.rank)) return classGeometryCache.get(model.rank);
     var geo = { train: Classification.projectModel(state.result, model, "train"),
-      verify: state.result.verify ? Classification.projectModel(state.result, model, "verify") : [] };
+      verify: Classification.hasVerificationLabels(state.result) ? Classification.projectModel(state.result, model, "verify") : [] };
     geo.hulls = Classification.rebuildHulls(geo.train, state.result.classes.length, state.result.meta.sissoIn.descDim);
     if (classGeometryCache.size >= 200) classGeometryCache.delete(classGeometryCache.keys().next().value);
     classGeometryCache.set(model.rank, geo);
@@ -1616,12 +1619,193 @@
   }
 
   function classificationDatasets() {
-    if (!state.result.verify) return ["train"];
+    if (!Classification.hasVerificationLabels(state.result)) return ["train"];
     return state.classDataset === "both" ? ["train", "verify"] : [state.classDataset];
   }
 
   function classXY(point, dim) {
     return [point.coords[0], dim === 2 ? point.coords[1] : point.classIndex === null ? -1 : point.classIndex];
+  }
+
+  function saveVerificationLabels(labels) {
+    var text = Classification.verificationLabelText(state.result, labels);
+    state.result.verify.labels = labels.slice();
+    state.texts.verifylabels = text;
+    state.files.verifylabels = { name: "verify_labels.json", file: null };
+    state.result.hasClassNames = true;
+    state.classLabelDraft = null;
+    classGeometryCache.clear();
+    state.classDataset = Classification.hasVerificationLabels(state.result) ? "both" : "train";
+    renderClassification(); persistSession();
+    document.getElementById("verification-label-open").focus();
+    storeProjectLocally().then(function (saved) {
+      toast(I18N.t(saved ? "verificationSaved" : "verificationApplied"));
+    });
+  }
+
+  function buildVerificationLabels() {
+    var res = state.result, data = res.verify, nClasses = res.classes.length;
+    var draft = state.classLabelDraft;
+    if (!draft) {
+      var labels = data.labels ? data.labels.slice() : Array(data.n).fill(null);
+      var counts = res.classes.map(function (_, c) { return labels.filter(function (v) { return v === c; }).length; });
+      var grouped = labels.every(function (c, i) { return c !== null && (!i || c >= labels[i - 1]); });
+      draft = state.classLabelDraft = { labels: labels, selected: new Set(), counts: grouped ? counts.map(String) : Array(nClasses).fill(""),
+        mode: grouped || labels.every(function (c) { return c === null; }) ? "counts" : "manual" };
+    }
+    var savedCount = data.labels ? data.labels.filter(function (c) { return c !== null; }).length : 0;
+    var manager = el("div", "class-label-manager");
+    var statusText = el("div", "class-label-status");
+    statusText.appendChild(el("span", "", I18N.t("classVerify")));
+    statusText.appendChild(el("strong", "", I18N.format("verificationProgress", { n: savedCount, total: data.n })));
+    if (!Classification.hasVerificationLabels(res)) statusText.appendChild(el("span", "class-note", I18N.t("verificationTrainOnly")));
+    manager.appendChild(statusText);
+    var dialog = el("dialog", "class-label-dialog"); dialog.id = "verification-label-dialog";
+    dialog.setAttribute("aria-labelledby", "verification-label-title");
+    var open = classButton(I18N.t(Classification.hasVerificationLabels(res) ? "verificationEdit" : "verificationSetup"), function () {
+      dialog.showModal(); (draft.mode === "counts" ? countInputs[0] : all).focus();
+    });
+    open.id = "verification-label-open"; manager.appendChild(open);
+    var header = el("header", "class-label-header");
+    header.appendChild(el("h2", "", I18N.t("verificationLabels"))).id = "verification-label-title";
+    header.appendChild(classButton(I18N.t("verificationClose"), function () { dialog.close(); }));
+    dialog.appendChild(header);
+    var panel = el("div", "class-labels");
+    panel.appendChild(el("p", "class-note", I18N.t("verificationEditNote")));
+    var modes = el("div", "class-label-modes");
+    var countsMode = classButton(I18N.t("verificationCountsMode"), function () { setMode("counts"); });
+    var manualMode = classButton(I18N.t("verificationManualMode"), function () {
+      if (draft.mode === "counts" && parsed) { draft.labels = parsed.slice(); renderRows(); }
+      setMode("manual");
+    });
+    modes.appendChild(countsMode); modes.appendChild(manualMode); panel.appendChild(modes);
+    var countsSection = el("div"); panel.appendChild(countsSection);
+    var help = el("p", "class-note", I18N.format("verificationCountsHelp", { n: data.n }));
+    help.id = "verification-counts-help"; countsSection.appendChild(help);
+    var ranges = el("div", "class-count-ranges"); countsSection.appendChild(ranges);
+    var rangeRows = [], rangeIds = [];
+    var countInputs = res.classes.map(function (_, c) {
+      var card = el("label", "class-count-range");
+      var caption = el("span", "", I18N.format("classificationCategory", { n: c + 1 })); card.appendChild(caption);
+      var input = el("input", "input class-counts-input"); input.type = "text"; input.inputMode = "numeric";
+      input.value = draft.counts[c]; input.placeholder = "0";
+      input.setAttribute("aria-describedby", "verification-counts-help verification-counts-error");
+      input.setAttribute("aria-label", I18N.format("classificationCategory", { n: c + 1 }));
+      if (c === nClasses - 1) {
+        input.readOnly = true;
+        caption.appendChild(el("small", "", I18N.t("verificationRemainder")));
+      }
+      card.appendChild(input);
+      rangeRows.push(card.appendChild(el("p", "", "—")));
+      rangeIds.push(card.appendChild(el("small")));
+      input.addEventListener("input", previewCounts); ranges.appendChild(card);
+      return input;
+    });
+    var fill = classButton(I18N.t("verificationFill"), function () {
+      if (!parsed) return;
+      draft.labels = parsed.slice(); renderRows(); setMode("manual"); all.focus();
+    });
+    fill.classList.add("class-count-adjust");
+    var error = el("p", "class-label-error"); error.id = "verification-counts-error"; error.setAttribute("role", "alert"); countsSection.appendChild(error);
+    countsSection.appendChild(fill);
+    var parsed = null;
+    function previewCounts() {
+      parsed = null; error.textContent = "";
+      rangeRows.forEach(function (row) { row.textContent = "—"; });
+      rangeIds.forEach(function (row) { row.textContent = ""; });
+      var entered = countInputs.slice(0, -1).map(function (input) { return input.value.trim(); });
+      var valid = entered.every(function (v) { return /^\d+$/.test(v) && Number.isSafeInteger(Number(v)); });
+      var total = entered.reduce(function (sum, v) { return sum + Number(v); }, 0);
+      countInputs[nClasses - 1].value = valid && total <= data.n ? String(data.n - total) : "";
+      draft.counts = countInputs.map(function (input) { return input.value; });
+      if (valid || entered.some(function (v) { return v !== ""; })) {
+        try {
+          if (!valid) throw new Error("verificationCountInteger");
+          if (total > data.n) { var tooMany = new Error("verificationCountsTotal"); tooMany.total = total; throw tooMany; }
+          parsed = Classification.labelsFromCounts(draft.counts.join(","), nClasses, data.n);
+          var start = 0;
+          res.classes.forEach(function (_, c) {
+            var n = Number(draft.counts[c]);
+            rangeRows[c].textContent = n ? I18N.format("verificationRange", { from: start + 1, to: start + n }) : "—";
+            if (n) rangeIds[c].textContent = data.names[start] + " → " + data.names[start + n - 1];
+            start += n;
+          });
+        } catch (e) {
+          error.textContent = I18N.format(e.message, { k: nClasses, n: data.n, total: e.total });
+        }
+      }
+      error.hidden = !error.textContent; fill.disabled = !parsed;
+      countInputs.forEach(function (input) { input.setAttribute("aria-invalid", String(!!error.textContent)); });
+      if (save) updateStatus();
+    }
+    previewCounts();
+    function resetCounts() { countInputs.forEach(function (input) { input.value = ""; }); previewCounts(); }
+    var manualSection = el("div"); panel.appendChild(manualSection);
+    var bulk = el("div", "class-controls"), selected = el("span");
+    var options = [["", I18N.t("classificationUnlabeled")]].concat(res.classes.map(function (_, c) {
+      return [String(c), I18N.format("classificationCategory", { n: c + 1 })];
+    }));
+    var bulkValue = "0";
+    bulk.appendChild(classSelect(I18N.t("verificationBulkCategory"), options, bulkValue, function (v) { bulkValue = v; }));
+    var assign = classButton(I18N.t("verificationAssign"), function () {
+      data.names.forEach(function (id, i) { if (draft.selected.has(id)) draft.labels[i] = bulkValue === "" ? null : Number(bulkValue); });
+      resetCounts(); renderRows(); updateStatus();
+    });
+    bulk.appendChild(assign); bulk.appendChild(selected); manualSection.appendChild(bulk);
+    var box = el("div", "class-sample-scroll"), table = el("table", "class-table");
+    var thead = el("thead"), header = el("tr"), selectCell = el("th"), all = el("input");
+    all.type = "checkbox"; all.setAttribute("aria-label", I18N.t("verificationSelectAll"));
+    all.addEventListener("change", function () {
+      draft.selected.clear(); if (all.checked) data.names.forEach(function (id) { draft.selected.add(id); });
+      renderRows(); updateStatus();
+    });
+    selectCell.appendChild(all); header.appendChild(selectCell);
+    ["#", I18N.t("classificationSample"), I18N.t("classificationCategories")].forEach(function (s) { header.appendChild(el("th", "", s)); });
+    thead.appendChild(header); table.appendChild(thead);
+    var tbody = el("tbody"); table.appendChild(tbody); box.appendChild(table); manualSection.appendChild(box);
+    var actions = el("footer", "class-label-footer"), status = el("span"); status.setAttribute("role", "status");
+    var save = classButton(I18N.t("verificationSave"), function () {
+      var labels = draft.mode === "counts" ? parsed : draft.labels;
+      if (!labels) return;
+      dialog.close(); saveVerificationLabels(labels);
+    });
+    save.className = "btn btn--primary";
+    var exportLabels = classButton(I18N.t("verificationExport"), function () {
+      downloadTextFile("verify_labels.json", Classification.verificationLabelText(res, draft.mode === "counts" ? parsed : draft.labels), "application/json");
+    });
+    actions.appendChild(status); actions.appendChild(exportLabels); actions.appendChild(save);
+    function updateStatus() {
+      selected.textContent = I18N.format("verificationSelected", { n: draft.selected.size });
+      assign.disabled = !draft.selected.size;
+      all.checked = draft.selected.size === data.n; all.indeterminate = draft.selected.size > 0 && !all.checked;
+      var labels = draft.mode === "counts" && parsed ? parsed : draft.labels;
+      status.textContent = I18N.format("verificationDraft", { n: labels.filter(function (c) { return c !== null; }).length, total: data.n });
+      save.disabled = exportLabels.disabled = draft.mode === "counts" && !parsed;
+    }
+    function setMode(mode) {
+      draft.mode = mode;
+      countsSection.hidden = mode !== "counts"; manualSection.hidden = mode !== "manual";
+      countsMode.setAttribute("aria-pressed", String(mode === "counts")); manualMode.setAttribute("aria-pressed", String(mode === "manual"));
+      updateStatus();
+    }
+    function renderRows() {
+      tbody.innerHTML = "";
+      data.names.forEach(function (id, i) {
+        var row = el("tr"), cell = el("td"), check = el("input");
+        check.type = "checkbox"; check.checked = draft.selected.has(id); check.setAttribute("aria-label", I18N.t("verificationSelect") + " " + id);
+        check.addEventListener("change", function () { if (check.checked) draft.selected.add(id); else draft.selected.delete(id); updateStatus(); });
+        cell.appendChild(check); row.appendChild(cell); row.appendChild(el("td", "", String(i + 1))); row.appendChild(el("td", "", id));
+        var category = classSelect(id, options, draft.labels[i] === null ? "" : String(draft.labels[i]), function (v) {
+          draft.labels[i] = v === "" ? null : Number(v); resetCounts(); updateStatus();
+        });
+        category.firstChild.className = "sr-only";
+        category.lastChild.setAttribute("aria-label", I18N.t("classificationCategories") + " · " + id);
+        var categoryCell = el("td"); categoryCell.appendChild(category); row.appendChild(categoryCell); tbody.appendChild(row);
+      });
+    }
+    renderRows(); setMode(draft.mode);
+    dialog.appendChild(panel); dialog.appendChild(actions); manager.appendChild(dialog);
+    return manager;
   }
 
   function buildClassThumb(model) {
@@ -1701,6 +1885,7 @@
   function renderClassification() {
     if (!isClassification()) return;
     var res = state.result, info = res.meta.sissoIn;
+    if (!Classification.hasVerificationLabels(res)) state.classDataset = "train";
     var classNames = res.classes.map(function (_, i) { return I18N.format("classificationCategory", { n: i + 1 }); });
     var root = $("#view-classification");
     var oldGallery = root.querySelector(".class-gallery");
@@ -1711,47 +1896,59 @@
     var ctx = $("#app-context");
     ctx.textContent = I18N.t("classificationTitle") + " · " + info.descDim + "D";
     ctx.hidden = false;
-    root.appendChild(el("h1", "", I18N.t("classificationTitle"))).id = "class-title";
-    root.appendChild(el("p", "class-note", I18N.t("classificationNote")));
-    root.appendChild(el("p", "class-note", I18N.t("classificationBlockSource")));
-    var kpis = el("div", "run-overview");
+    var heading = el("header", "class-header"), intro = el("div");
+    intro.appendChild(el("h1", "", I18N.t("classificationTitle"))).id = "class-title";
+    intro.appendChild(el("p", "class-note", I18N.t("classificationNote")));
+    heading.appendChild(intro);
+    if (res.verify) heading.appendChild(buildVerificationLabels());
+    root.appendChild(heading);
+    var kpis = el("div", "run-overview class-overview");
     [["kpiModels", res.models.length], ["kpiTrain", res.train.n], ["kpiVerify", res.verify ? res.verify.n : "—"],
       ["classificationCategories", info.classCounts.join(" + ")], ["kpiFeatures", res.meta.nFeatures]].forEach(function (item) {
       var card = el("div", "kpi");
+      if (item[0] === "classificationCategories") card.title = I18N.t("classificationBlockSource");
       card.appendChild(el("div", "kpi__label", I18N.t(item[0])));
       card.appendChild(el("div", "kpi__value", String(item[1])));
       kpis.appendChild(card);
     });
     root.appendChild(kpis);
-    var controls = el("div", "class-controls");
-    controls.appendChild(classSelect(I18N.t("classificationView"), [["table", I18N.t("viewTable")], ["grid", I18N.t("viewGrid")]], state.classView,
-      function (v) { state.classView = v; renderClassification(); }));
-    controls.appendChild(classSelect(I18N.t("sortBy"), [["rank", I18N.t("colRank")],
+    var controls = el("div", "class-browser-controls"), browserHeader = el("div", "class-browser-header");
+    browserHeader.appendChild(el("h2", "", I18N.t("classificationCandidates")));
+    var viewSwitch = el("div", "class-view-switch");
+    [["grid", "viewGrid"], ["table", "viewTable"]].forEach(function (v) {
+      var button = classButton(I18N.t(v[1]), function () { state.classView = v[0]; renderClassification(); });
+      button.setAttribute("aria-pressed", String(state.classView === v[0])); viewSwitch.appendChild(button);
+    });
+    browserHeader.appendChild(viewSwitch); controls.appendChild(browserHeader);
+    var sortRow = el("div", "class-browser-sort");
+    sortRow.appendChild(classSelect(I18N.t("sortBy"), [["rank", I18N.t("colRank")],
       ["dataOverlap", I18N.t("classificationOverlap")], ["sizeOverlap", I18N.t("classificationSize")]],
     state.classSort, function (v) { state.classSort = v; state.classPage = 0; renderClassification(); }));
-    controls.appendChild(classButton(I18N.t("classificationExportRankings"), function () {
+    var rankExport = classButton(I18N.t("classificationExportRankShort"), function () {
       var rows = [["rank", "official_data_overlap", "official_size_overlap", "descriptor_1"]];
       if (info.descDim === 2) rows[0].push("descriptor_2");
       res.models.forEach(function (m) { rows.push([m.rank, m.dataOverlap, m.sizeOverlap].concat(m.descriptors.map(function (d) { return d.original; }))); });
       downloadTextFile("sisso-classification-rankings.csv", Core.rowsToCsv(rows), "text/csv;charset=utf-8");
-    }));
+    });
+    rankExport.title = I18N.t("classificationExportRankings");
     var sorted = res.models.slice().sort(function (a, b) { return a[state.classSort] - b[state.classSort] || a.rank - b.rank; });
     var pages = Math.ceil(sorted.length / 100);
     state.classPage = Math.min(state.classPage, pages - 1);
-    controls.appendChild(classButton("←", function () { state.classPage--; renderClassification(); }, state.classPage === 0));
-    controls.lastChild.setAttribute("aria-label", I18N.t("classificationPrevious"));
-    controls.appendChild(el("span", "", (state.classPage + 1) + " / " + pages));
-    controls.appendChild(classButton("→", function () { state.classPage++; renderClassification(); }, state.classPage >= pages - 1));
-    controls.lastChild.setAttribute("aria-label", I18N.t("classificationNext"));
-    root.appendChild(controls);
+    var pager = el("div", "class-pager");
+    pager.appendChild(classButton("←", function () { state.classPage--; renderClassification(); }, state.classPage === 0));
+    pager.lastChild.setAttribute("aria-label", I18N.t("classificationPrevious"));
+    pager.appendChild(el("span", "", (state.classPage + 1) + " / " + pages));
+    pager.appendChild(classButton("→", function () { state.classPage++; renderClassification(); }, state.classPage >= pages - 1));
+    pager.lastChild.setAttribute("aria-label", I18N.t("classificationNext"));
+    sortRow.appendChild(pager); controls.appendChild(sortRow);
+    var browserFooter = el("div", "class-browser-caption");
+    browserFooter.appendChild(el("span", "class-note", I18N.t("classificationPreviewNote"))); browserFooter.appendChild(rankExport); controls.appendChild(browserFooter);
     var layout = el("div", "class-layout" + (state.classView === "grid" ? " class-layout--gallery" : ""));
+    var modelBrowser = el("aside", "class-model-browser"); modelBrowser.appendChild(controls); layout.appendChild(modelBrowser);
     if (state.classView === "grid") {
-      var batchPane = el("div", "class-batch");
-      batchPane.appendChild(el("p", "class-note", I18N.t("classificationPreviewNote")));
       var gallery = buildClassGallery(sorted.slice(state.classPage * 100, state.classPage * 100 + 100));
       gallery.dataset.page = state.classPage;
-      batchPane.appendChild(gallery);
-      layout.appendChild(batchPane);
+      modelBrowser.appendChild(gallery);
     } else {
     var tableBox = el("div", "class-models");
     var table = el("table", "class-table");
@@ -1774,17 +1971,19 @@
       row.appendChild(el("td", "", String(m.sizeOverlap)));
       body.appendChild(row);
     });
-    table.appendChild(body); tableBox.appendChild(table); layout.appendChild(tableBox);
+    table.appendChild(body); tableBox.appendChild(table); modelBrowser.appendChild(tableBox);
     }
     var detail = el("section", "class-detail");
     var model = res.models.find(function (m) { return m.rank === state.classRank; }) || res.models[0];
     var geo = classificationGeometry(model);
     if (state.classHullMode === "official" && !model.hulls) state.classHullMode = "rebuilt";
-    detail.appendChild(el("h2", "", I18N.t("classificationModel") + " " + model.rank));
+    var modelHeader = el("div", "class-model-header");
+    modelHeader.appendChild(el("h2", "", I18N.t("classificationModel") + " " + model.rank));
+    modelHeader.appendChild(el("span", "class-model-score", I18N.t("classificationOverlap") + ": " + model.dataOverlap + " · " + I18N.t("classificationSize") + ": " + model.sizeOverlap));
+    detail.appendChild(modelHeader);
     model.descriptors.forEach(function (d, i) { detail.appendChild(el("pre", "class-formula", "d" + (i + 1) + " = " + d.original)); });
-    detail.appendChild(el("p", "class-note", I18N.t("classificationRankNote")));
     var datasets = [["train", I18N.t("classTrain")]];
-    if (res.verify) { datasets.unshift(["both", I18N.t("classificationBoth")]); datasets.push(["verify", I18N.t("classVerify")]); }
+    if (Classification.hasVerificationLabels(res)) { datasets.unshift(["both", I18N.t("classificationBoth")]); datasets.push(["verify", I18N.t("classVerify")]); }
     var dsControls = el("div", "class-controls");
     dsControls.appendChild(classSelect(I18N.t("classificationDataset"), datasets, state.classDataset,
       function (v) { state.classDataset = v; renderClassification(); }));
@@ -1795,18 +1994,21 @@
       geo.hulls = Classification.rebuildHulls(geo.train, res.classes.length, info.descDim);
       state.classHullMode = "rebuilt"; renderClassification(); toast(I18N.t("classificationRebuilt"));
     }));
-    dsControls.appendChild(classButton(I18N.t("classificationExportPoints"), function () {
+    var exports = el("details", "class-export-menu"), exportList = el("div", "class-export-options");
+    exports.appendChild(el("summary", "btn btn--secondary", I18N.t("exportCsv")));
+    exportList.appendChild(classButton(I18N.t("classificationExportPoints"), function () {
       downloadTextFile("sisso-classification-model-" + model.rank + "-" + state.classDataset + ".csv",
-        Core.rowsToCsv(Classification.exportRows(res, model, state.classDataset)), "text/csv;charset=utf-8");
+        Core.rowsToCsv(Classification.exportRows(res, model, state.classDataset)), "text/csv;charset=utf-8"); exports.open = false;
     }));
-    dsControls.appendChild(classButton(I18N.t("classificationExportHulls"), function () {
+    exportList.appendChild(classButton(I18N.t("classificationExportHulls"), function () {
       var rows = [["source", "class_index", "descriptor_1"]];
       if (info.descDim === 2) rows[0].push("descriptor_2");
       (state.classHullMode === "official" ? model.hulls : geo.hulls).forEach(function (hull, c) {
         hull.forEach(function (coords) { rows.push([state.classHullMode, c].concat(coords)); });
       });
-      downloadTextFile("sisso-classification-hulls-" + model.rank + "-" + state.classHullMode + ".csv", Core.rowsToCsv(rows), "text/csv;charset=utf-8");
+      downloadTextFile("sisso-classification-hulls-" + model.rank + "-" + state.classHullMode + ".csv", Core.rowsToCsv(rows), "text/csv;charset=utf-8"); exports.open = false;
     }));
+    exports.appendChild(exportList); dsControls.appendChild(exports);
     detail.appendChild(dsControls);
     var points = [];
     classificationDatasets().forEach(function (ds) {
@@ -1814,16 +2016,17 @@
     });
     var finite = points.filter(function (p) { return p.finite; });
     if (finite.length !== points.length) detail.appendChild(el("p", "warning", I18N.format("classificationNonfinite", { n: points.length - finite.length })));
+    var notes = el("div", "class-chart-caption");
     if (model.official && state.classDataset !== "verify" && state.classHullMode === "official") {
       var no = model.official.filter(function (p) { return p.classified === "NO"; }).length;
-      detail.appendChild(el("p", "class-note", "SISSO classified? YES: " + (model.official.length - no) + " · NO: " + no + ". " + I18N.t("classificationOfficialNote")));
+      notes.appendChild(el("p", "class-note", "SISSO classified? YES: " + (model.official.length - no) + " · NO: " + no + ". " + I18N.t("classificationOfficialNote")));
     }
-    detail.appendChild(el("p", "class-note", I18N.t("classificationDatasetNote")));
-    detail.appendChild(el("p", "class-note", I18N.t(state.classHullMode === "official" ? "classificationHullNote" : "classificationRebuiltNote")));
-    if (state.classHullMode === "rebuilt" && info.isconvex.includes(0)) detail.appendChild(el("p", "class-note", I18N.t("classificationEnvelopeNote")));
+    if (Classification.hasVerificationLabels(res)) notes.appendChild(el("p", "class-note", I18N.t("classificationDatasetNote")));
+    notes.appendChild(el("p", "class-note", I18N.t(state.classHullMode === "official" ? "classificationHullNote" : "classificationRebuiltNote")));
+    if (state.classHullMode === "rebuilt" && info.isconvex.includes(0)) notes.appendChild(el("p", "class-note", I18N.t("classificationEnvelopeNote")));
     var chart = el("div", "class-chart");
     chart.setAttribute("role", "img"); chart.setAttribute("aria-label", I18N.t("classificationSpace"));
-    detail.appendChild(chart); layout.appendChild(detail); root.appendChild(layout);
+    detail.appendChild(chart); detail.appendChild(notes); layout.appendChild(detail); root.appendChild(layout);
     if (gallery) gallery.scrollTop = galleryScroll;
     var colors = getThemeColors();
     var palette = [colors.train, colors.verify, "#649477", "#b782a7"];
