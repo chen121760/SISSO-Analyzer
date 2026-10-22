@@ -1665,6 +1665,7 @@
       detail.appendChild(el("p", "class-note", "SISSO classified? YES: " + (points.length - no) + " · NO: " + no + ". " + I18N.t("classificationOfficialNote")));
     }
     if (model.hulls) detail.appendChild(el("p", "class-note", I18N.t("classificationHullNote")));
+    else if (info.descDim === 2) detail.appendChild(el("p", "class-note", I18N.t("classificationNoHull")));
     var chart = el("div", "class-chart");
     chart.setAttribute("role", "img"); chart.setAttribute("aria-label", I18N.t("classificationSpace"));
     detail.appendChild(chart); layout.appendChild(detail); root.appendChild(layout);
