@@ -54,6 +54,10 @@ in the SISSO 3.5 guide, section 4.1. Optional `train_labels.json` and
 `{"class_order":["low","high"],"rows":[{"id":"sample-id","class":0},…]}`;
 rows are joined by ID, and training labels must agree with the category blocks.
 Without validation labels, verification points remain unlabeled.
+The page uses **Category 1, Category 2, …** as stable group labels. Names from
+`class_order` are shown alongside them; their meaning is supplied by the dataset.
+Reversing a descriptor axis does not change categories. Reordering category
+blocks requires matching `nsample` counts and sample-ID label assignments.
 
 The classification table preserves SISSO's `#data_overlap` and `size_overlap`,
 including negative separation scores. Lower values are preferred, with overlap

@@ -49,6 +49,23 @@ assert.equal(result.meta.nFeatures, 2);
 assert.equal(result.columns[1].role, "feature");
 assert.deepEqual(result.train.labels, [0, 0, 0, 1, 1, 1]);
 assert.deepEqual(result.classes, ["low", "high"]);
+assert.equal(result.hasClassNames, true);
+const swapLabels = (text) => {
+  const doc = JSON.parse(text); doc.class_order.reverse(); doc.rows.forEach((row) => { row.class = 1 - row.class; }); return JSON.stringify(doc);
+};
+const reorderedTrain = "name x z\nd 5 5\ne 6 5\nf 5 6\na 0 0\nb 1 0\nc 0 1\n";
+const swapped = Class.runPipeline({ ...CLASS_TEXTS, train: reorderedTrain,
+  classdesc: undefined, classhull: undefined, trainlabels: swapLabels(CLASS_TEXTS.trainlabels), verifylabels: swapLabels(CLASS_TEXTS.verifylabels) });
+assert.deepEqual(swapped.classes, ["high", "low"]);
+assert.equal(Class.projectModel(swapped, swapped.models[0], "train")[0].classIndex, 0);
+assert.equal(Class.projectModel(swapped, swapped.models[0], "verify")[0].classIndex, 0);
+assert.throws(() => Class.runPipeline({ ...CLASS_TEXTS, train: reorderedTrain, classdesc: undefined, classhull: undefined }), /class block mismatch/);
+const reversedAxes = Class.runPipeline({ ...CLASS_TEXTS, uspace: CLASS_TEXTS.uspace.replace(/^x /, "(-x) "), classdesc: undefined, classhull: undefined });
+assert.deepEqual(reversedAxes.train.labels, result.train.labels);
+assert.equal(Class.projectModel(reversedAxes, reversedAxes.models[0], "train")[1].coords[0], -1);
+const generic = Class.runPipeline({ ...CLASS_TEXTS, trainlabels: undefined, verifylabels: undefined });
+assert.equal(generic.hasClassNames, false);
+assert.deepEqual(generic.classes, ["Class 1", "Class 2"]);
 assert.equal(result.models[0].sizeOverlap, -5.25);
 assert.deepEqual(Class.projectModel(result, result.models[0], "verify")[0], {
   name: "v", index: 1, coords: [2, 3], classIndex: 1, finite: true, classified: null,

@@ -1587,6 +1587,10 @@
   function renderClassification() {
     if (!isClassification()) return;
     var res = state.result, info = res.meta.sissoIn;
+    var classNames = res.classes.map(function (name, i) {
+      var generic = I18N.format("classificationCategory", { n: i + 1 });
+      return res.hasClassNames ? generic + " · " + name : generic;
+    });
     var root = $("#view-classification");
     if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
     root.innerHTML = "";
@@ -1595,6 +1599,7 @@
     ctx.hidden = false;
     root.appendChild(el("h1", "", I18N.t("classificationTitle"))).id = "class-title";
     root.appendChild(el("p", "class-note", I18N.t("classificationNote")));
+    root.appendChild(el("p", "class-note", I18N.t(res.hasClassNames ? "classificationLabelSource" : "classificationBlockSource")));
     var kpis = el("div", "run-overview");
     [["kpiModels", res.models.length], ["kpiTrain", res.train.n], ["kpiVerify", res.verify ? res.verify.n : "—"],
       ["classificationCategories", info.classCounts.join(" + ")], ["kpiFeatures", res.meta.nFeatures]].forEach(function (item) {
@@ -1627,7 +1632,11 @@
     var tableBox = el("div", "class-models");
     var table = el("table", "class-table");
     var head = el("thead"), hr = el("tr");
-    ["colRank", "classificationOverlap", "classificationSize"].forEach(function (key) { hr.appendChild(el("th", "", I18N.t(key))); });
+    ["colRank", "classificationOverlap", "classificationSize"].forEach(function (key) {
+      var th = el("th", "", I18N.t(key));
+      if (key !== "colRank") th.title = I18N.t("classificationScoreNote");
+      hr.appendChild(th);
+    });
     head.appendChild(hr); table.appendChild(head);
     var body = el("tbody");
     sorted.slice(state.classPage * 100, state.classPage * 100 + 100).forEach(function (m) {
@@ -1646,7 +1655,7 @@
     var model = res.models.find(function (m) { return m.rank === state.classRank; }) || res.models[0];
     detail.appendChild(el("h2", "", I18N.t("classificationModel") + " " + model.rank));
     model.descriptors.forEach(function (d, i) { detail.appendChild(el("pre", "class-formula", "d" + (i + 1) + " = " + d.original)); });
-    detail.appendChild(el("p", "class-note", I18N.t("classificationScoreNote")));
+    detail.appendChild(el("p", "class-note", I18N.t("classificationRankNote")));
     var datasets = [["train", I18N.t("classTrain")]];
     if (res.verify) datasets.push(["verify", I18N.t("classVerify")]);
     var dsControls = el("div", "class-controls");
@@ -1673,7 +1682,7 @@
     var palette = [colors.train, colors.verify, "#649477", "#b782a7"];
     var symbols = ["circle", "triangle", "rect", "diamond"];
     var series = [];
-    res.classes.concat([I18N.t("classificationUnlabeled")]).forEach(function (name, c) {
+    classNames.concat([I18N.t("classificationUnlabeled")]).forEach(function (name, c) {
       var group = finite.filter(function (p) { return p.classIndex === (c === res.classes.length ? null : c); });
       if (!group.length) return;
       series.push({ name: name + " (" + group.length + ")", type: "scatter", symbol: symbols[c % symbols.length], symbolSize: 9,
@@ -1682,7 +1691,7 @@
           itemStyle: p.classified === "NO" ? { borderWidth: 2, borderColor: colors.text } : {} }; }) });
     });
     if (model.hulls) model.hulls.forEach(function (hull, i) {
-      series.push({ name: I18N.t("classificationHull") + " " + res.classes[i], type: "line", showSymbol: false, silent: true,
+      series.push({ name: I18N.t("classificationHull") + " " + classNames[i], type: "line", showSymbol: false, silent: true,
         itemStyle: { color: palette[i % palette.length] },
         lineStyle: { color: palette[i % palette.length], type: "dashed", width: 1 }, data: hull.concat([hull[0]]) });
     });
@@ -1710,7 +1719,7 @@
     var sb = el("tbody");
     points.forEach(function (p) {
       var row = el("tr");
-      [p.name, p.classIndex === null ? "—" : res.classes[p.classIndex]].concat(p.coords, [p.classified || "—"]).forEach(function (v) {
+      [p.name, p.classIndex === null ? "—" : classNames[p.classIndex]].concat(p.coords, [p.classified || "—"]).forEach(function (v) {
         row.appendChild(el("td", "", String(v)));
       }); sb.appendChild(row);
     });

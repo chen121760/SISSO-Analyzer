@@ -217,6 +217,7 @@
       });
     });
     var result = { taskType: "classification", train: train, verify: verify, models: models, classes: classes,
+      hasClassNames: !!(files.trainlabels || files.verifylabels),
       meta: { taskType: "classification", targetName: "Classification", nModels: models.length,
         nTrain: train.n, nVerify: verify ? verify.n : 0, nFeatures: header.length - 1, sissoIn: info },
       columns: nameMap.map(function (r, i) { return { letter: r.new_name, original: r.original_name, role: i ? "feature" : "name" }; }) };
