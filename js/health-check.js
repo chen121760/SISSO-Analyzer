@@ -29,11 +29,11 @@
  */
 (function (root, factory) {
   if (typeof module === "object" && module.exports) {
-    module.exports = factory(require("./sisso-core.js"));
+    module.exports = factory(require("./sisso-core.js"), require("./sisso-classification.js"));
   } else {
-    root.HealthCheck = factory(root.SissoCore);
+    root.HealthCheck = factory(root.SissoCore, root.SissoClassification);
   }
-})(typeof self !== "undefined" ? self : this, function (Core) {
+})(typeof self !== "undefined" ? self : this, function (Core, Classification) {
   "use strict";
 
   function newReport() {
@@ -503,6 +503,22 @@
   function check(files) {
     var report = newReport();
     var F = files || {};
+
+    if (Classification && Classification.isClassification(F)) {
+      try {
+        var classified = Classification.runPipeline({ train: F.train, verify: F.verify, top: F.top,
+          uspace: F.uspace, sissoin: F.sissoIn, trainlabels: F.trainlabels, verifylabels: F.verifylabels,
+          classdesc: F.classdesc, classhull: F.classhull });
+        addPass(report, "classification", "Classification: " + classified.models.length + " models, " +
+          classified.train.n + " training samples, category blocks " + classified.meta.sissoIn.classCounts.join(" + ") + ".");
+        addPass(report, "classification-semantics", "Official overlap statistics; descriptors have no regression coefficients or target column.");
+        if (classified.models[0].official) addPass(report, "classification-top1", "Official top1 descriptor coordinates match the input features.");
+        if (classified.verify && !classified.verify.labels) addWarn(report, "classification-verify-labels", "No verify_labels.json: verification points are shown without class labels.");
+      } catch (err) {
+        addErr(report, "classification", err.message);
+      }
+      return finalize(report);
+    }
 
     var required = [
       { key: "train", label: "train.dat" },

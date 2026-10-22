@@ -20,8 +20,9 @@ Interactive web analyzer for [SISSO](https://github.com/rouyang2017/SISSO) resul
 
 ## Scope
 
-Single-target and multi-task (MT-SISSO) **regression**. Multi-objective and
-classification tasks are not supported.
+Single-target and multi-task (MT-SISSO) **regression**, plus single-task **1D/2D
+classification result analysis** (`ptype=2`). Multi-objective and multi-task
+classification runs are not supported.
 
 ## Features
 
@@ -36,6 +37,41 @@ classification tasks are not supported.
 - Optional `SISSO.in` shows run cards (`nsf`, `desc_dim`, `fcomplexity`, and the task split of a multi-task run).
 - Auto-saved run history; favourite / exclude flags persist in saved projects.
 - English / 中文 UI, light / dark theme.
+
+## Classification runs
+
+1. Drop the result archive or select the run folder, including `SISSO.in`,
+   `train.dat`, `Uspace.expressions` and `Models/top*_D00*`.
+2. Click **Analyze**. Classification is detected automatically; no coefficient
+   file is needed.
+3. Select a ranked model to inspect its descriptors and class scatter. Switch
+   to the optional verification dataset, or export rankings and sample CSVs.
+
+Classification `train.dat` contains **name + features**, with no target column.
+`nsample=(n1,n2,…)` in `SISSO.in` defines consecutive category blocks, as described
+in the SISSO 3.5 guide, section 4.1. Optional `train_labels.json` and
+`verify_labels.json` supply class names and validation labels. Their format is
+`{"class_order":["low","high"],"rows":[{"id":"sample-id","class":0},…]}`;
+rows are joined by ID, and training labels must agree with the category blocks.
+Without validation labels, verification points remain unlabeled.
+
+The classification table preserves SISSO's `#data_overlap` and `size_overlap`,
+including negative separation scores. Lower values are preferred, with overlap
+count taking priority. For two convex categories in 2D, positive size is the
+overlap area divided by the smaller category area; negative size reports
+separation distance. See the [official classification implementation](https://github.com/rouyang2017/SISSO/blob/master/src/DI.f90).
+
+Optional `Models/data_top1/desc_D00*.dat` adds the engine's `classified?` YES/NO
+markers after its coordinates have been checked against the selected top1
+descriptors. Optional `convex2D_hull` draws the original top1 vertices in file
+order. **NO means entry into another category domain; it is not a predicted
+class.** Engine boundary tolerances and near-zero hull edges can materially
+affect these statistics. The analyzer preserves the reported geometry and
+scores rather than substituting a new convex-hull algorithm. It does not report
+prediction accuracy or assign classes to new samples.
+
+Archives and folders containing a nested run (for example `_class_smoke/`) use
+the outer run's files; nested run evidence is kept out of that analysis.
 
 ## Multi-task runs (MT-SISSO)
 
@@ -91,8 +127,8 @@ What the analyzer does with that:
   **blocking**, while an RMSE-only mismatch is a different aggregation
   convention and stays a warning. Missing `SISSO.in`/`SISSO.out`, counts that do
   not add up to the rows in `train.dat`, a truncated coefficient file, a
-  ranked-model file that mixes descriptor dimensions, and a `ptype=2`
-  (classification) run are all blocking errors. A `verify.dat` dropped in with an
+  ranked-model file that mixes descriptor dimensions are all blocking errors.
+  Classification uses its own parsing and health-check path. A `verify.dat` dropped in with an
   MT run is ignored with a warning — a hold-out row carries no task identity.
 
 ## Run locally
@@ -112,6 +148,7 @@ Dependency-free Node scripts (no `package.json`, no `node_modules`):
 ```bash
 node test/mt_sisso.test.mjs     # MT-SISSO parsing / coefficients / aggregation
 node test/ui_smoke.test.mjs     # the real app.js driven through a DOM shim
+node test/classification.test.mjs # classification parsing, projections and official evidence
 ```
 
 …plus the rest of `test/*.test.mjs`. The two suites above also use the

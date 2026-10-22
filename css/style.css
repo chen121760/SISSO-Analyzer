@@ -48,6 +48,29 @@
   --appbar-h: 60px;
 }
 
+/* Classification keeps the ranked models beside their descriptor space. */
+.class-note { color: var(--color-text-soft); line-height: 1.6; margin: 12px 0; }
+.class-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 20px 0; }
+.class-controls .btn, .class-controls .select, .class-table .btn { min-height: 44px; }
+.class-layout { display: grid; grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.class-models { max-height: 800px; overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius); }
+.class-detail { min-width: 0; padding: 20px; border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-surface); }
+.class-detail h2 { margin-top: 0; }
+.class-formula { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); line-height: 1.6; }
+.class-chart { height: 430px; width: 100%; }
+.class-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; background: var(--color-surface); }
+.class-table th, .class-table td { padding: 8px 12px; border-bottom: 1px solid var(--color-border); text-align: left; }
+.class-table th { position: sticky; top: 0; background: var(--color-muted); z-index: 1; }
+.class-table .is-selected { background: var(--color-muted); }
+.class-samples { margin-top: 24px; }
+.class-samples summary { cursor: pointer; padding: 12px 0; }
+.class-sample-scroll { max-height: 400px; overflow: auto; border: 1px solid var(--color-border); }
+@media (max-width: 1000px) {
+  .class-layout { grid-template-columns: minmax(0, 1fr); }
+  .class-models { max-height: 260px; }
+  .class-detail { padding: 12px; }
+}
+
 /* ---------- Dark theme: warm charcoal (not navy) ---------- */
 [data-theme="dark"] {
   color-scheme: dark;

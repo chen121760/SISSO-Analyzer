@@ -12,14 +12,21 @@
   var I18N = window.I18N;
   var echarts = window.echarts;
   var HealthCheck = window.HealthCheck;
+  var Classification = window.SissoClassification;
 
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
   var state = {
     files: {},      // role -> {name, file}
+    inputType: null,
     texts: {},      // role -> raw text (captured at analyze time)
     result: null,   // pipeline result
+    classChart: null,
+    classRank: 1,
+    classDataset: "train",
+    classPage: 0,
+    classSort: "rank",
     projectId: null,
     sortKey: "rank",
     sortAsc: true,
@@ -184,6 +191,7 @@
   function refreshThemeDependentUI() {
     themeColors = null;
     if (!state.result) return;
+    if (isClassification()) { renderClassification(); return; }
     if (state.view === "grid") renderGrid();
     if (state.view === "pareto") renderPareto();
     if (state.currentModel && !$("#dialog-backdrop").hidden) {
@@ -229,6 +237,14 @@
       match: function (n) { return /^SISSO\.in$/i.test(n); } },
     { role: "sissoout", i18n: "fileSissoOut", required: false, optional: true,
       match: function (n) { return /^SISSO\.out$/i.test(n); } },
+    { role: "trainlabels", i18n: "fileTrainLabels", optional: true,
+      match: function (n) { return /^train_labels\.json$/i.test(n); } },
+    { role: "verifylabels", i18n: "fileVerifyLabels", optional: true,
+      match: function (n) { return /^verify_labels\.json$/i.test(n); } },
+    { role: "classdesc", i18n: "fileClassDesc", optional: true,
+      match: function (n) { return /^desc_D00[12]\.dat$/i.test(n); } },
+    { role: "classhull", i18n: "fileClassHull", optional: true,
+      match: function (n) { return /^convex2D_hull$/i.test(n); } },
   ];
 
   // Pareto metrics: label key + whether smaller-is-better.
@@ -367,6 +383,7 @@
     var info = res.meta.sissoIn || null;
     return {
       version: 1,
+      taskType: res.taskType || "regression",
       kind: "sisso-analyzer-project",
       id: state.projectId || null,
       savedAt: new Date().toISOString(),
@@ -426,6 +443,7 @@
     }
     var roleTexts = {};
     var ok = true;
+    state.files = {};
     FILE_ROLES.forEach(function (r) {
       var rec = p.files[r.role];
       if (rec && typeof rec.text === "string") {
@@ -433,9 +451,10 @@
         state.files[r.role] = { name: rec.name || defaultRoleFileName(r.role), file: null };
       }
     });
-    ["train", "uspace", "coeff", "top"].forEach(function (need) {
+    ["train", "uspace", "top"].forEach(function (need) {
       if (roleTexts[need] === undefined) ok = false;
     });
+    if (!roleTexts.coeff && !roleTexts.sissoin) ok = false;
     if (!ok) { toast(I18N.t("errProject")); return; }
     state.projectId = p.id || null;
     try {
@@ -484,6 +503,7 @@
       try {
         applyProject(rec, true);
         if (!state.result) return;
+        if (isClassification()) { persistSession(); return; }
         var want = saved.view === "grid" || saved.view === "pareto" || saved.view === "units" ||
           saved.view === "compare" ? saved.view : "table";
         state.view = want;
@@ -619,6 +639,7 @@
     var btn = $("#btn-lang");
     if (btn) btn.textContent = I18N.getLocale() === "zh" ? "EN" : "中文";
     renderFileList();
+    if (isClassification()) { renderClassification(); renderRecentList(); return; }
     renderControls();
     renderCount();
     populateColorSelect();
@@ -946,9 +967,8 @@
   }
 
   function hasAllRequired() {
-    return FILE_ROLES.every(function (r) {
-      return r.optional || state.files[r.role];
-    });
+    return ["train", "uspace", "top"].every(function (r) { return state.files[r]; }) &&
+      !!(state.files.coeff || (state.inputType === 2 && state.files.sissoin));
   }
 
   function renderRunButton() {
@@ -1096,7 +1116,7 @@
         var bn = basename(path);
         if (!bn) continue;
         var blob = await ze.async("blob");
-        out.push({ name: bn, file: new File([blob], bn) });
+        out.push({ name: bn, path: path, file: new File([blob], bn) });
       }
       return out;
     }
@@ -1105,7 +1125,7 @@
       var gunzipped = await gunzipFile(file);
       return parseTar(gunzipped).map(function (e) {
         var bn = basename(e.name);
-        return { name: bn, file: new File([e.bytes], bn) };
+        return { name: bn, path: e.name, file: new File([e.bytes], bn) };
       });
     }
 
@@ -1113,7 +1133,7 @@
       var bytes = await fileToBytes(file);
       return parseTar(bytes).map(function (e) {
         var bn = basename(e.name);
-        return { name: bn, file: new File([e.bytes], bn) };
+        return { name: bn, path: e.name, file: new File([e.bytes], bn) };
       });
     }
 
@@ -1148,7 +1168,7 @@
     function walk(entry) {
       return new Promise(function (resolve) {
         if (entry.isFile) {
-          entry.file(function (f) { addFile(f); resolve(); }, function () { resolve(); });
+          entry.file(function (f) { f.sissoPath = entry.fullPath; addFile(f); resolve(); }, function () { resolve(); });
         } else if (entry.isDirectory) {
           readDir(entry).then(function (entries) {
             var chain = Promise.resolve();
@@ -1172,7 +1192,13 @@
   // Expands archives and folders, classifies every file, and updates state.
   async function ingest(items) {
     var files = [];
-    if (items instanceof FileList || Array.isArray(items)) {
+    var candidates = [];
+    function offer(role, name, file, path) {
+      if (!role) return;
+      path = String(path || name).replace(/\\/g, "/").replace(/^\/+/, "");
+      candidates.push({ role: role, name: name, file: file, path: path, depth: path.split("/").filter(Boolean).length });
+    }
+    if (Array.isArray(items) || items instanceof FileList) {
       files = Array.prototype.slice.call(items);
     } else if (items && typeof items.length === "number") {
       // DataTransferItemList
@@ -1191,7 +1217,7 @@
           var expanded = await expandArchive(f);
           expanded.forEach(function (e) {
             var r = classify(e.name);
-            if (r) state.files[r] = { name: e.name, file: e.file };
+            offer(r, e.name, e.file, e.path);
           });
           // If the archive itself already matched a role and expanded nothing,
           // keep the archive as the role (should not normally happen).
@@ -1203,7 +1229,19 @@
         continue;
       }
       var role2 = classify(name);
-      if (role2) state.files[role2] = { name: name, file: f };
+      offer(role2, name, f, f.webkitRelativePath || f.sissoPath);
+    }
+    var runRoots = candidates.filter(function (c) { return c.role === "train"; }).sort(function (a, b) {
+      return a.depth - b.depth || a.path.localeCompare(b.path);
+    }).map(function (c) { return c.path.slice(0, c.path.lastIndexOf("/") + 1); });
+    var selected = {};
+    candidates.forEach(function (c) {
+      if (runRoots.length && (!c.path.startsWith(runRoots[0]) || runRoots.slice(1).some(function (root) { return c.path.startsWith(root); }))) return;
+      if (!selected[c.role] || c.depth < selected[c.role].depth) selected[c.role] = c;
+    });
+    Object.keys(selected).forEach(function (role) { state.files[role] = selected[role]; });
+    if (state.files.sissoin && state.files.sissoin.file) {
+      state.inputType = Core.parseSissoIn(await readFileAsText(state.files.sissoin.file)).ptype;
     }
     renderFileList();
     renderRunButton();
@@ -1212,18 +1250,21 @@
   function renderFileList() {
     var list = $("#file-list");
     list.innerHTML = "";
+    var classRun = isClassification() || state.inputType === 2;
     FILE_ROLES.forEach(function (r) {
+      if (["trainlabels", "verifylabels", "classdesc", "classhull"].includes(r.role) && !classRun && !state.files[r.role]) return;
+      var required = r.role === "coeff" ? !classRun : r.role === "sissoin" ? classRun : !!r.required;
       var item = el("li", "file-item");
       var dot = el("span", "file-item__dot");
       var name = el("span", "file-item__name");
       var roleTag = el("span", "file-item__role");
       name.textContent = I18N.t(r.i18n);
-      roleTag.textContent = r.required ? I18N.t("required") : I18N.t("optional");
+      roleTag.textContent = required ? I18N.t("required") : I18N.t("optional");
       var got = state.files[r.role];
       if (got) {
         dot.classList.add("is-ok");
         name.textContent += " · " + got.name;
-      } else if (r.required) {
+      } else if (required) {
         dot.classList.add("is-missing");
       } else {
         dot.classList.add("is-warn");
@@ -1331,11 +1372,14 @@
       var roleTexts = {};
       roleTexts.train = await readFileAsText(state.files.train.file);
       roleTexts.uspace = await readFileAsText(state.files.uspace.file);
-      roleTexts.coeff = await readFileAsText(state.files.coeff.file);
+      if (state.files.coeff) roleTexts.coeff = await readFileAsText(state.files.coeff.file);
       roleTexts.top = await readFileAsText(state.files.top.file);
       if (state.files.verify) roleTexts.verify = await readFileAsText(state.files.verify.file);
       if (state.files.sissoin) roleTexts.sissoin = await readFileAsText(state.files.sissoin.file);
       if (state.files.sissoout) roleTexts.sissoout = await readFileAsText(state.files.sissoout.file);
+      for (var role of ["trainlabels", "verifylabels", "classdesc", "classhull"]) {
+        if (state.files[role]) roleTexts[role] = await readFileAsText(state.files[role].file);
+      }
 
       // a fresh analyze run starts a brand-new project identity
       state.projectId = null;
@@ -1359,6 +1403,8 @@
         // tasks — the check reports their absence as a blocker in that case.
         sissoIn: roleTexts.sissoin,
         sissoOut: roleTexts.sissoout,
+        trainlabels: roleTexts.trainlabels, verifylabels: roleTexts.verifylabels,
+        classdesc: roleTexts.classdesc, classhull: roleTexts.classhull,
       });
       if (state.health.level === "error") {
         renderHealthReport(state.health, $("#health-block"));
@@ -1384,6 +1430,32 @@
   // saved project. `init` may carry { modelStates } so favourites/exclusions
   // saved inside a project JSON are restored onto the freshly rebuilt models.
   function processTexts(roleTexts, init) {
+    if (Classification && Classification.isClassification(roleTexts)) {
+      var classified = Classification.runPipeline(roleTexts);
+      classified.modelStates = Core.normalizeModelStates(init && init.modelStates,
+        new Set(classified.models.map(function (m) { return m.rank; })));
+      state.result = classified;
+      state.texts = Object.assign({}, roleTexts);
+      state.classRank = classified.models[0].rank;
+      state.classDataset = "train";
+      state.classPage = 0;
+      state.classSort = "rank";
+      state.view = "classification";
+      closeDetail();
+      closeInspector();
+      $("#view-upload").hidden = true;
+      $("#view-results").hidden = true;
+      $("#view-classification").hidden = false;
+      $("#btn-reset").hidden = false;
+      setNavState(true);
+      renderClassification();
+      if (window.scrollTo) window.scrollTo(0, 0);
+      storeProjectLocally();
+      persistSession();
+      return;
+    }
+    if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
+    $("#view-classification").hidden = true;
     var files = {};
     files.trainText = roleTexts.train;
     files.uspaceText = roleTexts.uspace;
@@ -1487,11 +1559,174 @@
   // ---------------------------------------------------------------------------
   // Results rendering
   // ---------------------------------------------------------------------------
+  function isClassification() {
+    return !!(state.result && state.result.taskType === "classification");
+  }
+
+  function classButton(text, action, disabled) {
+    var b = el("button", "btn btn--secondary", text);
+    b.type = "button";
+    b.disabled = !!disabled;
+    b.addEventListener("click", action);
+    return b;
+  }
+
+  function classSelect(label, options, value, change) {
+    var field = el("label", "field");
+    field.appendChild(el("span", "field__label", label));
+    var select = el("select", "select");
+    options.forEach(function (o) {
+      var option = el("option", "", o[1]); option.value = o[0]; select.appendChild(option);
+    });
+    select.value = value;
+    select.addEventListener("change", function () { change(select.value); });
+    field.appendChild(select);
+    return field;
+  }
+
+  function renderClassification() {
+    if (!isClassification()) return;
+    var res = state.result, info = res.meta.sissoIn;
+    var root = $("#view-classification");
+    if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
+    root.innerHTML = "";
+    var ctx = $("#app-context");
+    ctx.textContent = I18N.t("classificationTitle") + " · " + info.descDim + "D";
+    ctx.hidden = false;
+    root.appendChild(el("h1", "", I18N.t("classificationTitle"))).id = "class-title";
+    root.appendChild(el("p", "class-note", I18N.t("classificationNote")));
+    var kpis = el("div", "run-overview");
+    [["kpiModels", res.models.length], ["kpiTrain", res.train.n], ["kpiVerify", res.verify ? res.verify.n : "—"],
+      ["classificationCategories", info.classCounts.join(" + ")], ["kpiFeatures", res.meta.nFeatures]].forEach(function (item) {
+      var card = el("div", "kpi");
+      card.appendChild(el("div", "kpi__label", I18N.t(item[0])));
+      card.appendChild(el("div", "kpi__value", String(item[1])));
+      kpis.appendChild(card);
+    });
+    root.appendChild(kpis);
+    var controls = el("div", "class-controls");
+    controls.appendChild(classSelect(I18N.t("sortBy"), [["rank", I18N.t("colRank")],
+      ["dataOverlap", I18N.t("classificationOverlap")], ["sizeOverlap", I18N.t("classificationSize")]],
+    state.classSort, function (v) { state.classSort = v; state.classPage = 0; renderClassification(); }));
+    controls.appendChild(classButton(I18N.t("classificationExportRankings"), function () {
+      var rows = [["rank", "official_data_overlap", "official_size_overlap", "descriptor_1"]];
+      if (info.descDim === 2) rows[0].push("descriptor_2");
+      res.models.forEach(function (m) { rows.push([m.rank, m.dataOverlap, m.sizeOverlap].concat(m.descriptors.map(function (d) { return d.original; }))); });
+      downloadTextFile("sisso-classification-rankings.csv", Core.rowsToCsv(rows), "text/csv;charset=utf-8");
+    }));
+    var sorted = res.models.slice().sort(function (a, b) { return a[state.classSort] - b[state.classSort] || a.rank - b.rank; });
+    var pages = Math.ceil(sorted.length / 100);
+    state.classPage = Math.min(state.classPage, pages - 1);
+    controls.appendChild(classButton("←", function () { state.classPage--; renderClassification(); }, state.classPage === 0));
+    controls.lastChild.setAttribute("aria-label", I18N.t("classificationPrevious"));
+    controls.appendChild(el("span", "", (state.classPage + 1) + " / " + pages));
+    controls.appendChild(classButton("→", function () { state.classPage++; renderClassification(); }, state.classPage >= pages - 1));
+    controls.lastChild.setAttribute("aria-label", I18N.t("classificationNext"));
+    root.appendChild(controls);
+    var layout = el("div", "class-layout");
+    var tableBox = el("div", "class-models");
+    var table = el("table", "class-table");
+    var head = el("thead"), hr = el("tr");
+    ["colRank", "classificationOverlap", "classificationSize"].forEach(function (key) { hr.appendChild(el("th", "", I18N.t(key))); });
+    head.appendChild(hr); table.appendChild(head);
+    var body = el("tbody");
+    sorted.slice(state.classPage * 100, state.classPage * 100 + 100).forEach(function (m) {
+      var row = el("tr", m.rank === state.classRank ? "is-selected" : "");
+      var cell = el("td");
+      var b = classButton(String(m.rank), function () { state.classRank = m.rank; renderClassification(); });
+      b.setAttribute("aria-label", I18N.t("classificationModel") + " " + m.rank);
+      b.setAttribute("aria-pressed", String(m.rank === state.classRank));
+      cell.appendChild(b); row.appendChild(cell);
+      row.appendChild(el("td", "", String(m.dataOverlap)));
+      row.appendChild(el("td", "", String(m.sizeOverlap)));
+      body.appendChild(row);
+    });
+    table.appendChild(body); tableBox.appendChild(table); layout.appendChild(tableBox);
+    var detail = el("section", "class-detail");
+    var model = res.models.find(function (m) { return m.rank === state.classRank; }) || res.models[0];
+    detail.appendChild(el("h2", "", I18N.t("classificationModel") + " " + model.rank));
+    model.descriptors.forEach(function (d, i) { detail.appendChild(el("pre", "class-formula", "d" + (i + 1) + " = " + d.original)); });
+    detail.appendChild(el("p", "class-note", I18N.t("classificationScoreNote")));
+    var datasets = [["train", I18N.t("classTrain")]];
+    if (res.verify) datasets.push(["verify", I18N.t("classVerify")]);
+    var dsControls = el("div", "class-controls");
+    dsControls.appendChild(classSelect(I18N.t("classificationDataset"), datasets, state.classDataset,
+      function (v) { state.classDataset = v; renderClassification(); }));
+    dsControls.appendChild(classButton(I18N.t("classificationExportPoints"), function () {
+      downloadTextFile("sisso-classification-model-" + model.rank + "-" + state.classDataset + ".csv",
+        Core.rowsToCsv(Classification.exportRows(res, model, state.classDataset)), "text/csv;charset=utf-8");
+    }));
+    detail.appendChild(dsControls);
+    var points = Classification.projectModel(res, model, state.classDataset);
+    var finite = points.filter(function (p) { return p.finite; });
+    if (finite.length !== points.length) detail.appendChild(el("p", "warning", I18N.format("classificationNonfinite", { n: points.length - finite.length })));
+    if (model.official && state.classDataset === "train") {
+      var no = model.official.filter(function (p) { return p.classified === "NO"; }).length;
+      detail.appendChild(el("p", "class-note", "SISSO classified? YES: " + (points.length - no) + " · NO: " + no + ". " + I18N.t("classificationOfficialNote")));
+    }
+    if (model.hulls) detail.appendChild(el("p", "class-note", I18N.t("classificationHullNote")));
+    var chart = el("div", "class-chart");
+    chart.setAttribute("role", "img"); chart.setAttribute("aria-label", I18N.t("classificationSpace"));
+    detail.appendChild(chart); layout.appendChild(detail); root.appendChild(layout);
+    var colors = getThemeColors();
+    var palette = [colors.train, colors.verify, "#649477", "#b782a7"];
+    var symbols = ["circle", "triangle", "rect", "diamond"];
+    var series = [];
+    res.classes.concat([I18N.t("classificationUnlabeled")]).forEach(function (name, c) {
+      var group = finite.filter(function (p) { return p.classIndex === (c === res.classes.length ? null : c); });
+      if (!group.length) return;
+      series.push({ name: name + " (" + group.length + ")", type: "scatter", symbol: symbols[c % symbols.length], symbolSize: 9,
+        itemStyle: { color: palette[c % palette.length], opacity: 0.8 },
+        data: group.map(function (p) { return { value: [p.coords[0], info.descDim === 2 ? p.coords[1] : c, p.name, p.classified || ""],
+          itemStyle: p.classified === "NO" ? { borderWidth: 2, borderColor: colors.text } : {} }; }) });
+    });
+    if (model.hulls) model.hulls.forEach(function (hull, i) {
+      series.push({ name: I18N.t("classificationHull") + " " + res.classes[i], type: "line", showSymbol: false, silent: true,
+        itemStyle: { color: palette[i % palette.length] },
+        lineStyle: { color: palette[i % palette.length], type: "dashed", width: 1 }, data: hull.concat([hull[0]]) });
+    });
+    state.classChart = echarts.init(chart);
+    state.classChart.setOption({ animation: false, textStyle: { color: colors.text },
+      legend: { type: "scroll", textStyle: { color: colors.text } },
+      tooltip: { trigger: "item", renderMode: "richText", formatter: function (p) {
+        return p.value[2] + "\nd1: " + p.value[0] + (info.descDim === 2 ? "\nd2: " + p.value[1] : "") +
+          (p.value[3] ? "\nSISSO classified? " + p.value[3] : "");
+      } },
+      grid: { top: 65, left: 65, right: 30, bottom: 65 },
+      dataZoom: [{ type: "inside", filterMode: "none" }, { type: "slider", height: 18, bottom: 12 }],
+      xAxis: { type: "value", name: "d1", scale: true, axisLabel: { color: colors.text }, splitLine: { lineStyle: { color: colors.grid } } },
+      yAxis: { type: "value", name: info.descDim === 2 ? "d2" : I18N.t("classificationCategories"), scale: true,
+        minInterval: info.descDim === 1 ? 1 : 0, axisLabel: { color: colors.text }, splitLine: { lineStyle: { color: colors.grid } } }, series: series });
+    var samples = el("details", "class-samples");
+    samples.appendChild(el("summary", "", I18N.t("classificationSamples") + " (" + points.length + ")"));
+    var sampleBox = el("div", "class-sample-scroll");
+    var sampleTable = el("table", "class-table");
+    var sh = el("thead"), shr = el("tr");
+    var headings = [I18N.t("classificationSample"), I18N.t("classificationCategories"), "d1"];
+    if (info.descDim === 2) headings.push("d2");
+    headings.push("SISSO classified?");
+    headings.forEach(function (h) { shr.appendChild(el("th", "", h)); }); sh.appendChild(shr); sampleTable.appendChild(sh);
+    var sb = el("tbody");
+    points.forEach(function (p) {
+      var row = el("tr");
+      [p.name, p.classIndex === null ? "—" : res.classes[p.classIndex]].concat(p.coords, [p.classified || "—"]).forEach(function (v) {
+        row.appendChild(el("td", "", String(v)));
+      }); sb.appendChild(row);
+    });
+    sampleTable.appendChild(sb); sampleBox.appendChild(sampleTable); samples.appendChild(sampleBox); root.appendChild(samples);
+  }
+
   // Left-nav state: upload ("Load results") vs. loaded run + sub-views.
   function setNavState(hasResults) {
     var t = $("#view-table-btn"), g = $("#view-grid-btn"), p = $("#view-pareto-btn"),
         c = $("#view-compare-btn"), u = $("#view-units-btn");
     var home = $("#btn-nav-home");
+    var classNav = $("#view-classification-btn");
+    if (classNav) {
+      classNav.hidden = !isClassification();
+      classNav.disabled = !hasResults || !isClassification();
+      classNav.classList.toggle("is-active", hasResults && isClassification());
+    }
     if (hasResults) {
       document.body.classList.add("has-results");
       if (home) home.classList.remove("is-active");
@@ -1500,6 +1735,9 @@
       if (p) p.disabled = false; // available for train-only runs too; hidden in renderControls when no result
       if (c) c.disabled = false;
       if (u) u.disabled = false; // unit gating happens in renderControls
+      if (isClassification()) [t, g, p, c, u].forEach(function (b) {
+        if (b) { b.disabled = true; b.classList.remove("is-active"); }
+      });
     } else {
       document.body.classList.remove("has-results");
       if (home) home.classList.add("is-active");
@@ -5192,6 +5430,7 @@
   }
 
   function resizeChart() {
+    if (state.classChart) state.classChart.resize();
     if (state.chart) state.chart.resize();
     if (state.errorChart) {
       state.errorChart.resize();
@@ -5336,8 +5575,11 @@
     }
     $("#btn-reset").addEventListener("click", function () {
       state.files = {};
+      state.inputType = null;
       state.texts = {};
       state.result = null;
+      if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
+      $("#view-classification").hidden = true;
       state.projectId = null;
       state.health = null;
       clearHealthPanels();
@@ -5366,6 +5608,7 @@
       I18N.setLocale(I18N.getLocale() === "zh" ? "en" : "zh");
       closeAllPopovers(null);
       applyI18n();
+      if (isClassification()) return;
       if (state.result) {
         renderKpis();
         renderControls(); // rebuild i18n option labels + view-aware controls

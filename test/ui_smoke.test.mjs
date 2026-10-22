@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { CLASS_TEXTS, ARCHIVE, archiveTexts } from "./classification.test.mjs";
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -102,6 +103,7 @@ class El {
   get offsetWidth() { return 600; }
   get offsetHeight() { return 400; }
   get firstChild() { return this.children[0] || null; }
+  get lastChild() { return this.children[this.children.length - 1] || null; }
   get childNodes() { return this.children; }
 }
 
@@ -159,7 +161,7 @@ function bootApp() {
     Blob: class { constructor() {} },
     URL: { createObjectURL: () => "blob:x", revokeObjectURL: () => {} },
     File: class { constructor(parts, name) { this.name = name; this._parts = parts; } },
-    FileReader: class { readAsText() { this.result = ""; if (this.onload) this.onload(); } },
+    FileReader: class { readAsText(file) { this.result = (file._parts || []).join(""); if (this.onload) this.onload(); } },
     indexedDB: undefined, // IndexedDB being unavailable must not break the app
   };
   window.window = window;
@@ -184,6 +186,7 @@ function bootApp() {
     '  renderColsPanel: renderColsPanel, renderFilterPanel: renderFilterPanel,',
     '  makeProjectJson: makeProjectJson, applyProject: applyProject,',
     '  refreshDynamicLabels: refreshDynamicLabels,',
+    '  renderClassification: renderClassification, ingest: ingest,',
     '};\n',
   ].join("\n");
 
@@ -194,7 +197,10 @@ function bootApp() {
       "clearTimeout", "URL", "Blob", "File", "FileReader", "echarts",
       code + "\n//# sourceURL=" + name
     );
-    fn(window, document, window, localStorage, console, window.setTimeout,
+    const testConsole = { ...console, warn(...args) {
+      if (args[0] !== "IndexedDB save failed:") console.warn(...args);
+    } };
+    fn(window, document, window, localStorage, testConsole, window.setTimeout,
       window.clearTimeout, window.URL, window.Blob, window.File,
       window.FileReader, window.echarts);
   };
@@ -202,6 +208,7 @@ function bootApp() {
   // Same order as index.html.
   load(fs.readFileSync(path.join(ROOT, "js", "i18n.js"), "utf8"), "js/i18n.js");
   load(fs.readFileSync(path.join(ROOT, "js", "sisso-core.js"), "utf8"), "js/sisso-core.js");
+  load(fs.readFileSync(path.join(ROOT, "js", "sisso-classification.js"), "utf8"), "js/sisso-classification.js");
   load(fs.readFileSync(path.join(ROOT, "js", "health-check.js"), "utf8"), "js/health-check.js");
   load(raw.slice(0, close) + hook + raw.slice(close), "js/app.js");
 
@@ -458,6 +465,65 @@ if (!fs.existsSync(path.join(DIR, "train.dat"))) {
       "ST: batch text covers train and verify");
     check(txt.indexOf("sisso_overall") < 0, "ST: no SISSO-overall lines on a single-task run");
   });
+}
+
+// 4. Classification uses the same upload, history and theme/language controls.
+{
+  attempt("Classification: analysis and render without a coefficient file", () => app.processTexts(CLASS_TEXTS));
+  check(app.state.result.taskType === "classification", "Classification: independent task schema");
+  check(reg("#view-results").hidden && !reg("#view-classification").hidden, "Classification: regression controls are hidden");
+  check(reg("#view-table-btn").disabled && !reg("#view-classification-btn").disabled, "Classification: navigation matches task type");
+  const points = window.__lastChart.option.series.filter((s) => s.type === "scatter");
+  check(points.length === 2 && points.reduce((n, s) => n + s.data.length, 0) === 6, "Classification: both true categories plotted");
+  const project = app.makeProjectJson();
+  check(project.files.classdesc && project.files.trainlabels && !project.files.coeff, "Classification: project preserves official evidence and labels");
+  attempt("Classification: saved project round trip", () => app.applyProject(project));
+  check(app.state.result.models[0].official.length === 6, "Classification: official markers survive restore");
+  attempt("Classification: verification dataset and language refresh", () => {
+    app.state.classDataset = "verify";
+    window.I18N.setLocale("zh");
+    app.refreshDynamicLabels();
+    const scatter = window.__lastChart.option.series.filter((s) => s.type === "scatter");
+    check(scatter.reduce((n, s) => n + s.data.length, 0) === 1, "Classification: verification projection drawn");
+    check(scatter[0].data[0].value[3] === "", "Classification: verification has no invented YES/NO");
+  });
+  if (fs.existsSync(ARCHIVE)) {
+    attempt("Classification: production archive full UI path", () => app.processTexts(archiveTexts(ARCHIVE)));
+    check(app.state.result.models.length === 5000, "Classification: all 5000 production candidates loaded");
+    check(window.__lastChart.option.series.filter((s) => s.type === "scatter").reduce((n, s) => n + s.data.length, 0) === 331,
+      "Classification: all 331 production training samples plotted");
+    attempt("Classification: last model and verification projection", () => {
+      app.state.classRank = 5000; app.state.classPage = 49; app.state.classDataset = "verify";
+      app.renderClassification();
+      check(window.__lastChart.option.series.filter((s) => s.type === "scatter").reduce((n, s) => n + s.data.length, 0) === 77,
+        "Classification: model 5000 projects 77 verification samples");
+    });
+  }
+  reg("#btn-reset").dispatch("click");
+  check(app.state.result === null && reg("#view-classification").hidden, "Classification: reset returns to upload");
+  const demo = require("../js/demo-data.js").DEMO_DATA;
+  attempt("Classification → regression: existing demo still renders", () => app.processTexts(demo));
+  check(!app.state.result.taskType && reg("#view-classification").hidden && !reg("#view-results").hidden,
+    "Classification → regression: views and navigation reset");
+}
+
+for (const reverse of [false, true]) {
+  const entries = [
+    ["train.dat", "bundle/train.dat", CLASS_TEXTS.train],
+    ["SISSO.in", "bundle/SISSO.in", CLASS_TEXTS.sissoin],
+    ["Uspace.expressions", "bundle/SIS_subspaces/Uspace.expressions", CLASS_TEXTS.uspace],
+    ["top2_D002", "bundle/Models/top2_D002", CLASS_TEXTS.top],
+    ["train.dat", "bundle/_class_smoke/train.dat", "name x z\nsmoke 99 99\n"],
+    ["desc_D002.dat", "bundle/_class_smoke/Models/data_top1/desc_D002.dat", "wrong evidence"],
+  ];
+  if (reverse) entries.reverse();
+  app.state.files = {};
+  await app.ingest(entries.map(([name, fullPath, text]) => {
+    const file = new window.File([text], name); file.webkitRelativePath = fullPath; return file;
+  }));
+  check(!app.state.files.classdesc, "Folder ingest: nested run cannot contribute evidence (reverse=" + reverse + ")");
+  check(app.state.files.train.file._parts[0] === CLASS_TEXTS.train, "Folder ingest: production training data wins independent of order");
+  check(!reg("#btn-run").disabled, "Folder ingest: classification needs no coefficient file");
 }
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED"}`);
