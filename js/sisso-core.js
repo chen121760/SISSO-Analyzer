@@ -240,7 +240,7 @@
           out.ptype = nums[0]; break;
       }
     }
-    if (out.ntask === null && out.nsamples) out.ntask = out.nsamples.length;
+    if (out.ntask === null && out.nsamples && out.ptype !== 2) out.ntask = out.nsamples.length;
     if (out.ntask !== null && out.ntask <= 1) out.ntask = 1;
     return out;
   }
@@ -354,7 +354,7 @@
       var id = i + 1;
       totalFeatures++;
       if (!neededIds.has(id)) continue;
-      var idx = line.indexOf("SIS_score");
+      var idx = line.search(/\s+(?:SIS_score|N_overlap|S_overlap)\s*=/);
       var expr = (idx >= 0 ? line.slice(0, idx) : line).trim();
       idToOrig.set(id, expr);
       idToRenamed.set(id, renamer(expr));

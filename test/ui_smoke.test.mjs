@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { CLASS_TEXTS, ARCHIVE, archiveTexts } from "./classification.test.mjs";
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -98,10 +99,13 @@ class El {
   blur() {}
   click() { this.dispatch("click"); }
   scrollIntoView() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
   getBoundingClientRect() { return { width: 600, height: 400, top: 0, left: 0 }; }
   get offsetWidth() { return 600; }
   get offsetHeight() { return 400; }
   get firstChild() { return this.children[0] || null; }
+  get lastChild() { return this.children[this.children.length - 1] || null; }
   get childNodes() { return this.children; }
 }
 
@@ -159,7 +163,7 @@ function bootApp() {
     Blob: class { constructor() {} },
     URL: { createObjectURL: () => "blob:x", revokeObjectURL: () => {} },
     File: class { constructor(parts, name) { this.name = name; this._parts = parts; } },
-    FileReader: class { readAsText() { this.result = ""; if (this.onload) this.onload(); } },
+    FileReader: class { readAsText(file) { this.result = (file._parts || []).join(""); if (this.onload) this.onload(); } },
     indexedDB: undefined, // IndexedDB being unavailable must not break the app
   };
   window.window = window;
@@ -184,6 +188,9 @@ function bootApp() {
     '  renderColsPanel: renderColsPanel, renderFilterPanel: renderFilterPanel,',
     '  makeProjectJson: makeProjectJson, applyProject: applyProject,',
     '  refreshDynamicLabels: refreshDynamicLabels,',
+    '  renderClassification: renderClassification, ingest: ingest,',
+    '  classificationGeometry: classificationGeometry, buildClassThumb: buildClassThumb,',
+    '  classGeometryCache: classGeometryCache,',
     '};\n',
   ].join("\n");
 
@@ -194,7 +201,10 @@ function bootApp() {
       "clearTimeout", "URL", "Blob", "File", "FileReader", "echarts",
       code + "\n//# sourceURL=" + name
     );
-    fn(window, document, window, localStorage, console, window.setTimeout,
+    const testConsole = { ...console, warn(...args) {
+      if (args[0] !== "IndexedDB save failed:") console.warn(...args);
+    } };
+    fn(window, document, window, localStorage, testConsole, window.setTimeout,
       window.clearTimeout, window.URL, window.Blob, window.File,
       window.FileReader, window.echarts);
   };
@@ -202,6 +212,7 @@ function bootApp() {
   // Same order as index.html.
   load(fs.readFileSync(path.join(ROOT, "js", "i18n.js"), "utf8"), "js/i18n.js");
   load(fs.readFileSync(path.join(ROOT, "js", "sisso-core.js"), "utf8"), "js/sisso-core.js");
+  load(fs.readFileSync(path.join(ROOT, "js", "sisso-classification.js"), "utf8"), "js/sisso-classification.js");
   load(fs.readFileSync(path.join(ROOT, "js", "health-check.js"), "utf8"), "js/health-check.js");
   load(raw.slice(0, close) + hook + raw.slice(close), "js/app.js");
 
@@ -458,6 +469,145 @@ if (!fs.existsSync(path.join(DIR, "train.dat"))) {
       "ST: batch text covers train and verify");
     check(txt.indexOf("sisso_overall") < 0, "ST: no SISSO-overall lines on a single-task run");
   });
+}
+
+// 4. Classification uses the same upload, history and theme/language controls.
+{
+  attempt("Classification: analysis and render without a coefficient file", () => app.processTexts(CLASS_TEXTS));
+  check(app.state.result.taskType === "classification", "Classification: independent task schema");
+  check(reg("#view-results").hidden && !reg("#view-classification").hidden, "Classification: regression controls are hidden");
+  check(reg("#view-table-btn").disabled && !reg("#view-classification-btn").disabled, "Classification: navigation matches task type");
+  const points = window.__lastChart.option.series.filter((s) => s.type === "scatter");
+  check(points.length === 3 && points.reduce((n, s) => n + s.data.length, 0) === 7, "Classification: default view overlays training and verification");
+  check(points.some((s) => s.symbol.startsWith("empty")) && points.some((s) => !s.symbol.startsWith("empty")), "Classification: dataset membership uses filled / hollow symbols");
+  check(points.every((s) => !/low|high/.test(s.name)), "Classification: legends use generic categories only");
+  check(window.__lastChart.option.series.filter((s) => s.type === "line").length === 2, "Classification: reconstructed hull per category");
+  attempt("Classification: every model has reconstructed training hulls", () => {
+    app.state.classRank = 2; app.renderClassification();
+    check(window.__lastChart.option.series.filter((s) => s.type === "line").length === 2, "Classification: model 2 draws reconstructed hulls");
+    app.state.classHullMode = "official"; app.state.classRank = 1; app.renderClassification();
+    check(window.__lastChart.option.series.filter((s) => s.type === "line").every((s) => s.lineStyle.type === "dashed"), "Classification: original hulls remain available separately");
+    app.state.classHullMode = "rebuilt";
+  });
+  const project = app.makeProjectJson();
+  check(project.files.classdesc && project.files.trainlabels && !project.files.coeff, "Classification: project preserves official evidence and labels");
+  attempt("Classification: saved project round trip", () => app.applyProject(project));
+  check(app.state.result.models[0].official.length === 6, "Classification: official markers survive restore");
+  attempt("Classification: verification dataset and language refresh", () => {
+    app.state.classDataset = "verify";
+    window.I18N.setLocale("zh");
+    app.refreshDynamicLabels();
+    const scatter = window.__lastChart.option.series.filter((s) => s.type === "scatter");
+    check(scatter.reduce((n, s) => n + s.data.length, 0) === 1, "Classification: verification projection drawn");
+    check(scatter[0].data[0].value[3] === "", "Classification: verification has no invented YES/NO");
+  });
+  if (fs.existsSync(ARCHIVE)) {
+    attempt("Classification: production archive full UI path", () => app.processTexts(archiveTexts(ARCHIVE)));
+    check(app.state.result.models.length === 5000, "Classification: all 5000 production candidates loaded");
+    check(window.__lastChart.option.series.filter((s) => s.type === "scatter").reduce((n, s) => n + s.data.length, 0) === 408,
+      "Classification: all 331 training + 77 verification samples plotted");
+    for (const model of app.state.result.models.slice(0, 251)) app.classificationGeometry(model);
+    check(app.classGeometryCache.size <= 200, "Classification: preview cache is bounded for 5000 models");
+    attempt("Classification: last model and verification projection", () => {
+      app.state.classRank = 5000; app.state.classPage = 49; app.state.classDataset = "verify";
+      app.renderClassification();
+      check(window.__lastChart.option.series.filter((s) => s.type === "scatter").reduce((n, s) => n + s.data.length, 0) === 77,
+        "Classification: model 5000 projects 77 verification samples");
+    });
+  }
+  attempt("Classification: verification outliers stay inside thumbnail bounds", () => {
+    app.processTexts({ ...CLASS_TEXTS, verify: "name x z\nv 1e6 -1e6\n" });
+    const svg = app.buildClassThumb(app.state.result.models[0]);
+    const circles = svg.children.filter((n) => n.tagName === "CIRCLE");
+    check(circles.every((n) => Number(n.getAttribute("cx")) >= 0 && Number(n.getAttribute("cx")) <= 300 && Number(n.getAttribute("cy")) >= 0 && Number(n.getAttribute("cy")) <= 180), "Classification: thumbnail covers combined data ranges");
+    check(svg.children.some((n) => n.getAttribute("fill") === "none" && n.getAttribute("stroke")), "Classification: thumbnail includes hollow verification markers");
+  });
+  attempt("Classification: verification label controls and persistence", () => {
+    const nodes = (root) => [root, ...root.children.flatMap(nodes)];
+    const find = (predicate) => nodes(reg("#view-classification")).find(predicate);
+    const button = (key) => find((n) => n.tagName === "BUTTON" && n.textContent === window.I18N.t(key));
+    const chartCount = () => window.__lastChart.option.series.filter((s) => s.type === "scatter").reduce((n, s) => n + s.data.length, 0);
+    app.processTexts({ ...CLASS_TEXTS, trainlabels: undefined, classhull: undefined, classdesc: undefined, verifylabels: undefined,
+      verify: "name x z\ng2 2 3\ng1 6 4\ng3 10 10\n",
+      sissoin: CLASS_TEXTS.sissoin.replace("(3,3)", "(2,2,2)").replace("isconvex=(1,1)", "isconvex=(1,1,1)") });
+    const originalHulls = JSON.stringify(app.classificationGeometry(app.state.result.models[0]).hulls);
+    check(chartCount() === 6 && app.state.classDataset === "train", "Classification labels: unlabeled verification shows training only");
+    app.state.classDataset = "both"; app.renderClassification();
+    check(chartCount() === 6 && app.state.classDataset === "train", "Classification labels: invalid saved dataset is coerced to training");
+    check(app.classificationGeometry(app.state.result.models[0]).verify.length === 0, "Classification labels: unlabeled verification is absent from preview geometry");
+    const inputs = () => nodes(reg("#view-classification")).filter((n) => n.classList.contains("class-counts-input"));
+    const input = inputs()[0], second = inputs()[1], last = inputs()[2];
+    check(inputs().length === 3 && last.readOnly, "Classification labels: one box per category, last is automatic");
+    input.value = "209"; second.value = "122"; input.dispatch("input");
+    check(button("verificationFill").disabled && button("verificationSave").disabled && button("verificationExport").disabled && !app.state.result.verify.labels,
+      "Classification labels: wrong counts disable apply and export without mutating classes");
+    check(last.value === "", "Classification labels: overfilled counts never show a negative remainder");
+    for (const invalid of ["-1", "0.5", "1e0", ""]) {
+      input.value = invalid; second.value = "0"; input.dispatch("input");
+      check(button("verificationSave").disabled && last.value === "", "Classification labels: invalid or missing count cannot be saved: " + invalid);
+    }
+    input.value = "3"; second.value = "0"; input.dispatch("input");
+    check(last.value === "0" && !button("verificationSave").disabled, "Classification labels: automatic remainder can be zero");
+    input.value = "1"; second.value = "0"; input.dispatch("input");
+    check(last.value === "2", "Classification labels: final category receives remaining verification samples");
+    check(!button("verificationFill").disabled, "Classification labels: zero-sized verification category accepted");
+    check(nodes(find((n) => n.classList.contains("class-count-ranges"))).some((n) => n.textContent.includes("g2")), "Classification labels: counts preview identifies original row IDs");
+    button("verificationFill").click();
+    check(!app.state.result.verify.labels, "Classification labels: count preview remains a draft until saved");
+    button("verificationSave").click();
+    check(JSON.stringify(app.state.result.verify.labels) === "[0,2,2]" && chartCount() === 9, "Classification labels: counts save updates every chart category");
+    check(app.classificationGeometry(app.state.result.models[0]).verify[1].classIndex === 2, "Classification labels: geometry cache refreshes after assignment");
+    button("verificationEdit").click(); button("verificationManualMode").click();
+    const rowClass = find((n) => n.tagName === "SELECT" && n.getAttribute("aria-label") === window.I18N.t("classificationCategories") + " · g1");
+    rowClass.value = "1"; rowClass.dispatch("change");
+    for (const id of ["g2", "g3"]) {
+      const checkBox = find((n) => n.tagName === "INPUT" && n.getAttribute("aria-label") === window.I18N.t("verificationSelect") + " " + id);
+      checkBox.checked = true; checkBox.dispatch("change");
+    }
+    const bulk = find((n) => n.tagName === "LABEL" && n.firstChild && n.firstChild.textContent === window.I18N.t("verificationBulkCategory")).lastChild;
+    bulk.value = ""; bulk.dispatch("change"); button("verificationAssign").click(); button("verificationSave").click();
+    check(JSON.stringify(app.state.result.verify.labels) === "[null,1,null]" && chartCount() === 6, "Classification labels: manual assignment follows IDs and partial labels hide verification");
+    const partialProject = app.makeProjectJson(); app.applyProject(partialProject);
+    check(JSON.stringify(app.state.result.verify.labels) === "[null,1,null]" && chartCount() === 6, "Classification labels: partial labels persist through project reload");
+    button("verificationSetup").click(); button("verificationManualMode").click();
+    const selectAll = find((n) => n.tagName === "INPUT" && n.getAttribute("aria-label") === window.I18N.t("verificationSelectAll"));
+    selectAll.checked = true; selectAll.dispatch("change"); button("verificationAssign").click(); button("verificationSave").click();
+    check(JSON.stringify(app.state.result.verify.labels) === "[0,0,0]" && chartCount() === 9, "Classification labels: bulk assignment completes verification labels");
+    check(JSON.stringify(app.classificationGeometry(app.state.result.models[0]).hulls) === originalHulls, "Classification labels: verification edits leave training hulls unchanged");
+    check(JSON.stringify(app.state.result.meta.sissoIn.classCounts) === "[2,2,2]", "Classification labels: training nsample stays unchanged");
+    const completeProject = app.makeProjectJson(); app.applyProject(completeProject);
+    check(chartCount() === 9, "Classification labels: complete classes restore the verification overlay");
+    button("verificationEdit").click();
+    button("verificationCountsMode").click();
+    const countsInput = inputs()[0];
+    countsInput.value = "0"; inputs()[1].value = "1"; countsInput.dispatch("input"); button("verificationSave").click();
+    check(JSON.stringify(app.state.result.verify.labels) === "[1,2,2]", "Classification labels: count mode saves preview directly without manual adjustment");
+  });
+  reg("#btn-reset").dispatch("click");
+  check(app.state.result === null && reg("#view-classification").hidden, "Classification: reset returns to upload");
+  const demo = require("../js/demo-data.js").DEMO_DATA;
+  attempt("Classification → regression: existing demo still renders", () => app.processTexts(demo));
+  check(!app.state.result.taskType && reg("#view-classification").hidden && !reg("#view-results").hidden,
+    "Classification → regression: views and navigation reset");
+}
+
+for (const reverse of [false, true]) {
+  const entries = [
+    ["train.dat", "bundle/train.dat", CLASS_TEXTS.train],
+    ["SISSO.in", "bundle/SISSO.in", CLASS_TEXTS.sissoin],
+    ["Uspace.expressions", "bundle/SIS_subspaces/Uspace.expressions", CLASS_TEXTS.uspace],
+    ["top2_D002", "bundle/Models/top2_D002", CLASS_TEXTS.top],
+    ["train.dat", "bundle/_class_smoke/train.dat", "name x z\nsmoke 99 99\n"],
+    ["desc_D002.dat", "bundle/_class_smoke/Models/data_top1/desc_D002.dat", "wrong evidence"],
+  ];
+  if (reverse) entries.reverse();
+  app.state.files = {};
+  await app.ingest(entries.map(([name, fullPath, text]) => {
+    const file = new window.File([text], name); file.webkitRelativePath = fullPath; return file;
+  }));
+  check(!app.state.files.classdesc, "Folder ingest: nested run cannot contribute evidence (reverse=" + reverse + ")");
+  check(app.state.files.train.file._parts[0] === CLASS_TEXTS.train, "Folder ingest: production training data wins independent of order");
+  check(!reg("#btn-run").disabled, "Folder ingest: classification needs no coefficient file");
 }
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED"}`);

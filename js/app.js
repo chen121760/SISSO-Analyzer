@@ -12,14 +12,24 @@
   var I18N = window.I18N;
   var echarts = window.echarts;
   var HealthCheck = window.HealthCheck;
+  var Classification = window.SissoClassification;
 
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
   var state = {
     files: {},      // role -> {name, file}
+    inputType: null,
     texts: {},      // role -> raw text (captured at analyze time)
     result: null,   // pipeline result
+    classChart: null,
+    classRank: 1,
+    classDataset: "train",
+    classPage: 0,
+    classSort: "rank",
+    classView: "grid",
+    classHullMode: "rebuilt",
+    classLabelDraft: null,
     projectId: null,
     sortKey: "rank",
     sortAsc: true,
@@ -71,6 +81,8 @@
   };
 
   var COLS_PREF_KEY = "sisso-table-cols";
+  var classGeometryCache = new Map();
+  var classThumbObserver = null;
   var errorHistCache = null; // last histogram layout (for bar-width refit on resize)
 
   // ---------------------------------------------------------------------------
@@ -184,6 +196,7 @@
   function refreshThemeDependentUI() {
     themeColors = null;
     if (!state.result) return;
+    if (isClassification()) { renderClassification(); return; }
     if (state.view === "grid") renderGrid();
     if (state.view === "pareto") renderPareto();
     if (state.currentModel && !$("#dialog-backdrop").hidden) {
@@ -229,6 +242,14 @@
       match: function (n) { return /^SISSO\.in$/i.test(n); } },
     { role: "sissoout", i18n: "fileSissoOut", required: false, optional: true,
       match: function (n) { return /^SISSO\.out$/i.test(n); } },
+    { role: "trainlabels", i18n: "fileTrainLabels", optional: true,
+      match: function (n) { return /^train_labels\.json$/i.test(n); } },
+    { role: "verifylabels", i18n: "fileVerifyLabels", optional: true,
+      match: function (n) { return /^verify_labels\.json$/i.test(n); } },
+    { role: "classdesc", i18n: "fileClassDesc", optional: true,
+      match: function (n) { return /^desc_D00[12]\.dat$/i.test(n); } },
+    { role: "classhull", i18n: "fileClassHull", optional: true,
+      match: function (n) { return /^convex2D_hull$/i.test(n); } },
   ];
 
   // Pareto metrics: label key + whether smaller-is-better.
@@ -367,6 +388,7 @@
     var info = res.meta.sissoIn || null;
     return {
       version: 1,
+      taskType: res.taskType || "regression",
       kind: "sisso-analyzer-project",
       id: state.projectId || null,
       savedAt: new Date().toISOString(),
@@ -426,6 +448,7 @@
     }
     var roleTexts = {};
     var ok = true;
+    state.files = {};
     FILE_ROLES.forEach(function (r) {
       var rec = p.files[r.role];
       if (rec && typeof rec.text === "string") {
@@ -433,9 +456,10 @@
         state.files[r.role] = { name: rec.name || defaultRoleFileName(r.role), file: null };
       }
     });
-    ["train", "uspace", "coeff", "top"].forEach(function (need) {
+    ["train", "uspace", "top"].forEach(function (need) {
       if (roleTexts[need] === undefined) ok = false;
     });
+    if (!roleTexts.coeff && !roleTexts.sissoin) ok = false;
     if (!ok) { toast(I18N.t("errProject")); return; }
     state.projectId = p.id || null;
     try {
@@ -465,6 +489,8 @@
         paretoY: state.paretoY || null,
         paretoZ: state.paretoZ || null,
         paretoMode: state.paretoMode || "2d",
+        classification: { rank: state.classRank, dataset: state.classDataset, page: state.classPage,
+          sort: state.classSort, view: state.classView, hullMode: state.classHullMode },
       }));
     } catch (e) { /* ignore */ }
   }
@@ -484,6 +510,16 @@
       try {
         applyProject(rec, true);
         if (!state.result) return;
+        if (isClassification()) {
+          var cs = saved.classification || {};
+          if (state.result.models.some(function (m) { return m.rank === cs.rank; })) state.classRank = cs.rank;
+          state.classDataset = ["train", "verify", "both"].includes(cs.dataset) && (cs.dataset === "train" || Classification.hasVerificationLabels(state.result)) ? cs.dataset : state.classDataset;
+          state.classPage = Number.isInteger(cs.page) && cs.page >= 0 ? cs.page : 0;
+          state.classSort = ["rank", "dataOverlap", "sizeOverlap"].includes(cs.sort) ? cs.sort : "rank";
+          state.classView = cs.view === "table" ? "table" : "grid";
+          state.classHullMode = cs.hullMode === "official" ? "official" : "rebuilt";
+          renderClassification(); persistSession(); return;
+        }
         var want = saved.view === "grid" || saved.view === "pareto" || saved.view === "units" ||
           saved.view === "compare" ? saved.view : "table";
         state.view = want;
@@ -619,6 +655,7 @@
     var btn = $("#btn-lang");
     if (btn) btn.textContent = I18N.getLocale() === "zh" ? "EN" : "中文";
     renderFileList();
+    if (isClassification()) { renderClassification(); renderRecentList(); return; }
     renderControls();
     renderCount();
     populateColorSelect();
@@ -946,9 +983,8 @@
   }
 
   function hasAllRequired() {
-    return FILE_ROLES.every(function (r) {
-      return r.optional || state.files[r.role];
-    });
+    return ["train", "uspace", "top"].every(function (r) { return state.files[r]; }) &&
+      !!(state.files.coeff || (state.inputType === 2 && state.files.sissoin));
   }
 
   function renderRunButton() {
@@ -1096,7 +1132,7 @@
         var bn = basename(path);
         if (!bn) continue;
         var blob = await ze.async("blob");
-        out.push({ name: bn, file: new File([blob], bn) });
+        out.push({ name: bn, path: path, file: new File([blob], bn) });
       }
       return out;
     }
@@ -1105,7 +1141,7 @@
       var gunzipped = await gunzipFile(file);
       return parseTar(gunzipped).map(function (e) {
         var bn = basename(e.name);
-        return { name: bn, file: new File([e.bytes], bn) };
+        return { name: bn, path: e.name, file: new File([e.bytes], bn) };
       });
     }
 
@@ -1113,7 +1149,7 @@
       var bytes = await fileToBytes(file);
       return parseTar(bytes).map(function (e) {
         var bn = basename(e.name);
-        return { name: bn, file: new File([e.bytes], bn) };
+        return { name: bn, path: e.name, file: new File([e.bytes], bn) };
       });
     }
 
@@ -1148,7 +1184,7 @@
     function walk(entry) {
       return new Promise(function (resolve) {
         if (entry.isFile) {
-          entry.file(function (f) { addFile(f); resolve(); }, function () { resolve(); });
+          entry.file(function (f) { f.sissoPath = entry.fullPath; addFile(f); resolve(); }, function () { resolve(); });
         } else if (entry.isDirectory) {
           readDir(entry).then(function (entries) {
             var chain = Promise.resolve();
@@ -1172,7 +1208,13 @@
   // Expands archives and folders, classifies every file, and updates state.
   async function ingest(items) {
     var files = [];
-    if (items instanceof FileList || Array.isArray(items)) {
+    var candidates = [];
+    function offer(role, name, file, path) {
+      if (!role) return;
+      path = String(path || name).replace(/\\/g, "/").replace(/^\/+/, "");
+      candidates.push({ role: role, name: name, file: file, path: path, depth: path.split("/").filter(Boolean).length });
+    }
+    if (Array.isArray(items) || items instanceof FileList) {
       files = Array.prototype.slice.call(items);
     } else if (items && typeof items.length === "number") {
       // DataTransferItemList
@@ -1191,7 +1233,7 @@
           var expanded = await expandArchive(f);
           expanded.forEach(function (e) {
             var r = classify(e.name);
-            if (r) state.files[r] = { name: e.name, file: e.file };
+            offer(r, e.name, e.file, e.path);
           });
           // If the archive itself already matched a role and expanded nothing,
           // keep the archive as the role (should not normally happen).
@@ -1203,7 +1245,19 @@
         continue;
       }
       var role2 = classify(name);
-      if (role2) state.files[role2] = { name: name, file: f };
+      offer(role2, name, f, f.webkitRelativePath || f.sissoPath);
+    }
+    var runRoots = candidates.filter(function (c) { return c.role === "train"; }).sort(function (a, b) {
+      return a.depth - b.depth || a.path.localeCompare(b.path);
+    }).map(function (c) { return c.path.slice(0, c.path.lastIndexOf("/") + 1); });
+    var selected = {};
+    candidates.forEach(function (c) {
+      if (runRoots.length && (!c.path.startsWith(runRoots[0]) || runRoots.slice(1).some(function (root) { return c.path.startsWith(root); }))) return;
+      if (!selected[c.role] || c.depth < selected[c.role].depth) selected[c.role] = c;
+    });
+    Object.keys(selected).forEach(function (role) { state.files[role] = selected[role]; });
+    if (state.files.sissoin && state.files.sissoin.file) {
+      state.inputType = Core.parseSissoIn(await readFileAsText(state.files.sissoin.file)).ptype;
     }
     renderFileList();
     renderRunButton();
@@ -1212,18 +1266,21 @@
   function renderFileList() {
     var list = $("#file-list");
     list.innerHTML = "";
+    var classRun = isClassification() || state.inputType === 2;
     FILE_ROLES.forEach(function (r) {
+      if (["trainlabels", "verifylabels", "classdesc", "classhull"].includes(r.role) && !classRun && !state.files[r.role]) return;
+      var required = r.role === "coeff" ? !classRun : r.role === "sissoin" ? classRun : !!r.required;
       var item = el("li", "file-item");
       var dot = el("span", "file-item__dot");
       var name = el("span", "file-item__name");
       var roleTag = el("span", "file-item__role");
       name.textContent = I18N.t(r.i18n);
-      roleTag.textContent = r.required ? I18N.t("required") : I18N.t("optional");
+      roleTag.textContent = required ? I18N.t("required") : I18N.t("optional");
       var got = state.files[r.role];
       if (got) {
         dot.classList.add("is-ok");
         name.textContent += " · " + got.name;
-      } else if (r.required) {
+      } else if (required) {
         dot.classList.add("is-missing");
       } else {
         dot.classList.add("is-warn");
@@ -1331,11 +1388,14 @@
       var roleTexts = {};
       roleTexts.train = await readFileAsText(state.files.train.file);
       roleTexts.uspace = await readFileAsText(state.files.uspace.file);
-      roleTexts.coeff = await readFileAsText(state.files.coeff.file);
+      if (state.files.coeff) roleTexts.coeff = await readFileAsText(state.files.coeff.file);
       roleTexts.top = await readFileAsText(state.files.top.file);
       if (state.files.verify) roleTexts.verify = await readFileAsText(state.files.verify.file);
       if (state.files.sissoin) roleTexts.sissoin = await readFileAsText(state.files.sissoin.file);
       if (state.files.sissoout) roleTexts.sissoout = await readFileAsText(state.files.sissoout.file);
+      for (var role of ["trainlabels", "verifylabels", "classdesc", "classhull"]) {
+        if (state.files[role]) roleTexts[role] = await readFileAsText(state.files[role].file);
+      }
 
       // a fresh analyze run starts a brand-new project identity
       state.projectId = null;
@@ -1359,6 +1419,8 @@
         // tasks — the check reports their absence as a blocker in that case.
         sissoIn: roleTexts.sissoin,
         sissoOut: roleTexts.sissoout,
+        trainlabels: roleTexts.trainlabels, verifylabels: roleTexts.verifylabels,
+        classdesc: roleTexts.classdesc, classhull: roleTexts.classhull,
       });
       if (state.health.level === "error") {
         renderHealthReport(state.health, $("#health-block"));
@@ -1384,6 +1446,38 @@
   // saved project. `init` may carry { modelStates } so favourites/exclusions
   // saved inside a project JSON are restored onto the freshly rebuilt models.
   function processTexts(roleTexts, init) {
+    if (Classification && Classification.isClassification(roleTexts)) {
+      var classified = Classification.runPipeline(roleTexts);
+      classified.modelStates = Core.normalizeModelStates(init && init.modelStates,
+        new Set(classified.models.map(function (m) { return m.rank; })));
+      state.result = classified;
+      state.texts = Object.assign({}, roleTexts);
+      state.classRank = classified.models[0].rank;
+      state.classDataset = Classification.hasVerificationLabels(classified) ? "both" : "train";
+      state.classLabelDraft = null;
+      state.classPage = 0;
+      state.classSort = "rank";
+      state.classView = "grid";
+      state.classHullMode = "rebuilt";
+      classGeometryCache.clear();
+      state.view = "classification";
+      closeDetail();
+      closeInspector();
+      $("#view-upload").hidden = true;
+      $("#view-results").hidden = true;
+      $("#view-classification").hidden = false;
+      $("#btn-reset").hidden = false;
+      setNavState(true);
+      renderClassification();
+      if (window.scrollTo) window.scrollTo(0, 0);
+      storeProjectLocally();
+      persistSession();
+      return;
+    }
+    if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
+    if (classThumbObserver) { classThumbObserver.disconnect(); classThumbObserver = null; }
+    classGeometryCache.clear();
+    $("#view-classification").hidden = true;
     var files = {};
     files.trainText = roleTexts.train;
     files.uspaceText = roleTexts.uspace;
@@ -1487,11 +1581,523 @@
   // ---------------------------------------------------------------------------
   // Results rendering
   // ---------------------------------------------------------------------------
+  function isClassification() {
+    return !!(state.result && state.result.taskType === "classification");
+  }
+
+  function classButton(text, action, disabled) {
+    var b = el("button", "btn btn--secondary", text);
+    b.type = "button";
+    b.disabled = !!disabled;
+    b.addEventListener("click", action);
+    return b;
+  }
+
+  function classSelect(label, options, value, change) {
+    var field = el("label", "field");
+    field.appendChild(el("span", "field__label", label));
+    var select = el("select", "select");
+    select.setAttribute("aria-label", label);
+    options.forEach(function (o) {
+      var option = el("option", "", o[1]); option.value = o[0]; select.appendChild(option);
+      option.disabled = !!o[2];
+    });
+    select.value = value;
+    select.addEventListener("change", function () { change(select.value); });
+    field.appendChild(select);
+    return field;
+  }
+
+  function classificationGeometry(model) {
+    if (classGeometryCache.has(model.rank)) return classGeometryCache.get(model.rank);
+    var geo = { train: Classification.projectModel(state.result, model, "train"),
+      verify: Classification.hasVerificationLabels(state.result) ? Classification.projectModel(state.result, model, "verify") : [] };
+    geo.hulls = Classification.rebuildHulls(geo.train, state.result.classes.length, state.result.meta.sissoIn.descDim);
+    if (classGeometryCache.size >= 200) classGeometryCache.delete(classGeometryCache.keys().next().value);
+    classGeometryCache.set(model.rank, geo);
+    return geo;
+  }
+
+  function classificationDatasets() {
+    if (!Classification.hasVerificationLabels(state.result)) return ["train"];
+    return state.classDataset === "both" ? ["train", "verify"] : [state.classDataset];
+  }
+
+  function classXY(point, dim) {
+    return [point.coords[0], dim === 2 ? point.coords[1] : point.classIndex === null ? -1 : point.classIndex];
+  }
+
+  function saveVerificationLabels(labels) {
+    var text = Classification.verificationLabelText(state.result, labels);
+    state.result.verify.labels = labels.slice();
+    state.texts.verifylabels = text;
+    state.files.verifylabels = { name: "verify_labels.json", file: null };
+    state.result.hasClassNames = true;
+    state.classLabelDraft = null;
+    classGeometryCache.clear();
+    state.classDataset = Classification.hasVerificationLabels(state.result) ? "both" : "train";
+    renderClassification(); persistSession();
+    document.getElementById("verification-label-open").focus();
+    storeProjectLocally().then(function (saved) {
+      toast(I18N.t(saved ? "verificationSaved" : "verificationApplied"));
+    });
+  }
+
+  function buildVerificationLabels() {
+    var res = state.result, data = res.verify, nClasses = res.classes.length;
+    var draft = state.classLabelDraft;
+    if (!draft) {
+      var labels = data.labels ? data.labels.slice() : Array(data.n).fill(null);
+      var counts = res.classes.map(function (_, c) { return labels.filter(function (v) { return v === c; }).length; });
+      var grouped = labels.every(function (c, i) { return c !== null && (!i || c >= labels[i - 1]); });
+      draft = state.classLabelDraft = { labels: labels, selected: new Set(), counts: grouped ? counts.map(String) : Array(nClasses).fill(""),
+        mode: grouped || labels.every(function (c) { return c === null; }) ? "counts" : "manual" };
+    }
+    var savedCount = data.labels ? data.labels.filter(function (c) { return c !== null; }).length : 0;
+    var manager = el("div", "class-label-manager");
+    var statusText = el("div", "class-label-status");
+    statusText.appendChild(el("span", "", I18N.t("classVerify")));
+    statusText.appendChild(el("strong", "", I18N.format("verificationProgress", { n: savedCount, total: data.n })));
+    if (!Classification.hasVerificationLabels(res)) statusText.appendChild(el("span", "class-note", I18N.t("verificationTrainOnly")));
+    manager.appendChild(statusText);
+    var dialog = el("dialog", "class-label-dialog"); dialog.id = "verification-label-dialog";
+    dialog.setAttribute("aria-labelledby", "verification-label-title");
+    var open = classButton(I18N.t(Classification.hasVerificationLabels(res) ? "verificationEdit" : "verificationSetup"), function () {
+      dialog.showModal(); (draft.mode === "counts" ? countInputs[0] : all).focus();
+    });
+    open.id = "verification-label-open"; manager.appendChild(open);
+    var header = el("header", "class-label-header");
+    header.appendChild(el("h2", "", I18N.t("verificationLabels"))).id = "verification-label-title";
+    header.appendChild(classButton(I18N.t("verificationClose"), function () { dialog.close(); }));
+    dialog.appendChild(header);
+    var panel = el("div", "class-labels");
+    panel.appendChild(el("p", "class-note", I18N.t("verificationEditNote")));
+    var modes = el("div", "class-label-modes");
+    var countsMode = classButton(I18N.t("verificationCountsMode"), function () { setMode("counts"); });
+    var manualMode = classButton(I18N.t("verificationManualMode"), function () {
+      if (draft.mode === "counts" && parsed) { draft.labels = parsed.slice(); renderRows(); }
+      setMode("manual");
+    });
+    modes.appendChild(countsMode); modes.appendChild(manualMode); panel.appendChild(modes);
+    var countsSection = el("div"); panel.appendChild(countsSection);
+    var help = el("p", "class-note", I18N.format("verificationCountsHelp", { n: data.n }));
+    help.id = "verification-counts-help"; countsSection.appendChild(help);
+    var ranges = el("div", "class-count-ranges"); countsSection.appendChild(ranges);
+    var rangeRows = [], rangeIds = [];
+    var countInputs = res.classes.map(function (_, c) {
+      var card = el("label", "class-count-range");
+      var caption = el("span", "", I18N.format("classificationCategory", { n: c + 1 })); card.appendChild(caption);
+      var input = el("input", "input class-counts-input"); input.type = "text"; input.inputMode = "numeric";
+      input.value = draft.counts[c]; input.placeholder = "0";
+      input.setAttribute("aria-describedby", "verification-counts-help verification-counts-error");
+      input.setAttribute("aria-label", I18N.format("classificationCategory", { n: c + 1 }));
+      if (c === nClasses - 1) {
+        input.readOnly = true;
+        caption.appendChild(el("small", "", I18N.t("verificationRemainder")));
+      }
+      card.appendChild(input);
+      rangeRows.push(card.appendChild(el("p", "", "—")));
+      rangeIds.push(card.appendChild(el("small")));
+      input.addEventListener("input", previewCounts); ranges.appendChild(card);
+      return input;
+    });
+    var fill = classButton(I18N.t("verificationFill"), function () {
+      if (!parsed) return;
+      draft.labels = parsed.slice(); renderRows(); setMode("manual"); all.focus();
+    });
+    fill.classList.add("class-count-adjust");
+    var error = el("p", "class-label-error"); error.id = "verification-counts-error"; error.setAttribute("role", "alert"); countsSection.appendChild(error);
+    countsSection.appendChild(fill);
+    var parsed = null;
+    function previewCounts() {
+      parsed = null; error.textContent = "";
+      rangeRows.forEach(function (row) { row.textContent = "—"; });
+      rangeIds.forEach(function (row) { row.textContent = ""; });
+      var entered = countInputs.slice(0, -1).map(function (input) { return input.value.trim(); });
+      var valid = entered.every(function (v) { return /^\d+$/.test(v) && Number.isSafeInteger(Number(v)); });
+      var total = entered.reduce(function (sum, v) { return sum + Number(v); }, 0);
+      countInputs[nClasses - 1].value = valid && total <= data.n ? String(data.n - total) : "";
+      draft.counts = countInputs.map(function (input) { return input.value; });
+      if (valid || entered.some(function (v) { return v !== ""; })) {
+        try {
+          if (!valid) throw new Error("verificationCountInteger");
+          if (total > data.n) { var tooMany = new Error("verificationCountsTotal"); tooMany.total = total; throw tooMany; }
+          parsed = Classification.labelsFromCounts(draft.counts.join(","), nClasses, data.n);
+          var start = 0;
+          res.classes.forEach(function (_, c) {
+            var n = Number(draft.counts[c]);
+            rangeRows[c].textContent = n ? I18N.format("verificationRange", { from: start + 1, to: start + n }) : "—";
+            if (n) rangeIds[c].textContent = data.names[start] + " → " + data.names[start + n - 1];
+            start += n;
+          });
+        } catch (e) {
+          error.textContent = I18N.format(e.message, { k: nClasses, n: data.n, total: e.total });
+        }
+      }
+      error.hidden = !error.textContent; fill.disabled = !parsed;
+      countInputs.forEach(function (input) { input.setAttribute("aria-invalid", String(!!error.textContent)); });
+      if (save) updateStatus();
+    }
+    previewCounts();
+    function resetCounts() { countInputs.forEach(function (input) { input.value = ""; }); previewCounts(); }
+    var manualSection = el("div"); panel.appendChild(manualSection);
+    var bulk = el("div", "class-controls"), selected = el("span");
+    var options = [["", I18N.t("classificationUnlabeled")]].concat(res.classes.map(function (_, c) {
+      return [String(c), I18N.format("classificationCategory", { n: c + 1 })];
+    }));
+    var bulkValue = "0";
+    bulk.appendChild(classSelect(I18N.t("verificationBulkCategory"), options, bulkValue, function (v) { bulkValue = v; }));
+    var assign = classButton(I18N.t("verificationAssign"), function () {
+      data.names.forEach(function (id, i) { if (draft.selected.has(id)) draft.labels[i] = bulkValue === "" ? null : Number(bulkValue); });
+      resetCounts(); renderRows(); updateStatus();
+    });
+    bulk.appendChild(assign); bulk.appendChild(selected); manualSection.appendChild(bulk);
+    var box = el("div", "class-sample-scroll"), table = el("table", "class-table");
+    var thead = el("thead"), header = el("tr"), selectCell = el("th"), all = el("input");
+    all.type = "checkbox"; all.setAttribute("aria-label", I18N.t("verificationSelectAll"));
+    all.addEventListener("change", function () {
+      draft.selected.clear(); if (all.checked) data.names.forEach(function (id) { draft.selected.add(id); });
+      renderRows(); updateStatus();
+    });
+    selectCell.appendChild(all); header.appendChild(selectCell);
+    ["#", I18N.t("classificationSample"), I18N.t("classificationCategories")].forEach(function (s) { header.appendChild(el("th", "", s)); });
+    thead.appendChild(header); table.appendChild(thead);
+    var tbody = el("tbody"); table.appendChild(tbody); box.appendChild(table); manualSection.appendChild(box);
+    var actions = el("footer", "class-label-footer"), status = el("span"); status.setAttribute("role", "status");
+    var save = classButton(I18N.t("verificationSave"), function () {
+      var labels = draft.mode === "counts" ? parsed : draft.labels;
+      if (!labels) return;
+      dialog.close(); saveVerificationLabels(labels);
+    });
+    save.className = "btn btn--primary";
+    var exportLabels = classButton(I18N.t("verificationExport"), function () {
+      downloadTextFile("verify_labels.json", Classification.verificationLabelText(res, draft.mode === "counts" ? parsed : draft.labels), "application/json");
+    });
+    actions.appendChild(status); actions.appendChild(exportLabels); actions.appendChild(save);
+    function updateStatus() {
+      selected.textContent = I18N.format("verificationSelected", { n: draft.selected.size });
+      assign.disabled = !draft.selected.size;
+      all.checked = draft.selected.size === data.n; all.indeterminate = draft.selected.size > 0 && !all.checked;
+      var labels = draft.mode === "counts" && parsed ? parsed : draft.labels;
+      status.textContent = I18N.format("verificationDraft", { n: labels.filter(function (c) { return c !== null; }).length, total: data.n });
+      save.disabled = exportLabels.disabled = draft.mode === "counts" && !parsed;
+    }
+    function setMode(mode) {
+      draft.mode = mode;
+      countsSection.hidden = mode !== "counts"; manualSection.hidden = mode !== "manual";
+      countsMode.setAttribute("aria-pressed", String(mode === "counts")); manualMode.setAttribute("aria-pressed", String(mode === "manual"));
+      updateStatus();
+    }
+    function renderRows() {
+      tbody.innerHTML = "";
+      data.names.forEach(function (id, i) {
+        var row = el("tr"), cell = el("td"), check = el("input");
+        check.type = "checkbox"; check.checked = draft.selected.has(id); check.setAttribute("aria-label", I18N.t("verificationSelect") + " " + id);
+        check.addEventListener("change", function () { if (check.checked) draft.selected.add(id); else draft.selected.delete(id); updateStatus(); });
+        cell.appendChild(check); row.appendChild(cell); row.appendChild(el("td", "", String(i + 1))); row.appendChild(el("td", "", id));
+        var category = classSelect(id, options, draft.labels[i] === null ? "" : String(draft.labels[i]), function (v) {
+          draft.labels[i] = v === "" ? null : Number(v); resetCounts(); updateStatus();
+        });
+        category.firstChild.className = "sr-only";
+        category.lastChild.setAttribute("aria-label", I18N.t("classificationCategories") + " · " + id);
+        var categoryCell = el("td"); categoryCell.appendChild(category); row.appendChild(categoryCell); tbody.appendChild(row);
+      });
+    }
+    renderRows(); setMode(draft.mode);
+    dialog.appendChild(panel); dialog.appendChild(actions); manager.appendChild(dialog);
+    return manager;
+  }
+
+  function buildClassThumb(model) {
+    var NS = "http://www.w3.org/2000/svg", W = 300, H = 180, pad = 14;
+    var svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("aria-hidden", "true"); svg.classList.add("class-preview");
+    var geo = classificationGeometry(model), dim = state.result.meta.sissoIn.descDim, colors = getThemeColors();
+    var palette = [colors.train, colors.verify, "#649477", "#b782a7"], shapes = ["circle", "triangle", "rect", "diamond"];
+    var groups = [], all = [];
+    classificationDatasets().forEach(function (ds) {
+      for (var c = 0; c <= state.result.classes.length; c++) {
+        var points = geo[ds].filter(function (p) { return p.finite && p.classIndex === (c === state.result.classes.length ? null : c); })
+          .map(function (p) { return classXY(p, dim); });
+        groups.push({ ds: ds, category: c, points: points }); all = all.concat(points);
+      }
+    });
+    var hulls = geo.hulls.map(function (h, c) { return h.map(function (p) { return [p[0], dim === 2 ? p[1] : c]; }); });
+    hulls.forEach(function (h) { all = all.concat(h); });
+    if (!all.length) return svg;
+    var scale = [1, 1];
+    all.forEach(function (p) { for (var i = 0; i < 2; i++) scale[i] = Math.max(scale[i], Math.abs(p[i])); });
+    var xs = all.map(function (p) { return p[0] / scale[0]; }), ys = all.map(function (p) { return p[1] / scale[1]; });
+    var x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs), y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+    function sx(x) { return pad + ((x / scale[0] - x0) / (x1 - x0 || 1)) * (W - 2 * pad); }
+    function sy(y) { return H - pad - ((y / scale[1] - y0) / (y1 - y0 || 1)) * (H - 2 * pad); }
+    hulls.forEach(function (h, c) {
+      if (h.length === 1) { drawPts(svg, h, palette[c % palette.length], shapes[c % shapes.length], sx, sy); return; }
+      if (h.length < 2) return;
+      var line = document.createElementNS(NS, "polyline");
+      line.setAttribute("points", (h.length > 2 ? h.concat([h[0]]) : h).map(function (p) { return sx(p[0]) + "," + sy(p[1]); }).join(" "));
+      line.setAttribute("stroke", palette[c % palette.length]); line.setAttribute("stroke-width", "1.3");
+      line.setAttribute("fill", "none"); svg.appendChild(line);
+    });
+    groups.forEach(function (g) {
+      drawPts(svg, g.points, g.category === state.result.classes.length ? colors.textSoft : palette[g.category % palette.length],
+        shapes[g.category % shapes.length], sx, sy, { hollow: g.ds === "verify", maxPoints: Infinity });
+    });
+    return svg;
+  }
+
+  function buildClassGallery(models) {
+    var gallery = el("div", "class-gallery");
+    if (typeof IntersectionObserver !== "undefined") {
+      var observer = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (classThumbObserver !== observer || !entry.isIntersecting || !gallery.contains(entry.target)) return;
+          var placeholder = entry.target.querySelector(".class-preview-placeholder");
+          if (placeholder) placeholder.replaceWith(buildClassThumb(entry.target.__model));
+          observer.unobserve(entry.target);
+        });
+      }, { root: gallery, rootMargin: "200px" });
+      classThumbObserver = observer;
+    }
+    models.forEach(function (model) {
+      var card = el("button", "class-card" + (model.rank === state.classRank ? " is-selected" : ""));
+      card.type = "button";
+      card.setAttribute("aria-pressed", String(model.rank === state.classRank));
+      card.setAttribute("aria-label", I18N.t("classificationModel") + " " + model.rank);
+      card.appendChild(el("span", "class-card__title", I18N.t("classificationModel") + " " + model.rank));
+      card.appendChild(el("span", "class-card__score", I18N.t("classificationOverlap") + ": " + model.dataOverlap + " · " + model.sizeOverlap));
+      if (classThumbObserver) {
+        card.__model = model; card.appendChild(el("span", "class-preview-placeholder skeleton"));
+        classThumbObserver.observe(card);
+      } else card.appendChild(buildClassThumb(model));
+      card.addEventListener("click", function () {
+        state.classRank = model.rank; renderClassification();
+        if (window.matchMedia && window.matchMedia("(max-width: 1000px)").matches) {
+          $("#view-classification .class-detail").scrollIntoView({ block: "start" });
+        }
+      });
+      gallery.appendChild(card);
+    });
+    return gallery;
+  }
+
+  function renderClassification() {
+    if (!isClassification()) return;
+    var res = state.result, info = res.meta.sissoIn;
+    if (!Classification.hasVerificationLabels(res)) state.classDataset = "train";
+    var classNames = res.classes.map(function (_, i) { return I18N.format("classificationCategory", { n: i + 1 }); });
+    var root = $("#view-classification");
+    var oldGallery = root.querySelector(".class-gallery");
+    var galleryScroll = oldGallery && Number(oldGallery.dataset.page) === state.classPage ? oldGallery.scrollTop : 0;
+    if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
+    if (classThumbObserver) { classThumbObserver.disconnect(); classThumbObserver = null; }
+    root.innerHTML = "";
+    var ctx = $("#app-context");
+    ctx.textContent = I18N.t("classificationTitle") + " · " + info.descDim + "D";
+    ctx.hidden = false;
+    var heading = el("header", "class-header"), intro = el("div");
+    intro.appendChild(el("h1", "", I18N.t("classificationTitle"))).id = "class-title";
+    intro.appendChild(el("p", "class-note", I18N.t("classificationNote")));
+    heading.appendChild(intro);
+    if (res.verify) heading.appendChild(buildVerificationLabels());
+    root.appendChild(heading);
+    var kpis = el("div", "run-overview class-overview");
+    [["kpiModels", res.models.length], ["kpiTrain", res.train.n], ["kpiVerify", res.verify ? res.verify.n : "—"],
+      ["classificationCategories", info.classCounts.join(" + ")], ["kpiFeatures", res.meta.nFeatures]].forEach(function (item) {
+      var card = el("div", "kpi");
+      if (item[0] === "classificationCategories") card.title = I18N.t("classificationBlockSource");
+      card.appendChild(el("div", "kpi__label", I18N.t(item[0])));
+      card.appendChild(el("div", "kpi__value", String(item[1])));
+      kpis.appendChild(card);
+    });
+    root.appendChild(kpis);
+    var controls = el("div", "class-browser-controls"), browserHeader = el("div", "class-browser-header");
+    browserHeader.appendChild(el("h2", "", I18N.t("classificationCandidates")));
+    var viewSwitch = el("div", "class-view-switch");
+    [["grid", "viewGrid"], ["table", "viewTable"]].forEach(function (v) {
+      var button = classButton(I18N.t(v[1]), function () { state.classView = v[0]; renderClassification(); });
+      button.setAttribute("aria-pressed", String(state.classView === v[0])); viewSwitch.appendChild(button);
+    });
+    browserHeader.appendChild(viewSwitch); controls.appendChild(browserHeader);
+    var sortRow = el("div", "class-browser-sort");
+    sortRow.appendChild(classSelect(I18N.t("sortBy"), [["rank", I18N.t("colRank")],
+      ["dataOverlap", I18N.t("classificationOverlap")], ["sizeOverlap", I18N.t("classificationSize")]],
+    state.classSort, function (v) { state.classSort = v; state.classPage = 0; renderClassification(); }));
+    var rankExport = classButton(I18N.t("classificationExportRankShort"), function () {
+      var rows = [["rank", "official_data_overlap", "official_size_overlap", "descriptor_1"]];
+      if (info.descDim === 2) rows[0].push("descriptor_2");
+      res.models.forEach(function (m) { rows.push([m.rank, m.dataOverlap, m.sizeOverlap].concat(m.descriptors.map(function (d) { return d.original; }))); });
+      downloadTextFile("sisso-classification-rankings.csv", Core.rowsToCsv(rows), "text/csv;charset=utf-8");
+    });
+    rankExport.title = I18N.t("classificationExportRankings");
+    var sorted = res.models.slice().sort(function (a, b) { return a[state.classSort] - b[state.classSort] || a.rank - b.rank; });
+    var pages = Math.ceil(sorted.length / 100);
+    state.classPage = Math.min(state.classPage, pages - 1);
+    var pager = el("div", "class-pager");
+    pager.appendChild(classButton("←", function () { state.classPage--; renderClassification(); }, state.classPage === 0));
+    pager.lastChild.setAttribute("aria-label", I18N.t("classificationPrevious"));
+    pager.appendChild(el("span", "", (state.classPage + 1) + " / " + pages));
+    pager.appendChild(classButton("→", function () { state.classPage++; renderClassification(); }, state.classPage >= pages - 1));
+    pager.lastChild.setAttribute("aria-label", I18N.t("classificationNext"));
+    sortRow.appendChild(pager); controls.appendChild(sortRow);
+    var browserFooter = el("div", "class-browser-caption");
+    browserFooter.appendChild(el("span", "class-note", I18N.t("classificationPreviewNote"))); browserFooter.appendChild(rankExport); controls.appendChild(browserFooter);
+    var layout = el("div", "class-layout" + (state.classView === "grid" ? " class-layout--gallery" : ""));
+    var modelBrowser = el("aside", "class-model-browser"); modelBrowser.appendChild(controls); layout.appendChild(modelBrowser);
+    if (state.classView === "grid") {
+      var gallery = buildClassGallery(sorted.slice(state.classPage * 100, state.classPage * 100 + 100));
+      gallery.dataset.page = state.classPage;
+      modelBrowser.appendChild(gallery);
+    } else {
+    var tableBox = el("div", "class-models");
+    var table = el("table", "class-table");
+    var head = el("thead"), hr = el("tr");
+    ["colRank", "classificationOverlap", "classificationSize"].forEach(function (key) {
+      var th = el("th", "", I18N.t(key));
+      if (key !== "colRank") th.title = I18N.t("classificationScoreNote");
+      hr.appendChild(th);
+    });
+    head.appendChild(hr); table.appendChild(head);
+    var body = el("tbody");
+    sorted.slice(state.classPage * 100, state.classPage * 100 + 100).forEach(function (m) {
+      var row = el("tr", m.rank === state.classRank ? "is-selected" : "");
+      var cell = el("td");
+      var b = classButton(String(m.rank), function () { state.classRank = m.rank; renderClassification(); });
+      b.setAttribute("aria-label", I18N.t("classificationModel") + " " + m.rank);
+      b.setAttribute("aria-pressed", String(m.rank === state.classRank));
+      cell.appendChild(b); row.appendChild(cell);
+      row.appendChild(el("td", "", String(m.dataOverlap)));
+      row.appendChild(el("td", "", String(m.sizeOverlap)));
+      body.appendChild(row);
+    });
+    table.appendChild(body); tableBox.appendChild(table); modelBrowser.appendChild(tableBox);
+    }
+    var detail = el("section", "class-detail");
+    var model = res.models.find(function (m) { return m.rank === state.classRank; }) || res.models[0];
+    var geo = classificationGeometry(model);
+    if (state.classHullMode === "official" && !model.hulls) state.classHullMode = "rebuilt";
+    var modelHeader = el("div", "class-model-header");
+    modelHeader.appendChild(el("h2", "", I18N.t("classificationModel") + " " + model.rank));
+    modelHeader.appendChild(el("span", "class-model-score", I18N.t("classificationOverlap") + ": " + model.dataOverlap + " · " + I18N.t("classificationSize") + ": " + model.sizeOverlap));
+    detail.appendChild(modelHeader);
+    model.descriptors.forEach(function (d, i) { detail.appendChild(el("pre", "class-formula", "d" + (i + 1) + " = " + d.original)); });
+    var datasets = [["train", I18N.t("classTrain")]];
+    if (Classification.hasVerificationLabels(res)) { datasets.unshift(["both", I18N.t("classificationBoth")]); datasets.push(["verify", I18N.t("classVerify")]); }
+    var dsControls = el("div", "class-controls");
+    dsControls.appendChild(classSelect(I18N.t("classificationDataset"), datasets, state.classDataset,
+      function (v) { state.classDataset = v; renderClassification(); }));
+    dsControls.appendChild(classSelect(I18N.t("classificationHullSource"), [["rebuilt", I18N.t("classificationRebuiltHull")],
+      ["official", I18N.t("classificationHull"), !model.hulls]], state.classHullMode,
+      function (v) { state.classHullMode = v; renderClassification(); }));
+    dsControls.appendChild(classButton(I18N.t("classificationRebuild"), function () {
+      geo.hulls = Classification.rebuildHulls(geo.train, res.classes.length, info.descDim);
+      state.classHullMode = "rebuilt"; renderClassification(); toast(I18N.t("classificationRebuilt"));
+    }));
+    var exports = el("details", "class-export-menu"), exportList = el("div", "class-export-options");
+    exports.appendChild(el("summary", "btn btn--secondary", I18N.t("exportCsv")));
+    exportList.appendChild(classButton(I18N.t("classificationExportPoints"), function () {
+      downloadTextFile("sisso-classification-model-" + model.rank + "-" + state.classDataset + ".csv",
+        Core.rowsToCsv(Classification.exportRows(res, model, state.classDataset)), "text/csv;charset=utf-8"); exports.open = false;
+    }));
+    exportList.appendChild(classButton(I18N.t("classificationExportHulls"), function () {
+      var rows = [["source", "class_index", "descriptor_1"]];
+      if (info.descDim === 2) rows[0].push("descriptor_2");
+      (state.classHullMode === "official" ? model.hulls : geo.hulls).forEach(function (hull, c) {
+        hull.forEach(function (coords) { rows.push([state.classHullMode, c].concat(coords)); });
+      });
+      downloadTextFile("sisso-classification-hulls-" + model.rank + "-" + state.classHullMode + ".csv", Core.rowsToCsv(rows), "text/csv;charset=utf-8"); exports.open = false;
+    }));
+    exports.appendChild(exportList); dsControls.appendChild(exports);
+    detail.appendChild(dsControls);
+    var points = [];
+    classificationDatasets().forEach(function (ds) {
+      geo[ds].forEach(function (p) { points.push(Object.assign({ dataset: ds }, p)); });
+    });
+    var finite = points.filter(function (p) { return p.finite; });
+    if (finite.length !== points.length) detail.appendChild(el("p", "warning", I18N.format("classificationNonfinite", { n: points.length - finite.length })));
+    var notes = el("div", "class-chart-caption");
+    if (model.official && state.classDataset !== "verify" && state.classHullMode === "official") {
+      var no = model.official.filter(function (p) { return p.classified === "NO"; }).length;
+      notes.appendChild(el("p", "class-note", "SISSO classified? YES: " + (model.official.length - no) + " · NO: " + no + ". " + I18N.t("classificationOfficialNote")));
+    }
+    if (Classification.hasVerificationLabels(res)) notes.appendChild(el("p", "class-note", I18N.t("classificationDatasetNote")));
+    notes.appendChild(el("p", "class-note", I18N.t(state.classHullMode === "official" ? "classificationHullNote" : "classificationRebuiltNote")));
+    if (state.classHullMode === "rebuilt" && info.isconvex.includes(0)) notes.appendChild(el("p", "class-note", I18N.t("classificationEnvelopeNote")));
+    var chart = el("div", "class-chart");
+    chart.setAttribute("role", "img"); chart.setAttribute("aria-label", I18N.t("classificationSpace"));
+    detail.appendChild(chart); detail.appendChild(notes); layout.appendChild(detail); root.appendChild(layout);
+    if (gallery) gallery.scrollTop = galleryScroll;
+    var colors = getThemeColors();
+    var palette = [colors.train, colors.verify, "#649477", "#b782a7"];
+    var symbols = ["circle", "triangle", "rect", "diamond"];
+    var series = [];
+    classificationDatasets().forEach(function (ds) {
+      classNames.concat([I18N.t("classificationUnlabeled")]).forEach(function (name, c) {
+        var group = finite.filter(function (p) { return p.dataset === ds && p.classIndex === (c === res.classes.length ? null : c); });
+        if (!group.length) return;
+        var shape = symbols[c % symbols.length], color = c === res.classes.length ? colors.textSoft : palette[c % palette.length];
+        series.push({ name: name + " · " + I18N.t(ds === "train" ? "classTrain" : "classVerify") + " (" + group.length + ")", type: "scatter",
+          symbol: ds === "verify" ? "empty" + shape[0].toUpperCase() + shape.slice(1) : shape, symbolSize: ds === "verify" ? 10 : 8,
+          itemStyle: { color: color, opacity: ds === "verify" ? 1 : 0.7 },
+          data: group.map(function (p) { return { value: classXY(p, info.descDim).concat([p.name, p.classified || "", ds]),
+            itemStyle: p.classified === "NO" && state.classHullMode === "official" ? { borderWidth: 2, borderColor: colors.text } : {} }; }) });
+      });
+    });
+    var hulls = state.classHullMode === "official" ? model.hulls : geo.hulls;
+    hulls.forEach(function (hull, i) {
+      if (!hull.length) return;
+      var coords = hull.map(function (p) { return [p[0], info.descDim === 2 ? p[1] : i]; });
+      var labelKey = state.classHullMode === "official" ? "classificationHull" : info.isconvex[i] ? "classificationRebuiltHull" : "classificationEnvelope";
+      series.push({ name: I18N.t(labelKey) + " · " + classNames[i], type: "line", showSymbol: hull.length === 1, symbolSize: 7, silent: true,
+        itemStyle: { color: palette[i % palette.length] },
+        lineStyle: { color: palette[i % palette.length], type: state.classHullMode === "official" ? "dashed" : "solid", width: 1.5 },
+        data: hull.length > 2 ? coords.concat([coords[0]]) : coords });
+    });
+    state.classChart = echarts.init(chart);
+    state.classChart.setOption({ animation: false, textStyle: { color: colors.text },
+      legend: { type: "scroll", textStyle: { color: colors.text } },
+      tooltip: { trigger: "item", renderMode: "richText", formatter: function (p) {
+        return p.seriesName + "\n" + p.value[2] + "\nd1: " + p.value[0] + (info.descDim === 2 ? "\nd2: " + p.value[1] : "") +
+          (p.value[3] ? "\nSISSO classified? " + p.value[3] : "");
+      } },
+      grid: { top: 65, left: 65, right: 30, bottom: 65 },
+      dataZoom: [{ type: "inside", filterMode: "none" }, { type: "slider", height: 18, bottom: 12 }],
+      xAxis: { type: "value", name: "d1", scale: true, axisLabel: { color: colors.text }, splitLine: { lineStyle: { color: colors.grid } } },
+      yAxis: { type: "value", name: info.descDim === 2 ? "d2" : I18N.t("classificationCategories"), scale: true,
+        minInterval: info.descDim === 1 ? 1 : 0, axisLabel: { color: colors.text, formatter: info.descDim === 1 ? function (v) {
+          return v === -1 ? I18N.t("classificationUnlabeled") : classNames[v] || "";
+        } : undefined }, splitLine: { lineStyle: { color: colors.grid } } }, series: series });
+    var samples = el("details", "class-samples");
+    samples.appendChild(el("summary", "", I18N.t("classificationSamples") + " (" + points.length + ")"));
+    var sampleBox = el("div", "class-sample-scroll");
+    var sampleTable = el("table", "class-table");
+    var sh = el("thead"), shr = el("tr");
+    var headings = [I18N.t("classificationDataset"), I18N.t("classificationSample"), I18N.t("classificationCategories"), "d1"];
+    if (info.descDim === 2) headings.push("d2");
+    headings.push("SISSO classified?");
+    headings.forEach(function (h) { shr.appendChild(el("th", "", h)); }); sh.appendChild(shr); sampleTable.appendChild(sh);
+    var sb = el("tbody");
+    points.forEach(function (p) {
+      var row = el("tr");
+      [I18N.t(p.dataset === "train" ? "classTrain" : "classVerify"), p.name, p.classIndex === null ? "—" : classNames[p.classIndex]].concat(p.coords, [p.classified || "—"]).forEach(function (v) {
+        row.appendChild(el("td", "", String(v)));
+      }); sb.appendChild(row);
+    });
+    sampleTable.appendChild(sb); sampleBox.appendChild(sampleTable); samples.appendChild(sampleBox); root.appendChild(samples);
+  }
+
   // Left-nav state: upload ("Load results") vs. loaded run + sub-views.
   function setNavState(hasResults) {
     var t = $("#view-table-btn"), g = $("#view-grid-btn"), p = $("#view-pareto-btn"),
         c = $("#view-compare-btn"), u = $("#view-units-btn");
     var home = $("#btn-nav-home");
+    var classNav = $("#view-classification-btn");
+    if (classNav) {
+      classNav.hidden = !isClassification();
+      classNav.disabled = !hasResults || !isClassification();
+      classNav.classList.toggle("is-active", hasResults && isClassification());
+    }
     if (hasResults) {
       document.body.classList.add("has-results");
       if (home) home.classList.remove("is-active");
@@ -1500,6 +2106,9 @@
       if (p) p.disabled = false; // available for train-only runs too; hidden in renderControls when no result
       if (c) c.disabled = false;
       if (u) u.disabled = false; // unit gating happens in renderControls
+      if (isClassification()) [t, g, p, c, u].forEach(function (b) {
+        if (b) { b.disabled = true; b.classList.remove("is-active"); }
+      });
     } else {
       document.body.classList.remove("has-results");
       if (home) home.classList.add("is-active");
@@ -2586,8 +3195,9 @@
 
   // Mini-SVG marker for one point. Shapes mirror the ECharts symbols used by the
   // big scatter, so a dataset keeps its identity across both views.
-  function drawPts(svg, pts, color, shape, sx, sy) {
-    var cap = 400;
+  function drawPts(svg, pts, color, shape, sx, sy, opts) {
+    opts = opts || {};
+    var cap = opts.maxPoints || 400;
     var NS = "http://www.w3.org/2000/svg";
     for (var i = 0; i < pts.length && i < cap; i++) {
       var x = sx(pts[i][0]), y = sy(pts[i][1]), r = 2.6;
@@ -2612,8 +3222,9 @@
         }
         node.setAttribute("d", d);
       }
-      node.setAttribute("fill", color);
-      node.setAttribute("opacity", "0.65");
+      node.setAttribute("fill", opts.hollow ? "none" : color);
+      if (opts.hollow) { node.setAttribute("stroke", color); node.setAttribute("stroke-width", "1.2"); }
+      node.setAttribute("opacity", opts.hollow ? "1" : "0.65");
       svg.appendChild(node);
     }
   }
@@ -5192,6 +5803,7 @@
   }
 
   function resizeChart() {
+    if (state.classChart) state.classChart.resize();
     if (state.chart) state.chart.resize();
     if (state.errorChart) {
       state.errorChart.resize();
@@ -5336,8 +5948,13 @@
     }
     $("#btn-reset").addEventListener("click", function () {
       state.files = {};
+      state.inputType = null;
       state.texts = {};
       state.result = null;
+      classGeometryCache.clear();
+      if (classThumbObserver) { classThumbObserver.disconnect(); classThumbObserver = null; }
+      if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
+      $("#view-classification").hidden = true;
       state.projectId = null;
       state.health = null;
       clearHealthPanels();
@@ -5366,6 +5983,7 @@
       I18N.setLocale(I18N.getLocale() === "zh" ? "en" : "zh");
       closeAllPopovers(null);
       applyI18n();
+      if (isClassification()) return;
       if (state.result) {
         renderKpis();
         renderControls(); // rebuild i18n option labels + view-aware controls
