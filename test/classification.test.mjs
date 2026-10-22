@@ -71,6 +71,22 @@ assert.deepEqual(Class.projectModel(result, result.models[0], "verify")[0], {
   name: "v", index: 1, coords: [2, 3], classIndex: 1, finite: true, classified: null,
 });
 assert.equal(Class.projectModel(result, result.models[1], "train")[0].classified, null);
+assert.deepEqual(Class.convexHull([[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0.5], [0, 0], [NaN, 1]]), [[0, 0], [1, 0], [1, 1], [0, 1]]);
+assert.deepEqual(Class.convexHull([]), []);
+assert.deepEqual(Class.convexHull([[2, 3], [2, 3]]), [[2, 3]]);
+assert.deepEqual(Class.convexHull([[0, 0], [1, 1], [2, 2]]), [[0, 0], [2, 2]]);
+assert.equal(Class.convexHull([[1e308, 1e-300], [-1e308, 1e-300], [-1e308, -1e-300], [1e308, -1e-300], [0, 0]]).length, 4);
+const rebuilt = Class.rebuildHulls(Class.projectModel(result, result.models[0], "train"), 2, 2);
+assert.deepEqual(rebuilt[0], [[0, 0], [1, 0], [0, 1]]);
+const movedVerify = Class.runPipeline({ ...CLASS_TEXTS, verify: "name x z\nv 1e9 -1e9\n" });
+assert.deepEqual(Class.rebuildHulls(Class.projectModel(movedVerify, movedVerify.models[0], "train"), 2, 2), rebuilt);
+assert.deepEqual(Class.rebuildHulls([], 2, 2), [[], []]);
+const combinedCsv = Class.exportRows(result, result.models[0], "both");
+assert.equal(combinedCsv.length, 8);
+assert.equal(combinedCsv[0][0], "dataset");
+assert.equal(combinedCsv.at(-1)[0], "verify");
+assert.equal(combinedCsv[1][3], "Category 1");
+assert.equal(combinedCsv.at(-1).at(-2), "");
 assert.equal(result.models[0].official.length, 6);
 assert.equal(result.models[0].hulls.length, 2);
 const nonconvex = Class.runPipeline({ ...CLASS_TEXTS,
@@ -102,6 +118,7 @@ const oneD = Class.runPipeline({ ...CLASS_TEXTS, classhull: undefined, classdesc
   sissoin: CLASS_TEXTS.sissoin.replace("desc_dim=2", "desc_dim=1"),
   top: "rank #data_overlap size_overlap feature_ID\n1 0 -1 (1)\n" });
 assert.equal(Class.projectModel(oneD, oneD.models[0], "train")[0].coords.length, 1);
+assert.deepEqual(Class.rebuildHulls(Class.projectModel(oneD, oneD.models[0], "train"), 2, 1), [[[0], [1]], [[5], [6]]]);
 console.log("PASS classification schema, labels by ID, negative score, projections, official evidence and malformed inputs");
 
 if (fs.existsSync(ARCHIVE)) {
@@ -119,7 +136,13 @@ if (fs.existsSync(ARCHIVE)) {
   assert.equal(real.models[0].official.slice(0, 209).filter((p) => p.classified === "NO").length, 55);
   for (const i of [0, 1, 99, 4999]) {
     assert.equal(Class.projectModel(real, real.models[i], "verify").length, 77);
+    assert.equal(Class.rebuildHulls(Class.projectModel(real, real.models[i], "train"), 2, 2).length, 2);
   }
+  const officialBefore = JSON.stringify(real.models[0].hulls);
+  const trueHulls = Class.rebuildHulls(Class.projectModel(real, real.models[0], "train"), 2, 2);
+  assert.ok(trueHulls[0].length >= 3 && trueHulls[1].length >= 3);
+  assert.equal(JSON.stringify(real.models[0].hulls), officialBefore);
+  assert.equal(real.models[0].dataOverlap, 109);
   console.log("PASS production archive: 5000 models / 331 train / 77 verify / 265 features / top1 109 overlap / matched official coordinates");
   const smoke = Class.runPipeline(archiveTexts(ARCHIVE, "_class_smoke/"));
   assert.equal(smoke.models.length, 5);

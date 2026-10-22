@@ -233,16 +233,58 @@
     return result;
   }
 
+  function convexHull(points) {
+    var sorted = points.filter(function (p) { return p.length === 2 && p.every(Number.isFinite); })
+      .map(function (p) { return p.slice(); }).sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+    var unique = sorted.filter(function (p, i) { return !i || p[0] !== sorted[i - 1][0] || p[1] !== sorted[i - 1][1]; });
+    if (unique.length <= 2) return unique;
+    var scale = [0, 0];
+    unique.forEach(function (p) { for (var i = 0; i < 2; i++) scale[i] = Math.max(scale[i], Math.abs(p[i])); });
+    // Positive axis scaling preserves the hull while keeping cross products finite.
+    var nodes = unique.map(function (p) { return { point: p, x: p[0] / (scale[0] || 1), y: p[1] / (scale[1] || 1) }; });
+    function cross(o, a, b) { return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x); }
+    function half(list) {
+      var hull = [];
+      list.forEach(function (p) {
+        while (hull.length >= 2 && cross(hull[hull.length - 2], hull[hull.length - 1], p) <= 0) hull.pop();
+        hull.push(p);
+      });
+      hull.pop();
+      return hull;
+    }
+    return half(nodes).concat(half(nodes.slice().reverse())).map(function (p) { return p.point; });
+  }
+
+  function rebuildHulls(trainingPoints, nClasses, dim) {
+    var groups = Array.from({ length: nClasses }, function () { return []; });
+    trainingPoints.forEach(function (p) {
+      if (p.finite && Number.isInteger(p.classIndex) && p.classIndex >= 0 && p.classIndex < nClasses) groups[p.classIndex].push(p.coords);
+    });
+    return groups.map(function (points) {
+      if (dim === 2) return convexHull(points);
+      if (!points.length) return [];
+      var values = points.map(function (p) { return p[0]; }).filter(Number.isFinite).sort(function (a, b) { return a - b; });
+      if (!values.length) return [];
+      return values[0] === values[values.length - 1] ? [[values[0]]] : [[values[0]], [values[values.length - 1]]];
+    });
+  }
+
   function exportRows(result, model, dataset) {
     var rows = [["sample_id", "class_index", "class_label", "descriptor_1"]];
     if (result.meta.sissoIn.descDim === 2) rows[0].push("descriptor_2");
     rows[0].push("official_classified", "finite");
-    projectModel(result, model, dataset).forEach(function (p) {
-      rows.push([p.name, p.classIndex === null ? "" : p.classIndex,
-        p.classIndex === null ? "" : result.classes[p.classIndex]].concat(p.coords, [p.classified || "", p.finite]));
+    if (dataset === "both") rows[0].unshift("dataset");
+    (dataset === "both" ? (result.verify ? ["train", "verify"] : ["train"]) : [dataset]).forEach(function (key) {
+      projectModel(result, model, key).forEach(function (p) {
+        var row = [p.name, p.classIndex === null ? "" : p.classIndex,
+          p.classIndex === null ? "" : "Category " + (p.classIndex + 1)].concat(p.coords, [p.classified || "", p.finite]);
+        if (dataset === "both") row.unshift(key);
+        rows.push(row);
+      });
     });
     return rows;
   }
 
-  return { isClassification: isClassification, runPipeline: runPipeline, projectModel: projectModel, exportRows: exportRows };
+  return { isClassification: isClassification, runPipeline: runPipeline, projectModel: projectModel,
+    convexHull: convexHull, rebuildHulls: rebuildHulls, exportRows: exportRows };
 });

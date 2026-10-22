@@ -187,6 +187,8 @@ function bootApp() {
     '  makeProjectJson: makeProjectJson, applyProject: applyProject,',
     '  refreshDynamicLabels: refreshDynamicLabels,',
     '  renderClassification: renderClassification, ingest: ingest,',
+    '  classificationGeometry: classificationGeometry, buildClassThumb: buildClassThumb,',
+    '  classGeometryCache: classGeometryCache,',
     '};\n',
   ].join("\n");
 
@@ -474,7 +476,17 @@ if (!fs.existsSync(path.join(DIR, "train.dat"))) {
   check(reg("#view-results").hidden && !reg("#view-classification").hidden, "Classification: regression controls are hidden");
   check(reg("#view-table-btn").disabled && !reg("#view-classification-btn").disabled, "Classification: navigation matches task type");
   const points = window.__lastChart.option.series.filter((s) => s.type === "scatter");
-  check(points.length === 2 && points.reduce((n, s) => n + s.data.length, 0) === 6, "Classification: both true categories plotted");
+  check(points.length === 3 && points.reduce((n, s) => n + s.data.length, 0) === 7, "Classification: default view overlays training and verification");
+  check(points.some((s) => s.symbol.startsWith("empty")) && points.some((s) => !s.symbol.startsWith("empty")), "Classification: dataset membership uses filled / hollow symbols");
+  check(points.every((s) => !/low|high/.test(s.name)), "Classification: legends use generic categories only");
+  check(window.__lastChart.option.series.filter((s) => s.type === "line").length === 2, "Classification: reconstructed hull per category");
+  attempt("Classification: every model has reconstructed training hulls", () => {
+    app.state.classRank = 2; app.renderClassification();
+    check(window.__lastChart.option.series.filter((s) => s.type === "line").length === 2, "Classification: model 2 draws reconstructed hulls");
+    app.state.classHullMode = "official"; app.state.classRank = 1; app.renderClassification();
+    check(window.__lastChart.option.series.filter((s) => s.type === "line").every((s) => s.lineStyle.type === "dashed"), "Classification: original hulls remain available separately");
+    app.state.classHullMode = "rebuilt";
+  });
   const project = app.makeProjectJson();
   check(project.files.classdesc && project.files.trainlabels && !project.files.coeff, "Classification: project preserves official evidence and labels");
   attempt("Classification: saved project round trip", () => app.applyProject(project));
@@ -490,8 +502,10 @@ if (!fs.existsSync(path.join(DIR, "train.dat"))) {
   if (fs.existsSync(ARCHIVE)) {
     attempt("Classification: production archive full UI path", () => app.processTexts(archiveTexts(ARCHIVE)));
     check(app.state.result.models.length === 5000, "Classification: all 5000 production candidates loaded");
-    check(window.__lastChart.option.series.filter((s) => s.type === "scatter").reduce((n, s) => n + s.data.length, 0) === 331,
-      "Classification: all 331 production training samples plotted");
+    check(window.__lastChart.option.series.filter((s) => s.type === "scatter").reduce((n, s) => n + s.data.length, 0) === 408,
+      "Classification: all 331 training + 77 verification samples plotted");
+    for (const model of app.state.result.models.slice(0, 251)) app.classificationGeometry(model);
+    check(app.classGeometryCache.size <= 200, "Classification: preview cache is bounded for 5000 models");
     attempt("Classification: last model and verification projection", () => {
       app.state.classRank = 5000; app.state.classPage = 49; app.state.classDataset = "verify";
       app.renderClassification();
@@ -499,6 +513,13 @@ if (!fs.existsSync(path.join(DIR, "train.dat"))) {
         "Classification: model 5000 projects 77 verification samples");
     });
   }
+  attempt("Classification: verification outliers stay inside thumbnail bounds", () => {
+    app.processTexts({ ...CLASS_TEXTS, verify: "name x z\nv 1e6 -1e6\n" });
+    const svg = app.buildClassThumb(app.state.result.models[0]);
+    const circles = svg.children.filter((n) => n.tagName === "CIRCLE");
+    check(circles.every((n) => Number(n.getAttribute("cx")) >= 0 && Number(n.getAttribute("cx")) <= 300 && Number(n.getAttribute("cy")) >= 0 && Number(n.getAttribute("cy")) <= 180), "Classification: thumbnail covers combined data ranges");
+    check(svg.children.some((n) => n.getAttribute("fill") === "none" && n.getAttribute("stroke")), "Classification: thumbnail includes hollow verification markers");
+  });
   reg("#btn-reset").dispatch("click");
   check(app.state.result === null && reg("#view-classification").hidden, "Classification: reset returns to upload");
   const demo = require("../js/demo-data.js").DEMO_DATA;

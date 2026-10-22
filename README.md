@@ -44,20 +44,36 @@ classification runs are not supported.
    `train.dat`, `Uspace.expressions` and `Models/top*_D00*`.
 2. Click **Analyze**. Classification is detected automatically; no coefficient
    file is needed.
-3. Select a ranked model to inspect its descriptors and class scatter. Switch
-   to the optional verification dataset, or export rankings and sample CSVs.
+3. Browse the thumbnail grid or ranked table, then select a model to inspect
+   its descriptors, category hulls and samples. Export rankings, hull vertices
+   or sample coordinates as CSV.
 
 Classification `train.dat` contains **name + features**, with no target column.
 `nsample=(n1,n2,…)` in `SISSO.in` defines consecutive category blocks, as described
 in the SISSO 3.5 guide, section 4.1. Optional `train_labels.json` and
-`verify_labels.json` supply class names and validation labels. Their format is
-`{"class_order":["low","high"],"rows":[{"id":"sample-id","class":0},…]}`;
+`verify_labels.json` supply category mapping and validation labels. Their format is
+`{"class_order":["A","B"],"rows":[{"id":"sample-id","class":0},…]}`;
 rows are joined by ID, and training labels must agree with the category blocks.
 Without validation labels, verification points remain unlabeled.
-The page uses **Category 1, Category 2, …** as stable group labels. Names from
-`class_order` are shown alongside them; their meaning is supplied by the dataset.
+The page and CSV use **Category 1, Category 2, …** as stable group labels.
+Names from `class_order` are used to validate category mapping.
 Reversing a descriptor axis does not change categories. Reordering category
 blocks requires matching `nsample` counts and sample-ID label assignments.
+
+**Hulls for every model.** The default view reconstructs each category's convex
+hull from that model's training coordinates. **Rebuild hulls** repeats the
+construction; **Hull source** can switch to the original SISSO hull when one
+is supplied. Singleton and collinear groups render as a point or segment;
+non-convex categories are shown as sample envelopes. Thumbnail previews always
+use training reconstructions, are drawn when visible, and are paged in groups
+of 100 models.
+
+**Training + verification.** With `verify.dat`, the default plot overlays both
+datasets: category color/shape stays the same, filled markers are training and
+hollow markers are verification. The dataset selector also supports either set
+alone. Verification points never participate in hull construction. The sample
+table and combined CSV retain dataset identity. There is no additional data
+split: the imported training and verification files define it.
 
 The classification table preserves SISSO's `#data_overlap` and `size_overlap`,
 including negative separation scores. Lower values are preferred, with overlap
@@ -70,8 +86,8 @@ markers after its coordinates have been checked against the selected top1
 descriptors. Optional `convex2D_hull` draws the original top1 vertices in file
 order. **NO means entry into another category domain; it is not a predicted
 class.** Engine boundary tolerances and near-zero hull edges can materially
-affect these statistics. The analyzer preserves the reported geometry and
-scores rather than substituting a new convex-hull algorithm. It does not report
+affect these statistics. The analyzer preserves the official geometry and
+scores separately from its training-sample reconstructions. It does not report
 prediction accuracy or assign classes to new samples.
 
 Archives and folders containing a nested run (for example `_class_smoke/`) use

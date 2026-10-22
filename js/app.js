@@ -27,6 +27,8 @@
     classDataset: "train",
     classPage: 0,
     classSort: "rank",
+    classView: "grid",
+    classHullMode: "rebuilt",
     projectId: null,
     sortKey: "rank",
     sortAsc: true,
@@ -78,6 +80,8 @@
   };
 
   var COLS_PREF_KEY = "sisso-table-cols";
+  var classGeometryCache = new Map();
+  var classThumbObserver = null;
   var errorHistCache = null; // last histogram layout (for bar-width refit on resize)
 
   // ---------------------------------------------------------------------------
@@ -484,6 +488,8 @@
         paretoY: state.paretoY || null,
         paretoZ: state.paretoZ || null,
         paretoMode: state.paretoMode || "2d",
+        classification: { rank: state.classRank, dataset: state.classDataset, page: state.classPage,
+          sort: state.classSort, view: state.classView, hullMode: state.classHullMode },
       }));
     } catch (e) { /* ignore */ }
   }
@@ -503,7 +509,16 @@
       try {
         applyProject(rec, true);
         if (!state.result) return;
-        if (isClassification()) { persistSession(); return; }
+        if (isClassification()) {
+          var cs = saved.classification || {};
+          if (state.result.models.some(function (m) { return m.rank === cs.rank; })) state.classRank = cs.rank;
+          state.classDataset = ["train", "verify", "both"].includes(cs.dataset) && (cs.dataset !== "verify" || state.result.verify) ? cs.dataset : state.classDataset;
+          state.classPage = Number.isInteger(cs.page) && cs.page >= 0 ? cs.page : 0;
+          state.classSort = ["rank", "dataOverlap", "sizeOverlap"].includes(cs.sort) ? cs.sort : "rank";
+          state.classView = cs.view === "table" ? "table" : "grid";
+          state.classHullMode = cs.hullMode === "official" ? "official" : "rebuilt";
+          renderClassification(); persistSession(); return;
+        }
         var want = saved.view === "grid" || saved.view === "pareto" || saved.view === "units" ||
           saved.view === "compare" ? saved.view : "table";
         state.view = want;
@@ -1437,9 +1452,12 @@
       state.result = classified;
       state.texts = Object.assign({}, roleTexts);
       state.classRank = classified.models[0].rank;
-      state.classDataset = "train";
+      state.classDataset = classified.verify ? "both" : "train";
       state.classPage = 0;
       state.classSort = "rank";
+      state.classView = "grid";
+      state.classHullMode = "rebuilt";
+      classGeometryCache.clear();
       state.view = "classification";
       closeDetail();
       closeInspector();
@@ -1455,6 +1473,8 @@
       return;
     }
     if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
+    if (classThumbObserver) { classThumbObserver.disconnect(); classThumbObserver = null; }
+    classGeometryCache.clear();
     $("#view-classification").hidden = true;
     var files = {};
     files.trainText = roleTexts.train;
@@ -1577,6 +1597,7 @@
     var select = el("select", "select");
     options.forEach(function (o) {
       var option = el("option", "", o[1]); option.value = o[0]; select.appendChild(option);
+      option.disabled = !!o[2];
     });
     select.value = value;
     select.addEventListener("change", function () { change(select.value); });
@@ -1584,22 +1605,115 @@
     return field;
   }
 
+  function classificationGeometry(model) {
+    if (classGeometryCache.has(model.rank)) return classGeometryCache.get(model.rank);
+    var geo = { train: Classification.projectModel(state.result, model, "train"),
+      verify: state.result.verify ? Classification.projectModel(state.result, model, "verify") : [] };
+    geo.hulls = Classification.rebuildHulls(geo.train, state.result.classes.length, state.result.meta.sissoIn.descDim);
+    if (classGeometryCache.size >= 200) classGeometryCache.delete(classGeometryCache.keys().next().value);
+    classGeometryCache.set(model.rank, geo);
+    return geo;
+  }
+
+  function classificationDatasets() {
+    if (!state.result.verify) return ["train"];
+    return state.classDataset === "both" ? ["train", "verify"] : [state.classDataset];
+  }
+
+  function classXY(point, dim) {
+    return [point.coords[0], dim === 2 ? point.coords[1] : point.classIndex === null ? -1 : point.classIndex];
+  }
+
+  function buildClassThumb(model) {
+    var NS = "http://www.w3.org/2000/svg", W = 300, H = 180, pad = 14;
+    var svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("aria-hidden", "true"); svg.classList.add("class-preview");
+    var geo = classificationGeometry(model), dim = state.result.meta.sissoIn.descDim, colors = getThemeColors();
+    var palette = [colors.train, colors.verify, "#649477", "#b782a7"], shapes = ["circle", "triangle", "rect", "diamond"];
+    var groups = [], all = [];
+    classificationDatasets().forEach(function (ds) {
+      for (var c = 0; c <= state.result.classes.length; c++) {
+        var points = geo[ds].filter(function (p) { return p.finite && p.classIndex === (c === state.result.classes.length ? null : c); })
+          .map(function (p) { return classXY(p, dim); });
+        groups.push({ ds: ds, category: c, points: points }); all = all.concat(points);
+      }
+    });
+    var hulls = geo.hulls.map(function (h, c) { return h.map(function (p) { return [p[0], dim === 2 ? p[1] : c]; }); });
+    hulls.forEach(function (h) { all = all.concat(h); });
+    if (!all.length) return svg;
+    var scale = [1, 1];
+    all.forEach(function (p) { for (var i = 0; i < 2; i++) scale[i] = Math.max(scale[i], Math.abs(p[i])); });
+    var xs = all.map(function (p) { return p[0] / scale[0]; }), ys = all.map(function (p) { return p[1] / scale[1]; });
+    var x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs), y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+    function sx(x) { return pad + ((x / scale[0] - x0) / (x1 - x0 || 1)) * (W - 2 * pad); }
+    function sy(y) { return H - pad - ((y / scale[1] - y0) / (y1 - y0 || 1)) * (H - 2 * pad); }
+    hulls.forEach(function (h, c) {
+      if (h.length === 1) { drawPts(svg, h, palette[c % palette.length], shapes[c % shapes.length], sx, sy); return; }
+      if (h.length < 2) return;
+      var line = document.createElementNS(NS, "polyline");
+      line.setAttribute("points", (h.length > 2 ? h.concat([h[0]]) : h).map(function (p) { return sx(p[0]) + "," + sy(p[1]); }).join(" "));
+      line.setAttribute("stroke", palette[c % palette.length]); line.setAttribute("stroke-width", "1.3");
+      line.setAttribute("fill", "none"); svg.appendChild(line);
+    });
+    groups.forEach(function (g) {
+      drawPts(svg, g.points, g.category === state.result.classes.length ? colors.textSoft : palette[g.category % palette.length],
+        shapes[g.category % shapes.length], sx, sy, { hollow: g.ds === "verify", maxPoints: Infinity });
+    });
+    return svg;
+  }
+
+  function buildClassGallery(models) {
+    var gallery = el("div", "class-gallery");
+    if (typeof IntersectionObserver !== "undefined") {
+      var observer = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (classThumbObserver !== observer || !entry.isIntersecting || !gallery.contains(entry.target)) return;
+          var placeholder = entry.target.querySelector(".class-preview-placeholder");
+          if (placeholder) placeholder.replaceWith(buildClassThumb(entry.target.__model));
+          observer.unobserve(entry.target);
+        });
+      }, { root: gallery, rootMargin: "200px" });
+      classThumbObserver = observer;
+    }
+    models.forEach(function (model) {
+      var card = el("button", "class-card" + (model.rank === state.classRank ? " is-selected" : ""));
+      card.type = "button";
+      card.setAttribute("aria-pressed", String(model.rank === state.classRank));
+      card.setAttribute("aria-label", I18N.t("classificationModel") + " " + model.rank);
+      card.appendChild(el("span", "class-card__title", I18N.t("classificationModel") + " " + model.rank));
+      card.appendChild(el("span", "class-card__score", I18N.t("classificationOverlap") + ": " + model.dataOverlap + " · " + model.sizeOverlap));
+      if (classThumbObserver) {
+        card.__model = model; card.appendChild(el("span", "class-preview-placeholder skeleton"));
+        classThumbObserver.observe(card);
+      } else card.appendChild(buildClassThumb(model));
+      card.addEventListener("click", function () {
+        state.classRank = model.rank; renderClassification();
+        if (window.matchMedia && window.matchMedia("(max-width: 1000px)").matches) {
+          $("#view-classification .class-detail").scrollIntoView({ block: "start" });
+        }
+      });
+      gallery.appendChild(card);
+    });
+    return gallery;
+  }
+
   function renderClassification() {
     if (!isClassification()) return;
     var res = state.result, info = res.meta.sissoIn;
-    var classNames = res.classes.map(function (name, i) {
-      var generic = I18N.format("classificationCategory", { n: i + 1 });
-      return res.hasClassNames ? generic + " · " + name : generic;
-    });
+    var classNames = res.classes.map(function (_, i) { return I18N.format("classificationCategory", { n: i + 1 }); });
     var root = $("#view-classification");
+    var oldGallery = root.querySelector(".class-gallery");
+    var galleryScroll = oldGallery && Number(oldGallery.dataset.page) === state.classPage ? oldGallery.scrollTop : 0;
     if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
+    if (classThumbObserver) { classThumbObserver.disconnect(); classThumbObserver = null; }
     root.innerHTML = "";
     var ctx = $("#app-context");
     ctx.textContent = I18N.t("classificationTitle") + " · " + info.descDim + "D";
     ctx.hidden = false;
     root.appendChild(el("h1", "", I18N.t("classificationTitle"))).id = "class-title";
     root.appendChild(el("p", "class-note", I18N.t("classificationNote")));
-    root.appendChild(el("p", "class-note", I18N.t(res.hasClassNames ? "classificationLabelSource" : "classificationBlockSource")));
+    root.appendChild(el("p", "class-note", I18N.t("classificationBlockSource")));
     var kpis = el("div", "run-overview");
     [["kpiModels", res.models.length], ["kpiTrain", res.train.n], ["kpiVerify", res.verify ? res.verify.n : "—"],
       ["classificationCategories", info.classCounts.join(" + ")], ["kpiFeatures", res.meta.nFeatures]].forEach(function (item) {
@@ -1610,6 +1724,8 @@
     });
     root.appendChild(kpis);
     var controls = el("div", "class-controls");
+    controls.appendChild(classSelect(I18N.t("classificationView"), [["table", I18N.t("viewTable")], ["grid", I18N.t("viewGrid")]], state.classView,
+      function (v) { state.classView = v; renderClassification(); }));
     controls.appendChild(classSelect(I18N.t("sortBy"), [["rank", I18N.t("colRank")],
       ["dataOverlap", I18N.t("classificationOverlap")], ["sizeOverlap", I18N.t("classificationSize")]],
     state.classSort, function (v) { state.classSort = v; state.classPage = 0; renderClassification(); }));
@@ -1628,7 +1744,15 @@
     controls.appendChild(classButton("→", function () { state.classPage++; renderClassification(); }, state.classPage >= pages - 1));
     controls.lastChild.setAttribute("aria-label", I18N.t("classificationNext"));
     root.appendChild(controls);
-    var layout = el("div", "class-layout");
+    var layout = el("div", "class-layout" + (state.classView === "grid" ? " class-layout--gallery" : ""));
+    if (state.classView === "grid") {
+      var batchPane = el("div", "class-batch");
+      batchPane.appendChild(el("p", "class-note", I18N.t("classificationPreviewNote")));
+      var gallery = buildClassGallery(sorted.slice(state.classPage * 100, state.classPage * 100 + 100));
+      gallery.dataset.page = state.classPage;
+      batchPane.appendChild(gallery);
+      layout.appendChild(batchPane);
+    } else {
     var tableBox = el("div", "class-models");
     var table = el("table", "class-table");
     var head = el("thead"), hr = el("tr");
@@ -1651,75 +1775,109 @@
       body.appendChild(row);
     });
     table.appendChild(body); tableBox.appendChild(table); layout.appendChild(tableBox);
+    }
     var detail = el("section", "class-detail");
     var model = res.models.find(function (m) { return m.rank === state.classRank; }) || res.models[0];
+    var geo = classificationGeometry(model);
+    if (state.classHullMode === "official" && !model.hulls) state.classHullMode = "rebuilt";
     detail.appendChild(el("h2", "", I18N.t("classificationModel") + " " + model.rank));
     model.descriptors.forEach(function (d, i) { detail.appendChild(el("pre", "class-formula", "d" + (i + 1) + " = " + d.original)); });
     detail.appendChild(el("p", "class-note", I18N.t("classificationRankNote")));
     var datasets = [["train", I18N.t("classTrain")]];
-    if (res.verify) datasets.push(["verify", I18N.t("classVerify")]);
+    if (res.verify) { datasets.unshift(["both", I18N.t("classificationBoth")]); datasets.push(["verify", I18N.t("classVerify")]); }
     var dsControls = el("div", "class-controls");
     dsControls.appendChild(classSelect(I18N.t("classificationDataset"), datasets, state.classDataset,
       function (v) { state.classDataset = v; renderClassification(); }));
+    dsControls.appendChild(classSelect(I18N.t("classificationHullSource"), [["rebuilt", I18N.t("classificationRebuiltHull")],
+      ["official", I18N.t("classificationHull"), !model.hulls]], state.classHullMode,
+      function (v) { state.classHullMode = v; renderClassification(); }));
+    dsControls.appendChild(classButton(I18N.t("classificationRebuild"), function () {
+      geo.hulls = Classification.rebuildHulls(geo.train, res.classes.length, info.descDim);
+      state.classHullMode = "rebuilt"; renderClassification(); toast(I18N.t("classificationRebuilt"));
+    }));
     dsControls.appendChild(classButton(I18N.t("classificationExportPoints"), function () {
       downloadTextFile("sisso-classification-model-" + model.rank + "-" + state.classDataset + ".csv",
         Core.rowsToCsv(Classification.exportRows(res, model, state.classDataset)), "text/csv;charset=utf-8");
     }));
+    dsControls.appendChild(classButton(I18N.t("classificationExportHulls"), function () {
+      var rows = [["source", "class_index", "descriptor_1"]];
+      if (info.descDim === 2) rows[0].push("descriptor_2");
+      (state.classHullMode === "official" ? model.hulls : geo.hulls).forEach(function (hull, c) {
+        hull.forEach(function (coords) { rows.push([state.classHullMode, c].concat(coords)); });
+      });
+      downloadTextFile("sisso-classification-hulls-" + model.rank + "-" + state.classHullMode + ".csv", Core.rowsToCsv(rows), "text/csv;charset=utf-8");
+    }));
     detail.appendChild(dsControls);
-    var points = Classification.projectModel(res, model, state.classDataset);
+    var points = [];
+    classificationDatasets().forEach(function (ds) {
+      geo[ds].forEach(function (p) { points.push(Object.assign({ dataset: ds }, p)); });
+    });
     var finite = points.filter(function (p) { return p.finite; });
     if (finite.length !== points.length) detail.appendChild(el("p", "warning", I18N.format("classificationNonfinite", { n: points.length - finite.length })));
-    if (model.official && state.classDataset === "train") {
+    if (model.official && state.classDataset !== "verify" && state.classHullMode === "official") {
       var no = model.official.filter(function (p) { return p.classified === "NO"; }).length;
-      detail.appendChild(el("p", "class-note", "SISSO classified? YES: " + (points.length - no) + " · NO: " + no + ". " + I18N.t("classificationOfficialNote")));
+      detail.appendChild(el("p", "class-note", "SISSO classified? YES: " + (model.official.length - no) + " · NO: " + no + ". " + I18N.t("classificationOfficialNote")));
     }
-    if (model.hulls) detail.appendChild(el("p", "class-note", I18N.t("classificationHullNote")));
-    else if (info.descDim === 2) detail.appendChild(el("p", "class-note", I18N.t("classificationNoHull")));
+    detail.appendChild(el("p", "class-note", I18N.t("classificationDatasetNote")));
+    detail.appendChild(el("p", "class-note", I18N.t(state.classHullMode === "official" ? "classificationHullNote" : "classificationRebuiltNote")));
+    if (state.classHullMode === "rebuilt" && info.isconvex.includes(0)) detail.appendChild(el("p", "class-note", I18N.t("classificationEnvelopeNote")));
     var chart = el("div", "class-chart");
     chart.setAttribute("role", "img"); chart.setAttribute("aria-label", I18N.t("classificationSpace"));
     detail.appendChild(chart); layout.appendChild(detail); root.appendChild(layout);
+    if (gallery) gallery.scrollTop = galleryScroll;
     var colors = getThemeColors();
     var palette = [colors.train, colors.verify, "#649477", "#b782a7"];
     var symbols = ["circle", "triangle", "rect", "diamond"];
     var series = [];
-    classNames.concat([I18N.t("classificationUnlabeled")]).forEach(function (name, c) {
-      var group = finite.filter(function (p) { return p.classIndex === (c === res.classes.length ? null : c); });
-      if (!group.length) return;
-      series.push({ name: name + " (" + group.length + ")", type: "scatter", symbol: symbols[c % symbols.length], symbolSize: 9,
-        itemStyle: { color: palette[c % palette.length], opacity: 0.8 },
-        data: group.map(function (p) { return { value: [p.coords[0], info.descDim === 2 ? p.coords[1] : c, p.name, p.classified || ""],
-          itemStyle: p.classified === "NO" ? { borderWidth: 2, borderColor: colors.text } : {} }; }) });
+    classificationDatasets().forEach(function (ds) {
+      classNames.concat([I18N.t("classificationUnlabeled")]).forEach(function (name, c) {
+        var group = finite.filter(function (p) { return p.dataset === ds && p.classIndex === (c === res.classes.length ? null : c); });
+        if (!group.length) return;
+        var shape = symbols[c % symbols.length], color = c === res.classes.length ? colors.textSoft : palette[c % palette.length];
+        series.push({ name: name + " · " + I18N.t(ds === "train" ? "classTrain" : "classVerify") + " (" + group.length + ")", type: "scatter",
+          symbol: ds === "verify" ? "empty" + shape[0].toUpperCase() + shape.slice(1) : shape, symbolSize: ds === "verify" ? 10 : 8,
+          itemStyle: { color: color, opacity: ds === "verify" ? 1 : 0.7 },
+          data: group.map(function (p) { return { value: classXY(p, info.descDim).concat([p.name, p.classified || "", ds]),
+            itemStyle: p.classified === "NO" && state.classHullMode === "official" ? { borderWidth: 2, borderColor: colors.text } : {} }; }) });
+      });
     });
-    if (model.hulls) model.hulls.forEach(function (hull, i) {
-      series.push({ name: I18N.t("classificationHull") + " " + classNames[i], type: "line", showSymbol: false, silent: true,
+    var hulls = state.classHullMode === "official" ? model.hulls : geo.hulls;
+    hulls.forEach(function (hull, i) {
+      if (!hull.length) return;
+      var coords = hull.map(function (p) { return [p[0], info.descDim === 2 ? p[1] : i]; });
+      var labelKey = state.classHullMode === "official" ? "classificationHull" : info.isconvex[i] ? "classificationRebuiltHull" : "classificationEnvelope";
+      series.push({ name: I18N.t(labelKey) + " · " + classNames[i], type: "line", showSymbol: hull.length === 1, symbolSize: 7, silent: true,
         itemStyle: { color: palette[i % palette.length] },
-        lineStyle: { color: palette[i % palette.length], type: "dashed", width: 1 }, data: hull.concat([hull[0]]) });
+        lineStyle: { color: palette[i % palette.length], type: state.classHullMode === "official" ? "dashed" : "solid", width: 1.5 },
+        data: hull.length > 2 ? coords.concat([coords[0]]) : coords });
     });
     state.classChart = echarts.init(chart);
     state.classChart.setOption({ animation: false, textStyle: { color: colors.text },
       legend: { type: "scroll", textStyle: { color: colors.text } },
       tooltip: { trigger: "item", renderMode: "richText", formatter: function (p) {
-        return p.value[2] + "\nd1: " + p.value[0] + (info.descDim === 2 ? "\nd2: " + p.value[1] : "") +
+        return p.seriesName + "\n" + p.value[2] + "\nd1: " + p.value[0] + (info.descDim === 2 ? "\nd2: " + p.value[1] : "") +
           (p.value[3] ? "\nSISSO classified? " + p.value[3] : "");
       } },
       grid: { top: 65, left: 65, right: 30, bottom: 65 },
       dataZoom: [{ type: "inside", filterMode: "none" }, { type: "slider", height: 18, bottom: 12 }],
       xAxis: { type: "value", name: "d1", scale: true, axisLabel: { color: colors.text }, splitLine: { lineStyle: { color: colors.grid } } },
       yAxis: { type: "value", name: info.descDim === 2 ? "d2" : I18N.t("classificationCategories"), scale: true,
-        minInterval: info.descDim === 1 ? 1 : 0, axisLabel: { color: colors.text }, splitLine: { lineStyle: { color: colors.grid } } }, series: series });
+        minInterval: info.descDim === 1 ? 1 : 0, axisLabel: { color: colors.text, formatter: info.descDim === 1 ? function (v) {
+          return v === -1 ? I18N.t("classificationUnlabeled") : classNames[v] || "";
+        } : undefined }, splitLine: { lineStyle: { color: colors.grid } } }, series: series });
     var samples = el("details", "class-samples");
     samples.appendChild(el("summary", "", I18N.t("classificationSamples") + " (" + points.length + ")"));
     var sampleBox = el("div", "class-sample-scroll");
     var sampleTable = el("table", "class-table");
     var sh = el("thead"), shr = el("tr");
-    var headings = [I18N.t("classificationSample"), I18N.t("classificationCategories"), "d1"];
+    var headings = [I18N.t("classificationDataset"), I18N.t("classificationSample"), I18N.t("classificationCategories"), "d1"];
     if (info.descDim === 2) headings.push("d2");
     headings.push("SISSO classified?");
     headings.forEach(function (h) { shr.appendChild(el("th", "", h)); }); sh.appendChild(shr); sampleTable.appendChild(sh);
     var sb = el("tbody");
     points.forEach(function (p) {
       var row = el("tr");
-      [p.name, p.classIndex === null ? "—" : classNames[p.classIndex]].concat(p.coords, [p.classified || "—"]).forEach(function (v) {
+      [I18N.t(p.dataset === "train" ? "classTrain" : "classVerify"), p.name, p.classIndex === null ? "—" : classNames[p.classIndex]].concat(p.coords, [p.classified || "—"]).forEach(function (v) {
         row.appendChild(el("td", "", String(v)));
       }); sb.appendChild(row);
     });
@@ -2834,8 +2992,9 @@
 
   // Mini-SVG marker for one point. Shapes mirror the ECharts symbols used by the
   // big scatter, so a dataset keeps its identity across both views.
-  function drawPts(svg, pts, color, shape, sx, sy) {
-    var cap = 400;
+  function drawPts(svg, pts, color, shape, sx, sy, opts) {
+    opts = opts || {};
+    var cap = opts.maxPoints || 400;
     var NS = "http://www.w3.org/2000/svg";
     for (var i = 0; i < pts.length && i < cap; i++) {
       var x = sx(pts[i][0]), y = sy(pts[i][1]), r = 2.6;
@@ -2860,8 +3019,9 @@
         }
         node.setAttribute("d", d);
       }
-      node.setAttribute("fill", color);
-      node.setAttribute("opacity", "0.65");
+      node.setAttribute("fill", opts.hollow ? "none" : color);
+      if (opts.hollow) { node.setAttribute("stroke", color); node.setAttribute("stroke-width", "1.2"); }
+      node.setAttribute("opacity", opts.hollow ? "1" : "0.65");
       svg.appendChild(node);
     }
   }
@@ -5588,6 +5748,8 @@
       state.inputType = null;
       state.texts = {};
       state.result = null;
+      classGeometryCache.clear();
+      if (classThumbObserver) { classThumbObserver.disconnect(); classThumbObserver = null; }
       if (state.classChart) { state.classChart.dispose(); state.classChart = null; }
       $("#view-classification").hidden = true;
       state.projectId = null;
