@@ -1,5 +1,8 @@
 # SISSO-Analyzer
 
+Experimental branch: [fixed-size classification boundaries](docs/simple-boundaries-experiment.md)
+compares linear, parabolic and reciprocal rules using the existing Logistic solver.
+
 Interactive web analyzer for [SISSO](https://github.com/rouyang2017/SISSO) and
 [SISSO++](https://gitlab.com/sissopp_developers/sissopp) results. Pure client-side —
 nothing is uploaded; all parsing and computation runs in the browser.
