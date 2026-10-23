@@ -272,7 +272,7 @@
 
     probeDescriptors(present, trainData, nameMap, report);
     if (mt.multiTask && mt.nsamples) {
-      probeTaskAggregate(top, coeffs, present, mt, trainData, nameMap, report);
+      probeTaskAggregate(top, coeffs, present, mt, trainData, nameMap, report, F.logRegression);
       probeTaskHeterogeneity(mt, trainData, nameMap, report);
     }
     addPass(report, "models",
@@ -284,6 +284,14 @@
   // has to know about an MT-SISSO run: there is no verify.dat, and one that was
   // dropped anyway.
   function reportTaskSplit(F, mt, trainData, report) {
+    if (F.verifyTaskIndices !== undefined && F.verify) {
+      try {
+        var testData = Core.parseDataFile(F.verify, Core.makeNameMap(Core.readHeaderNames(F.train)));
+        Core.validateVerifyTasks(F.verifyTaskIndices, mt.ntask, testData.n);
+        addPass(report, "mt-tasks", "SISSO++ multi-task run: " + mt.ntask + " tasks; test samples retain their explicit task identities.");
+      } catch (err) { addErr(report, "mt-verify", err.message); }
+      return;
+    }
     addPass(report, "mt-tasks",
       "Multi-task (MT-SISSO) run: " + mt.ntask + " task(s) of " + mt.nsamples.join(" + ") +
       " = " + trainData.n + " sample(s), read from " + mt.taskSizeSource +
@@ -351,7 +359,7 @@
   //    So "MaxAE matches, RMSE does not" means the aggregation convention differs
   //    (per-task numbers still fine → Warning), whereas "MaxAE also differs"
   //    means the task blocks themselves were read wrongly (→ Error).
-  function probeTaskAggregate(top, coeffs, present, mt, trainData, nameMap, report) {
+  function probeTaskAggregate(top, coeffs, present, mt, trainData, nameMap, report, logRegression) {
     var target = nameMap[1].new_name;
     var y = trainData.cols[target];
     var featureSet = {};
@@ -385,11 +393,13 @@
         var n = mt.nsamples[t];
         var sse = 0, maxAbs = -Infinity;
         for (var r = start; r < start + n; r++) {
-          var v = blocks[t][0];
+          var v = logRegression ? Math.exp(blocks[t][0]) : blocks[t][0];
           for (var k = 0; k < ids.length; k++) {
             var fn = fnById[ids[k]];
             if (!fn) { usable = false; break; }
-            v += blocks[t][k + 1] * fn(Core.makeFeatureGetter(trainData.cols, featureSet, r));
+            var coordinate = fn(Core.makeFeatureGetter(trainData.cols, featureSet, r));
+            if (logRegression) v *= Math.pow(coordinate, blocks[t][k + 1]);
+            else v += blocks[t][k + 1] * coordinate;
           }
           if (!usable) break;
           var e = v - y[r];

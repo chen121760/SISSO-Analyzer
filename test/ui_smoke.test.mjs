@@ -19,6 +19,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { CLASS_TEXTS, ARCHIVE, archiveTexts } from "./classification.test.mjs";
+import { regressionEntries, multiTaskEntries, classificationEntries, classification2DEntries, logRegressionEntries, alternativeClassificationEntries } from "./sisso_plus_plus_fixtures.mjs";
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -160,7 +161,7 @@ function bootApp() {
     setTimeout: (fn) => { fn(); return 0; },
     clearTimeout: () => {},
     echarts: { init: chartStub },
-    Blob: class { constructor() {} },
+    Blob: class { constructor(parts) { this.parts = parts; window.__lastBlob = this; } },
     URL: { createObjectURL: () => "blob:x", revokeObjectURL: () => {} },
     File: class { constructor(parts, name) { this.name = name; this._parts = parts; } },
     FileReader: class { readAsText(file) { this.result = (file._parts || []).join(""); if (this.onload) this.onload(); } },
@@ -168,6 +169,12 @@ function bootApp() {
   };
   window.window = window;
   window.self = window;
+  window.__workers = [];
+  window.Worker = class {
+    constructor(url) { this.url = url; this.terminated = false; window.__workers.push(this); }
+    postMessage(job) { this.job = job; }
+    terminate() { this.terminated = true; }
+  };
 
   // app.js is an IIFE with no exports: inject a hook just before its closing
   // `})();` so the test can drive the internal render/export functions. The
@@ -189,8 +196,11 @@ function bootApp() {
     '  makeProjectJson: makeProjectJson, applyProject: applyProject,',
     '  refreshDynamicLabels: refreshDynamicLabels,',
     '  renderClassification: renderClassification, ingest: ingest,',
+    '  run: run,',
     '  classificationGeometry: classificationGeometry, buildClassThumb: buildClassThumb,',
     '  classGeometryCache: classGeometryCache,',
+    '  classSvm: classSvm, sortedClassModels: sortedClassModels,',
+    '  saveVerificationLabels: saveVerificationLabels,',
     '};\n',
   ].join("\n");
 
@@ -198,7 +208,7 @@ function bootApp() {
     // eslint-disable-next-line no-new-func
     const fn = new Function(
       "window", "document", "self", "localStorage", "console", "setTimeout",
-      "clearTimeout", "URL", "Blob", "File", "FileReader", "echarts",
+      "clearTimeout", "URL", "Blob", "File", "FileReader", "echarts", "Worker", "getComputedStyle",
       code + "\n//# sourceURL=" + name
     );
     const testConsole = { ...console, warn(...args) {
@@ -206,13 +216,20 @@ function bootApp() {
     } };
     fn(window, document, window, localStorage, testConsole, window.setTimeout,
       window.clearTimeout, window.URL, window.Blob, window.File,
-      window.FileReader, window.echarts);
+      window.FileReader, window.echarts, window.Worker, window.getComputedStyle);
   };
 
   // Same order as index.html.
   load(fs.readFileSync(path.join(ROOT, "js", "i18n.js"), "utf8"), "js/i18n.js");
   load(fs.readFileSync(path.join(ROOT, "js", "sisso-core.js"), "utf8"), "js/sisso-core.js");
   load(fs.readFileSync(path.join(ROOT, "js", "sisso-classification.js"), "utf8"), "js/sisso-classification.js");
+  load(fs.readFileSync(path.join(ROOT, "js", "sisso-evaluation.js"), "utf8"), "js/sisso-evaluation.js");
+  load(fs.readFileSync(path.join(ROOT, "js", "sisso-evaluation-batch.js"), "utf8"), "js/sisso-evaluation-batch.js");
+  load(fs.readFileSync(path.join(ROOT, "js", "evaluation-ui.js"), "utf8"), "js/evaluation-ui.js");
+
+  load(fs.readFileSync(path.join(ROOT, "js", "sisso-svm.js"), "utf8"), "js/sisso-svm.js");
+  load(fs.readFileSync(path.join(ROOT, "js", "sisso-svm-controller.js"), "utf8"), "js/sisso-svm-controller.js");
+  load(fs.readFileSync(path.join(ROOT, "js", "sisso-plus-plus.js"), "utf8"), "js/sisso-plus-plus.js");
   load(fs.readFileSync(path.join(ROOT, "js", "health-check.js"), "utf8"), "js/health-check.js");
   load(raw.slice(0, close) + hook + raw.slice(close), "js/app.js");
 
@@ -609,6 +626,272 @@ for (const reverse of [false, true]) {
   check(app.state.files.train.file._parts[0] === CLASS_TEXTS.train, "Folder ingest: production training data wins independent of order");
   check(!reg("#btn-run").disabled, "Folder ingest: classification needs no coefficient file");
 }
+
+attempt("Post-evaluation: navigation, project persistence and invalidation", () => {
+  window.I18N.setLocale("en");
+  app.processTexts(CLASS_TEXTS);
+  check(!reg("#btn-evaluation").disabled, "Post-evaluation: enabled for classification");
+  reg("#btn-evaluation").dispatch("click");
+  check(window.SissoEvaluationUI.isOpen(), "Post-evaluation: workspace opens");
+  check(reg("#view-classification").hidden, "Post-evaluation: original classification view suspended");
+  const all = node => [node, ...node.children.flatMap(all)];
+  const elements = all(reg("#main").lastChild);
+  const run = elements.find(n => n.tagName === "BUTTON" && n.textContent === "Evaluate");
+  const cancel = elements.find(n => n.tagName === "BUTTON" && n.textContent === "Cancel");
+  const bootstrap = elements.find(n => n.tagName === "INPUT" && n.parentNode.firstChild.textContent === "Bootstrap replicates (0–2000)");
+  bootstrap.value = "7"; // No blur/change event: Evaluate must read the actual field.
+  run.dispatch("click");
+  const first = window.__workers.at(-1);
+  check(first.job.config.bootstrap === 7, "Post-evaluation: displayed input drives the worker without relying on blur");
+  check(!first.job.result.models, "Post-evaluation: worker receives only the selected model");
+  cancel.dispatch("click");
+  check(first.terminated && !run.disabled, "Post-evaluation: cancellation terminates worker and restores controls");
+  run.dispatch("click");
+  const second = window.__workers.at(-1);
+  first.onmessage({ data: { error: "stale response" } });
+  check(!second.terminated && run.disabled, "Post-evaluation: stale worker response cannot finish a new job");
+  second.onmessage({ data: { error: "expected test failure" } });
+  check(second.terminated && !run.disabled, "Post-evaluation: failed evaluation remains retryable");
+  window.SissoEvaluationUI.close();
+  check(!reg("#view-classification").hidden, "Post-evaluation: back restores original view");
+  app.state.evaluation = { config: { method: "logistic", dataset: "verify", positiveClass: 0, threshold: 0.7, rank: 2, bootstrap: 100 }, bundle: null };
+  const project = app.makeProjectJson();
+  app.applyProject(project, true);
+  check(app.state.evaluation.config.threshold === 0.7 && app.state.evaluation.config.positiveClass === 0,
+    "Post-evaluation: decision settings survive project round trip");
+  reg("#btn-evaluation").dispatch("click");
+  reg("#btn-reset").dispatch("click");
+  check(!window.SissoEvaluationUI.isOpen() && reg("#btn-evaluation").disabled, "Post-evaluation: reset closes workspace and disables entry");
+  delete project.evaluation;
+  app.applyProject(project, true);
+  check(app.state.evaluation === null, "Post-evaluation: old project loads without new settings");
+});
+
+app.processTexts(CLASS_TEXTS);
+window.I18N.setLocale("en");
+reg("#btn-evaluation").dispatch("click");
+const batchNodes = node => [node, ...node.children.flatMap(batchNodes)];
+const workspace = () => reg("#main").lastChild;
+const batchControl = text => batchNodes(workspace()).find(n => n.tagName === "BUTTON" && n.textContent === text);
+const batchButton = batchControl("Evaluate all candidates (2)");
+batchButton.dispatch("click");
+const batchWorker = window.__workers.at(-1);
+check(batchWorker.job.batch === true && batchWorker.job.result.models.length === 2, "Batch UI: dispatches every candidate to worker");
+batchWorker.onmessage({ data: { stage: "batch", progress: { completed: 2, total: 4 } } });
+check(batchButton.disabled && !batchControl("Cancel").hidden, "Batch UI: progress keeps cancellation available");
+const batchReport = await window.SissoEvaluationBatch.evaluateAll(batchWorker.job.result, batchWorker.job.config);
+attempt("Batch UI: result rendering, sorting and single-model inspection", () => {
+  batchWorker.onmessage({ data: { report: batchReport } });
+  check(batchWorker.terminated && !batchButton.disabled, "Batch UI: completes and restores controls");
+  const rankBy = batchNodes(workspace()).find(n => n.tagName === "SELECT" && n.parentNode.firstChild.textContent === "Rank by");
+  rankBy.value = "auc"; rankBy.dispatch("change");
+  check(app.state.evaluation.config.batchRanking.metric === "auc", "Batch UI: rank criterion persists without recomputing");
+  batchControl("Export ranking CSV").dispatch("click");
+  check(window.__lastBlob.parts[0].includes("evaluation_auc") && window.__lastBlob.parts[0].split("\r\n").length === 5,
+    "Batch UI: CSV export writes all summaries with ranking metrics");
+  const inspect = batchControl("Inspect"); inspect.dispatch("click");
+  const detailWorker = window.__workers.at(-1);
+  check(!detailWorker.job.batch && detailWorker.job.model.rank >= 1, "Batch UI: opens selected candidate through single-model path");
+  const detail = window.SissoEvaluation.evaluate(detailWorker.job.result, detailWorker.job.model, detailWorker.job.config);
+  detailWorker.onmessage({ data: { report: detail } });
+  check(!batchControl("Back to candidate ranking").hidden, "Batch UI: preserves completed screening behind detail");
+  const workerCount = window.__workers.length;
+  batchControl("Back to candidate ranking").dispatch("click");
+  check(window.__workers.length === workerCount && batchControl("Inspect"), "Batch UI: restores ranking without refitting all models");
+  batchButton.dispatch("click");
+  const cancelWorker = window.__workers.at(-1); batchControl("Cancel").dispatch("click");
+  check(cancelWorker.terminated && !batchButton.disabled, "Batch UI: cancellation terminates batch job");
+});
+window.SissoEvaluationUI.close();
+
+
+attempt("RBF-SVM: opt-in UI, scores, sorting, cancellation and run/label invalidation", () => {
+  const { app: svmApp, window: svmWindow, reg: svmReg } = bootApp();
+  const root = () => svmReg("#view-classification");
+  const all = (n) => [n, ...n.children.flatMap(all)];
+  const find = (fn) => all(root()).find(fn);
+  const workers = [];
+  svmWindow.Worker = class {
+    constructor() { this.sent = []; workers.push(this); }
+    postMessage(m) { this.sent.push(m); }
+    terminate() { this.stopped = true; }
+    emit(m) { this.onmessage({ data: { ...m, id: svmApp.classSvm.id } }); }
+  };
+  svmApp.processTexts(CLASS_TEXTS);
+  let toggle = find((n) => n.id === "svm-enable");
+  check(toggle && !toggle.checked && workers.length === 0, "SVM: disabled by default with no background worker");
+  toggle.checked = true; toggle.dispatch("change");
+  check(svmApp.classSvm.enabled && workers.length === 1 && workers[0].sent[0].type === "start", "SVM: enabling starts all-model training");
+  const score = (rank, train, verify) => ({ rank, status: "ready", fit: { serialized: "test-model", cost: 1, gamma: .5 },
+    train: { n: 6, correct: train * 6, accuracy: train, balancedAccuracy: train, macroF1: train },
+    verify: { n: 1, correct: verify, accuracy: verify, balancedAccuracy: verify, macroF1: verify } });
+  workers[0].emit({ type: "model", completed: 1, summary: score(1, 1, 0) });
+  check(workers[0].sent.some((m) => m.type === "boundary"), "SVM: requests selected-model boundary in original plot coordinates");
+  find((n) => n.tagName === "BUTTON" && n.textContent === svmWindow.I18N.t("svmStop")).click();
+  check(workers[0].stopped && svmApp.classSvm.results.size === 1 && svmApp.classSvm.status === "cancelled", "SVM: stop terminates worker immediately and keeps completed scores");
+  svmApp.classSvm.start(svmApp.state.texts, 2, {});
+  const batchWorker = workers.at(-1);
+  batchWorker.emit({ type: "model", completed: 1, summary: score(1, 1, 0) });
+  batchWorker.emit({ type: "model", completed: 2, summary: score(2, .5, 1) });
+  batchWorker.emit({ type: "done" });
+  check(all(root()).some((n) => n.textContent.includes("100.00%")), "SVM: trained scores are displayed on model cards/detail");
+  svmApp.state.classSort = "svm-verify-accuracy"; svmApp.renderClassification();
+  check(svmApp.sortedClassModels()[0].rank === 2, "SVM: validation-score ordering is descending and independent of official rank");
+  svmApp.state.classView = "table"; svmApp.renderClassification();
+  check(all(root()).filter((n) => n.tagName === "TH" && n.textContent.includes(svmWindow.I18N.t("svmAccuracy"))).length >= 2, "SVM: table shows separate training/verification metric columns");
+  let complexity = find((n) => n.id === "svm-complexity");
+  const beforeDraft = workers.length;
+  complexity.value = "5"; complexity.dispatch("change");
+  check(workers.length === beforeDraft && svmApp.classSvm.config.complexity === 3 && svmApp.classSvm.results.size === 2,
+    "SVM: changing boundary complexity stages a draft without refitting or altering current scores");
+  svmApp.renderClassification();
+  check(find((n) => n.id === "svm-complexity").value === "5", "SVM: draft complexity survives selecting/rebuilding a view");
+  find((n) => n.tagName === "BUTTON" && n.textContent === svmWindow.I18N.t("svmRetrain")).click();
+  const complexityWorker = workers.at(-1);
+  check(complexityWorker.sent[0].options.complexity === 5 && svmApp.classSvm.results.size === 0 && svmApp.classSvm.boundaries.size === 0,
+    "SVM: Retrain applies complexity and invalidates old scores and boundary caches");
+  complexityWorker.emit({ type: "model", completed: 1, summary: score(1, 1, 0) });
+  complexityWorker.emit({ type: "model", completed: 2, summary: score(2, .5, 1) });
+  complexityWorker.emit({ type: "done" });
+  const workerCount = workers.length;
+  svmApp.saveVerificationLabels([0]);
+  const labelWorker = workers.at(-1);
+  check(complexityWorker.stopped && workers.length === workerCount + 1 && svmApp.classSvm.results.size === 0, "SVM: changing validation labels discards stale scores and retrains while enabled");
+  check(JSON.parse(labelWorker.sent[0].texts.verifylabels).rows[0].class === 0, "SVM: fresh labels reach the worker");
+  toggle = find((n) => n.id === "svm-enable"); toggle.checked = false; toggle.dispatch("change");
+  check(labelWorker.stopped && !svmApp.classSvm.enabled && svmApp.state.classSort === "rank", "SVM: disabling clears results and restores official sorting");
+  const oneD = { ...CLASS_TEXTS, classdesc: undefined, classhull: undefined,
+    sissoin: CLASS_TEXTS.sissoin.replace("desc_dim=2", "desc_dim=1"),
+    top: "rank #data_overlap size_overlap feature_ID\n1 0 -1 (1)\n" };
+  svmApp.processTexts(oneD);
+  check(find((n) => n.id === "svm-enable").disabled, "SVM: one-descriptor classification is explicitly unsupported");
+  svmApp.processTexts(CLASS_TEXTS);
+  svmApp.classSvm.start(svmApp.state.texts, 2, {});
+  svmReg("#btn-reset").dispatch("click");
+  check(workers.at(-1).stopped && !svmApp.classSvm.enabled && svmApp.classSvm.results.size === 0, "SVM: resetting a run terminates fitting and clears derived results");
+});
+
+attempt("Integration: SVM and post-evaluation workers coexist and invalidate on reload", () => {
+  const { app: combined, window: combinedWindow, reg: combinedReg } = bootApp();
+  combinedWindow.I18N.setLocale("en");
+  combined.processTexts(CLASS_TEXTS);
+  const originalScores = combined.state.result.models.map(m => [m.rank, m.dataOverlap, m.sizeOverlap]);
+  combined.classSvm.start(combined.state.texts, combined.state.result.models.length, {});
+  const svmWorker = combinedWindow.__workers.at(-1);
+  const all = n => [n, ...n.children.flatMap(all)];
+  const control = text => all(combinedReg("#main").lastChild).find(n => n.tagName === "BUTTON" && n.textContent === text);
+  combinedReg("#btn-evaluation").dispatch("click");
+  control("Evaluate all candidates (2)").dispatch("click");
+  const firstEvaluation = combinedWindow.__workers.at(-1);
+  check(svmWorker !== firstEvaluation && svmWorker.url === "js/sisso-svm-worker.js" && firstEvaluation.url.startsWith("js/evaluation-worker.js"),
+    "Integration: SVM training and candidate evaluation use separate workers");
+  control("Cancel").dispatch("click");
+  check(firstEvaluation.terminated && !svmWorker.terminated && combined.classSvm.enabled,
+    "Integration: cancelling post-evaluation preserves active SVM training");
+  control("Evaluate all candidates (2)").dispatch("click");
+  const secondEvaluation = combinedWindow.__workers.at(-1);
+  const savedEvaluation = { config: { method: "logistic", dataset: "verify", threshold: 0.7 }, bundle: null };
+  combined.processTexts(CLASS_TEXTS, { evaluation: savedEvaluation });
+  check(svmWorker.terminated && secondEvaluation.terminated && !combinedWindow.SissoEvaluationUI.isOpen(),
+    "Integration: reloading a run cancels both workers and closes post-evaluation");
+  svmWorker.onmessage({ data: { id: svmWorker.job.id, type: "model", completed: 1, summary: { rank: 99, status: "ready" } } });
+  secondEvaluation.onmessage({ data: { error: "stale evaluation response" } });
+  check(!combined.classSvm.enabled && combined.classSvm.results.size === 0 && !combinedWindow.SissoEvaluationUI.isOpen(),
+    "Integration: stale responses cannot restore results from the previous run");
+  check(JSON.stringify(combined.state.result.models.map(m => [m.rank, m.dataOverlap, m.sizeOverlap])) === JSON.stringify(originalScores),
+    "Integration: auxiliary jobs leave official SISSO rankings and scores intact");
+  check(combined.makeProjectJson().evaluation.config.threshold === 0.7,
+    "Integration: the shared reload retains saved post-evaluation settings");
+});
+{
+  const { app: nativeApp, window: nativeWindow } = bootApp();
+  const entries = [
+    ["native/train.dat", CLASS_TEXTS.train],
+    ["native/SISSO.in", CLASS_TEXTS.sissoin],
+    ["native/Models/top0002_D002", CLASS_TEXTS.top],
+    ["native/Uspace.expressions", CLASS_TEXTS.uspace],
+    ["native/notes/sisso.json", "{}"],
+    ["native/notes/data.csv", "id,prop,x\na,1,2\n"],
+  ];
+  await nativeApp.ingest(entries.map(([name, text]) => {
+    const file = new nativeWindow.File([text], path.basename(name)); file.webkitRelativePath = name; return file;
+  }));
+  check(nativeApp.state.cppFiles === null && !!nativeApp.state.files.train,
+    "Engine isolation: a native SISSO run wins over incidental nested SISSO++ files");
+  await nativeApp.run();
+  check(nativeApp.state.result && nativeApp.state.result.taskType === "classification" && !nativeApp.state.result.meta.sourceEngine,
+    "Engine isolation: incidental SISSO++ metadata cannot reroute a native analysis");
+}
+
+for (const [label, entries, dim] of [
+  ["regression", regressionEntries(), 1], ["multi-task", multiTaskEntries(), 1],
+  ["classification", classificationEntries(), 1], ["classification 2D", classification2DEntries(), 2],
+  ["classification 2D IDs", classification2DEntries().map(e => ({ ...e, text: e.text.replace("\nV,", e.path.endsWith(".csv") ? '\n"test, V α",' : "\ntest, V α,") })), 2],
+  ["log regression", logRegressionEntries(), 1], ["multi-task log regression", logRegressionEntries(true), 1],
+  ["alternative classification loss", alternativeClassificationEntries(), 2],
+]) {
+  reg("#btn-reset").dispatch("click");
+  await app.ingest(entries.map(e => {
+    const file = new window.File([e.text], path.basename(e.path)); file.webkitRelativePath = e.path; return file;
+  }));
+  check(!reg("#btn-run").disabled, "SISSO++ " + label + ": folder import enables Analyze");
+  check(!reg("#sissopp-options").hidden, "SISSO++ " + label + ": dimension selector shown");
+  reg("#sissopp-dimension").value = String(dim); reg("#sissopp-dimension").dispatch("change");
+  await app.run();
+  check(app.state.result && app.state.result.meta.sourceEngine === "SISSO++", "SISSO++ " + label + ": real run/render succeeds");
+  check(app.state.result && app.state.result.verify !== null, "SISSO++ " + label + ": test split preserved");
+  if (label.includes("log regression")) {
+    attempt("SISSO++ " + label + ": native loss detail cards", () => app.openDetail(1));
+    check(reg("#metric-grid").children.some(c => c.children[0] && c.children[0].textContent.includes("LOG_RMSE")), "SISSO++ " + label + ": native log loss is visible separately");
+    check(app.batchModelText(app.state.result.models[0]).includes("SISSO++_native_loss_train"), "SISSO++ " + label + ": copied metrics retain native loss");
+    app.closeDetail();
+  }
+  const saved = app.makeProjectJson();
+  check(saved && !!saved.files.sissopp, "SISSO++ " + label + ": project retains import metadata");
+  const before = app.state.result && app.state.result.verify.names.join("|");
+  attempt("SISSO++ " + label + ": saved project restores", () => app.applyProject(JSON.parse(JSON.stringify(saved)), true));
+  check(app.state.result.verify.names.join("|") === before, "SISSO++ " + label + ": original sample IDs survive restore");
+  if (app.state.result.taskType === "classification" && dim === 2) {
+    if (label === "classification 2D IDs") {
+      app.saveVerificationLabels([0]);
+      const relabeled = app.makeProjectJson();
+      app.state.result = null;
+      app.applyProject(JSON.parse(JSON.stringify(relabeled)), true);
+      check(app.state.result && app.state.result.verify.names[0] === "test, V α" && app.state.result.verify.labels[0] === 0,
+        "SISSO++: edited verification labels survive saved-project reload for nontrivial IDs");
+    }
+    app.classSvm.start(app.state.texts, app.state.result.models.length, {});
+    const worker = window.__workers.at(-1), rank = app.state.result.models[0].rank;
+    worker.onmessage({ data: { id: app.classSvm.id, type: "model", completed: 1, summary: {
+      rank, status: "ready", fit: { serialized: "fixture", cost: 1, gamma: .5, complexity: 3 },
+      train: { n: 6, correct: 6, accuracy: 1, balancedAccuracy: 1, macroF1: 1 },
+      verify: { n: 1, correct: 1, accuracy: 1, balancedAccuracy: 1, macroF1: 1 },
+    } } });
+    const all = n => [n, ...n.children.flatMap(all)];
+    all(reg("#view-classification")).find(n => n.tagName === "BUTTON" && n.textContent === window.I18N.t("classificationExportRankShort")).click();
+    const rows = window.__lastBlob.parts[0].trim().split(/\r?\n/).map(row => row.split(","));
+    check(rows[0].includes("svm_status") && rows[1].length === rows[0].length,
+      "SISSO++ " + label + ": ranking CSV retains aligned auxiliary SVM columns");
+    check(rows[1][rows[0].indexOf("official_size_overlap")] === "",
+      "SISSO++ " + label + ": missing native overlap size stays empty in CSV");
+    if (label === "alternative classification loss") check(rows[0].includes("native_loss") && rows[1].includes("0.25"),
+      "SISSO++: native loss and auxiliary SVM metrics coexist in ranking CSV");
+  }
+  window.I18N.setLocale("en");
+  reg("#btn-evaluation").dispatch("click");
+  const nodes = n => [n, ...n.children.flatMap(nodes)];
+  nodes(reg("#main").lastChild).find(n => n.tagName === "BUTTON" && n.textContent.startsWith("Evaluate all candidates (")).click();
+  const evaluationWorker = window.__workers.at(-1);
+  const report = await window.SissoEvaluationBatch.evaluateAll(evaluationWorker.job.result, evaluationWorker.job.config);
+  evaluationWorker.onmessage({ data: { report } });
+  check(report.rows.every(row => row.status === "ok") && evaluationWorker.terminated,
+    "SISSO++ " + label + ": batch workspace evaluates and renders imported results");
+  window.SissoEvaluationUI.close();
+}
+reg("#btn-reset").dispatch("click");
+check(app.state.cppFiles === null && reg("#sissopp-options").hidden, "SISSO++: reset clears raw files and dimension selector");
+attempt("SISSO++ → SISSO: built-in demo still renders", () => app.processTexts(require("../js/demo-data.js").DEMO_DATA));
+check(!app.state.result.meta.sourceEngine, "SISSO++ → SISSO: import metadata does not leak");
 
 console.log(`\n${failures === 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED"}`);
 process.exit(failures === 0 ? 0 : 1);

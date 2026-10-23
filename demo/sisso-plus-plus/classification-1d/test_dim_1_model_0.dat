@@ -1,0 +1,14 @@
+# SYNTHETIC DEMONSTRATION — not an actual SISSO++ run
+# [x]
+# Property Label: $prop$; Unit of the Property: eV
+# # Samples in Convex Hull Overlap Region: 2;# Samples SVM Misclassified: 0
+# Decision Boundaries
+# Task a0 c0
+# all__0.0_1.0, 1, -2.5,
+# Feature Rung, Units, and Expressions
+# 0; 0; AA; 0; x; $x$; x; x; x
+# Number of Samples Per Task
+# Task, n_samples
+# all, 1
+# Sample ID, Property Value, Property Value (EST), Feature 0 Value
+V,1,1,2.8

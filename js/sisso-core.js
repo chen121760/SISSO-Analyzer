@@ -36,6 +36,8 @@
     sqrt: Math.sqrt,
     abs: Math.abs,
     cbrt: Math.cbrt,
+    sin: Math.sin,
+    cos: Math.cos,
   };
 
   function letterSeries(n) {
@@ -370,10 +372,14 @@
     var re = /(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z][A-Za-z0-9]*|[()+\-*/^]/g;
     var toks = [];
     var m;
+    var end = 0;
     while ((m = re.exec(src))) {
+      if (src.slice(end, m.index).trim()) throw new Error("unsupported character in formula");
       if (/^\s+$/.test(m[0])) continue;
       toks.push(m[0]);
+      end = re.lastIndex;
     }
+    if (src.slice(end).trim()) throw new Error("unsupported character in formula");
     return toks;
   }
 
@@ -2024,6 +2030,14 @@
 
   // files: { trainText, verifyText?, topText, coeffText, uspaceText,
   //          sissoInText?, sissoOutText? }
+  function validateVerifyTasks(indices, ntask, n) {
+    if (indices === undefined || indices === null) return false;
+    if (!Array.isArray(indices) || indices.length !== n || indices.some(function (t) {
+      return !Number.isInteger(t) || t < 0 || t >= ntask;
+    })) throw new Error("Invalid verification task mapping: one known task is required per sample.");
+    return true;
+  }
+
   function runPipeline(files) {
     var headerNames = readHeaderNames(files.trainText);
     var nameMap = makeNameMap(headerNames);
@@ -2062,7 +2076,8 @@
     // emitting permanently empty verify / Δ columns, drop the file and record
     // that we did (the health check reports it as a warning).
     var verifyIgnored = false;
-    if (mt.multiTask && verify) {
+    var mappedVerify = verify && validateVerifyTasks(files.verifyTaskIndices, mt.ntask, verify.n);
+    if (mt.multiTask && verify && !mappedVerify) {
       verify = null;
       yVerify = null;
       verifyIgnored = true;
@@ -2108,11 +2123,11 @@
         var tc = perTask[ti];
         var tNew = [], tOrig = [];
         for (var q = 0; q < ids.length; q++) {
-          tNew.push("(" + tc[q + 1] + ")*(" + termBodies[q].renamed + ")");
-          tOrig.push("(" + tc[q + 1] + ")*(" + termBodies[q].original + ")");
+          tNew.push(files.logRegression ? "(" + termBodies[q].renamed + ")^(" + tc[q + 1] + ")" : "(" + tc[q + 1] + ")*(" + termBodies[q].renamed + ")");
+          tOrig.push(files.logRegression ? "(" + termBodies[q].original + ")^(" + tc[q + 1] + ")" : "(" + tc[q + 1] + ")*(" + termBodies[q].original + ")");
         }
-        formulasNew.push("(" + tc[0] + ") + " + tNew.join(" + "));
-        formulasOrig.push("(" + tc[0] + ") + " + tOrig.join(" + "));
+        formulasNew.push(files.logRegression ? "exp(" + tc[0] + ") * " + tNew.join(" * ") : "(" + tc[0] + ") + " + tNew.join(" + "));
+        formulasOrig.push(files.logRegression ? "exp(" + tc[0] + ") * " + tOrig.join(" * ") : "(" + tc[0] + ") + " + tOrig.join(" + "));
       }
 
       models.push({
@@ -2192,6 +2207,15 @@
         model.metricsTrain = model.metrics.train;
         model.metricsVerify = null;
         model.predVerify = null;
+        if (verify && mappedVerify) {
+          var testFunctions = model.formulasByTask.map(compileFormula);
+          var testPredictions = new Float64Array(verify.n);
+          for (var vi = 0; vi < verify.n; vi++) {
+            testPredictions[vi] = testFunctions[files.verifyTaskIndices[vi]](makeFeatureGetter(verify.cols, featureSet, vi));
+          }
+          model.pred.verify = model.predVerify = testPredictions;
+          model.metrics.verify = model.metricsVerify = computeMetrics(yVerify, testPredictions);
+        }
         // SISSO's own overall score (task-balanced / sample-weighted aggregate).
         var agg = aggregateTaskMetrics(
           mt.tasks.map(function (tk) { return model.metrics[tk.key]; }),
@@ -2281,6 +2305,7 @@
     aggregateTaskMetrics: aggregateTaskMetrics,
     detectMultiTask: detectMultiTask,
     resolveLayout: resolveLayout,
+    validateVerifyTasks: validateVerifyTasks,
     compileFormula: compileFormula,
     formulaAst: formulaAst,
     formulaToPlain: formulaToPlain,

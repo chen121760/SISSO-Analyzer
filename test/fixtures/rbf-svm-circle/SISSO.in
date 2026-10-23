@@ -1,0 +1,6 @@
+ptype=2
+ntask=1
+nsample=(8,12)
+nsf=2
+desc_dim=2
+isconvex=(1,1)
