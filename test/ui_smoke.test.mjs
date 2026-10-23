@@ -147,7 +147,8 @@ function bootApp() {
   const chartStub = () => {
     const chart = {
       option: null,
-      setOption(o) { this.option = o; },
+      calls: [],
+      setOption(o) { this.option = o; this.calls.push(o); },
       on() {}, off() {}, dispose() {}, resize() {},
       convertToPixel: () => [0, 0],
     };
@@ -205,6 +206,7 @@ function bootApp() {
     '  classificationGeometry: classificationGeometry, buildClassThumb: buildClassThumb,',
     '  classGeometryCache: classGeometryCache,',
     '  classSvm: classSvm, sortedClassModels: sortedClassModels,',
+    '  classSimple: classSimple,',
     '  paretoComputed: paretoComputed, paretoSplit: paretoSplit, applyModelState: applyModelState,',
     '  saveVerificationLabels: saveVerificationLabels,',
     '};\n',
@@ -234,6 +236,7 @@ function bootApp() {
   load(fs.readFileSync(path.join(ROOT, "js", "evaluation-ui.js"), "utf8"), "js/evaluation-ui.js");
 
   load(fs.readFileSync(path.join(ROOT, "js", "sisso-svm.js"), "utf8"), "js/sisso-svm.js");
+  load(fs.readFileSync(path.join(ROOT, "js", "sisso-simple-boundaries.js"), "utf8"), "js/sisso-simple-boundaries.js");
   load(fs.readFileSync(path.join(ROOT, "js", "sisso-svm-controller.js"), "utf8"), "js/sisso-svm-controller.js");
   load(fs.readFileSync(path.join(ROOT, "js", "sisso-plus-plus.js"), "utf8"), "js/sisso-plus-plus.js");
   load(fs.readFileSync(path.join(ROOT, "js", "health-check.js"), "utf8"), "js/health-check.js");
@@ -873,6 +876,70 @@ attempt("SVM Pareto: train-only axes, partial fits and invalidation", () => {
   a.classSvm.disable();
   check(a.state.view === "classification" && r("#view-results").hidden && r("#view-pareto-btn").disabled,
     "SVM Pareto: disabling returns to classification and removes stale access");
+});
+
+attempt("Simple boundaries: parallel training, formula, sorting, Pareto and lifecycle", () => {
+  const { app: a, reg: r, window: w } = bootApp();
+  a.processTexts(CLASS_TEXTS);
+  const all = n => [n, ...n.children.flatMap(all)];
+  const root = () => r("#view-classification");
+  const find = fn => all(root()).find(fn);
+  let toggle = find(n => n.id === "simple-enable");
+  check(toggle && !toggle.checked && w.__workers.length === 0, "Simple: manual opt-in with no worker until enabled");
+  toggle.checked = true; toggle.dispatch("change");
+  let worker = w.__workers.at(-1);
+  check(worker.url.endsWith("?engine=simple") && !a.classSvm.enabled, "Simple: uses its own worker without starting SVM");
+  function emitAll(current) {
+    a.state.result.models.forEach((model, i) => {
+      const summary = w.SissoSimpleBoundaries.trainModel(a.state.result, model, a.classSimple.config);
+      current.onmessage({ data: { type: "model", id: a.classSimple.id, completed: i + 1, summary } });
+    });
+    current.onmessage({ data: { type: "done", id: a.classSimple.id } });
+  }
+  emitAll(worker);
+  const formula = find(n => n.className.includes("simple-formula"));
+  check(formula.open && all(formula).some(n => n.tagName === "PRE" && n.textContent.includes("g =")), "Simple: compact formula is expanded by default");
+  a.state.classSort = "simple-train-accuracy"; a.renderClassification();
+  const scores = a.sortedClassModels().map(m => a.classSimple.results.get(m.rank).train.accuracy);
+  check(scores[0] >= scores[1], "Simple: candidate sorting reads its own classifier scores");
+  a.classSvm.start(a.state.texts, 2, {});
+  const svmWorker = w.__workers.at(-1);
+  svmWorker.onmessage({ data: { id: a.classSvm.id, type: "model", completed: 1, summary: {
+    rank: 1, status: "ready", fit: SVM_FIT,
+    train: { accuracy: .8, balancedAccuracy: .8, macroF1: .8, correct: 4, n: 6 },
+    verify: { accuracy: 1, balancedAccuracy: 1, macroF1: 1, correct: 1, n: 1 },
+  } } });
+  check(a.classSimple.results.size === 2 && a.classSvm.results.size === 1, "Simple: SVM starts independently and preserves simple fits");
+  check(w.__lastChart.calls.some(o => o.series && o.series.some(s => s.id === "simple-boundary") && o.series.some(s => s.id === "svm-boundary")),
+    "Simple: both boundary series share the descriptor plot");
+  find(n => n.tagName === "BUTTON" && n.textContent === w.I18N.t("classificationExportRankShort")).click();
+  check(w.__lastBlob.parts[0].includes("simple_formula") && w.__lastBlob.parts[0].includes("svm_gamma"), "Simple: ranking export includes both classifiers and the compact formula");
+  r("#view-pareto-btn").click();
+  a.state.paretoX = { dataset: "train", metric: "simple-accuracy" };
+  a.state.paretoY = { dataset: "verify", metric: "svm-accuracy" };
+  a.renderPareto();
+  check(a.paretoComputed().pts.length === 1 && a.paretoComputed().pts[0].y === 1, "Simple: Pareto supports cross-classifier score comparisons");
+  a.classSvm.disable();
+  check(a.state.view === "pareto" && a.paretoComputed().defs.every(d => d.metric.startsWith("simple-")),
+    "Simple: turning SVM off keeps simple Pareto active and replaces unavailable axes");
+  a.exportParetoCsv();
+  check(w.__lastBlob.parts[0].includes("simple_family,simple_lambda"), "Simple: Pareto export identifies the template and regularization");
+  r("#view-classification-btn").click();
+  const family = find(n => n.id === "simple-family"); family.value = "quadratic"; family.dispatch("change");
+  check(a.classSimple.config.family === "linear" && a.classSimple.results.size === 2, "Simple: changing templates stages a draft and preserves displayed fits");
+  const panel = find(n => n.tagName === "SECTION" && n.getAttribute("aria-label") === w.I18N.t("simpleTitle"));
+  all(panel).find(n => n.tagName === "BUTTON" && n.textContent === w.I18N.t("svmRetrain")).click();
+  worker = w.__workers.at(-1);
+  check(a.classSimple.config.family === "quadratic" && a.classSimple.results.size === 0, "Simple: retraining applies the template and clears previous scores");
+  emitAll(worker);
+  a.classSvm.start(a.state.texts, 2, {});
+  const oldSvm = w.__workers.at(-1), oldSimple = worker;
+  a.saveVerificationLabels([0]);
+  check(oldSvm.terminated && oldSimple.terminated && a.classSimple.results.size === 0 && a.classSvm.results.size === 0,
+    "Simple: changed labels invalidate both classifiers and terminate stale workers");
+  const lastWorkers = w.__workers.slice(-2);
+  r("#btn-reset").click();
+  check(lastWorkers.every(worker => worker.terminated) && !a.classSimple.enabled && !a.classSvm.enabled, "Simple: run reset cancels both classifiers");
 });
 
 attempt("Integration: SVM and post-evaluation workers coexist and invalidate on reload", () => {

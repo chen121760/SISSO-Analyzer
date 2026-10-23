@@ -14,6 +14,7 @@
   var HealthCheck = window.HealthCheck;
   var Classification = window.SissoClassification;
   var SVMEngine = window.SissoSVM;
+  var SimpleEngine = window.SissoSimpleBoundaries;
   var PlusPlus = window.SissoPlusPlus;
 
   // ---------------------------------------------------------------------------
@@ -96,7 +97,7 @@
       if (kind === "start" || kind === "disabled") classSvmDraft = null;
       setNavState(true);
       if (state.view === "pareto") {
-        if (!classSvm.enabled) { showClassification(); return; }
+        if (!classifiersEnabled()) { showClassification(); return; }
         if (kind !== "model" || Date.now() - classSvmProgressTime >= 400) {
           classSvmProgressTime = Date.now();
           renderControls(); renderPareto();
@@ -110,6 +111,31 @@
     },
     boundary: function (key) { if (key === classSvmBoundaryKey) drawClassSvmBoundary(); },
   });
+  var classSimpleDraft = null, classSimpleBoundaryKey = null, classSimpleProgressTime = 0;
+  var classSimple = window.SissoSVMController.create({
+    engine: SimpleEngine, workerURL: "js/sisso-svm-worker.js?engine=simple",
+    change: function (kind, summary) {
+      if (!isClassification()) return;
+      if (kind === "start" || kind === "disabled") classSimpleDraft = null;
+      setNavState(true);
+      if (state.view === "pareto") {
+        if (!classifiersEnabled()) { showClassification(); return; }
+        if (kind !== "model" || Date.now() - classSimpleProgressTime >= 400) {
+          classSimpleProgressTime = Date.now(); renderControls(); renderPareto();
+        }
+      } else if (kind === "model") {
+        updateClassSvmScores(summary, true);
+        if (Date.now() - classSimpleProgressTime >= 400) updateClassSimpleProgress();
+      } else renderClassification();
+    },
+    boundary: function (key) { if (key === classSimpleBoundaryKey) drawClassSvmBoundary(true); },
+  });
+  function classifiersEnabled() { return classSvm.enabled || classSimple.enabled; }
+  function simpleTitle() { return I18N.t("simpleTitle") + " · " + I18N.t("simple_" + classSimple.config.family); }
+  function classificationMetric(model, key) {
+    var simple = key.indexOf("simple-") === 0;
+    return SVMEngine.metric((simple ? classSimple : classSvm).results.get(model.rank), simple ? key.replace(/^simple-/, "svm-") : key);
+  }
   var errorHistCache = null; // last histogram layout (for bar-width refit on resize)
 
   // ---------------------------------------------------------------------------
@@ -294,7 +320,11 @@
     { key: "svm-balancedAccuracy", label: "svmBalancedAccuracy", minimize: false },
     { key: "svm-macroF1", label: "svmMacroF1", minimize: false },
   ];
-  function paretoMetrics() { return isClassification() ? SVM_PARETO_METRICS : PARETO_METRICS; }
+  function paretoMetrics() {
+    if (!isClassification()) return PARETO_METRICS;
+    var simple = classSimple.enabled ? SVM_PARETO_METRICS.map(function (d) { return { key: d.key.replace("svm-", "simple-"), label: d.label, minimize: false }; }) : [];
+    return classSvm.enabled || !classSimple.enabled ? SVM_PARETO_METRICS.concat(simple) : simple;
+  }
   function paretoMetricDef(key) {
     var metrics = paretoMetrics();
     for (var i = 0; i < metrics.length; i++) {
@@ -1562,6 +1592,7 @@
     if (window.SissoEvaluationUI) window.SissoEvaluationUI.close();
     state.evaluation = init && init.evaluation || null;
     classSvm.reset(); classSvmBoundaryKey = null; classSvmDraft = null;
+    classSimple.reset(); classSimpleBoundaryKey = null; classSimpleDraft = null;
     if (Classification && Classification.isClassification(roleTexts)) {
       var classified = Classification.runPipeline(roleTexts);
       if (PlusPlus) PlusPlus.decorate(classified, roleTexts.sissopp);
@@ -1769,6 +1800,7 @@
     classGeometryCache.clear();
     state.classDataset = Classification.hasVerificationLabels(state.result) ? "both" : "train";
     if (classSvm.enabled) classSvm.start(state.texts, state.result.models.length, classSvm.config);
+    if (classSimple.enabled) classSimple.start(state.texts, state.result.models.length, classSimple.config);
     renderClassification(); persistSession();
     document.getElementById("verification-label-open").focus();
     storeProjectLocally().then(function (saved) {
@@ -1943,11 +1975,11 @@
 
   function svmPercent(value) { return Number.isFinite(value) ? (value * 100).toFixed(2) + "%" : "—"; }
 
-  function classSvmScoreText(summary) {
-    if (!summary) return I18N.t("svmPending");
-    if (summary.status === "failed") return I18N.t("svmFailed");
-    return I18N.t("svmTrainShort") + " " + svmPercent(summary.train.accuracy) +
-      (summary.verify ? " · " + I18N.t("svmVerifyShort") + " " + svmPercent(summary.verify.accuracy) : "");
+  function classSvmScoreText(summary, simple) {
+    if (!summary) return I18N.t(simple ? "simplePending" : "svmPending");
+    if (summary.status === "failed") return I18N.t(simple ? "simpleFailed" : "svmFailed");
+    return I18N.t(simple ? "simpleTrainShort" : "svmTrainShort") + " " + svmPercent(summary.train.accuracy) +
+      (summary.verify ? " · " + I18N.t(simple ? "simpleVerifyShort" : "svmVerifyShort") + " " + svmPercent(summary.verify.accuracy) : "");
   }
 
   function updateClassSvmProgress() {
@@ -1958,11 +1990,12 @@
     if (progress) { progress.max = classSvm.total || 1; progress.value = classSvm.completed; }
   }
 
-  function fillClassSvmMetrics(container, summary) {
+  function fillClassSvmMetrics(container, summary, simple) {
     container.innerHTML = "";
+    container.appendChild(el("h3", "", simple ? simpleTitle() : I18N.t("svmTitle")));
     if (!summary || summary.status === "failed") {
       container.appendChild(el("p", "class-note" + (summary ? " class-label-error" : ""),
-        summary ? I18N.t("svmFailed") + ": " + I18N.t(summary.error) : I18N.t("svmPending")));
+        summary ? I18N.t(simple ? "simpleFailed" : "svmFailed") + ": " + I18N.t(summary.error) : I18N.t(simple ? "simplePending" : "svmPending")));
       return;
     }
     var table = el("table", "class-table svm-metrics"), head = el("tr");
@@ -1979,13 +2012,14 @@
       row.appendChild(el("td", "", score ? score.correct + " / " + score.n : "—")); tbody.appendChild(row);
     });
     table.appendChild(tbody); container.appendChild(table);
-    container.appendChild(el("p", "class-note", "C = " + summary.fit.cost + " · γ = " + summary.fit.gamma.toPrecision(5) +
-      " · " + I18N.t("svmComplexity") + " " + (summary.fit.complexity || 3) + "/5 · " + I18N.t("svmScoreNote")));
+    container.appendChild(el("p", "class-note", (simple ? "λ = " + summary.fit.lambda : "C = " + summary.fit.cost + " · γ = " + summary.fit.gamma.toPrecision(5) +
+      " · " + I18N.t("svmComplexity") + " " + (summary.fit.complexity || 3) + "/5") + " · " + I18N.t("svmScoreNote")));
     if (summary.verifyIssue) container.appendChild(el("p", "class-note", I18N.t(summary.verifyIssue)));
     var model = state.result.models.find(function (m) { return m.rank === summary.rank; });
-    var formula = el("details", "svm-formula");
-    formula.appendChild(el("summary", "btn btn--secondary", I18N.t("svmFormula")));
-    var text = SVMEngine.formulaText(summary.fit, model.descriptors, state.result.classes);
+    var formula = el("details", "svm-formula" + (simple ? " simple-formula" : ""));
+    formula.open = !!simple;
+    formula.appendChild(el("summary", "btn btn--secondary", I18N.t(simple ? "simpleFormula" : "svmFormula")));
+    var text = (simple ? SimpleEngine : SVMEngine).formulaText(summary.fit, model.descriptors, state.result.classes);
     var code = el("pre", "class-formula", text);
     code.tabIndex = 0;
     var zoom = 100, zoomControls = el("div", "class-controls");
@@ -2010,22 +2044,23 @@
     var actions = el("div", "class-controls");
     actions.appendChild(classButton(I18N.t("svmCopyFormula"), function () { writeClipboard(text); }));
     actions.appendChild(classButton(I18N.t("svmExportFormula"), function () {
-      downloadTextFile("sisso-rbf-svm-model-" + summary.rank + ".txt", text, "text/plain;charset=utf-8");
+      downloadTextFile("sisso-" + (simple ? "simple-" + summary.fit.family : "rbf-svm") + "-model-" + summary.rank + ".txt", text, "text/plain;charset=utf-8");
     }));
     formula.appendChild(actions);
     container.appendChild(formula);
   }
 
-  function updateClassSvmScores(summary) {
+  function updateClassSvmScores(summary, simple) {
     var root = $("#view-classification");
-    root.querySelectorAll('[data-svm-rank="' + summary.rank + '"]').forEach(function (node) {
-      node.textContent = node.dataset.svmKey === "card" ? classSvmScoreText(summary) : svmPercent(SVMEngine.metric(summary, node.dataset.svmKey));
+    root.querySelectorAll('[data-' + (simple ? "simple" : "svm") + '-rank="' + summary.rank + '"]').forEach(function (node) {
+      var key = simple ? node.dataset.simpleKey : node.dataset.svmKey;
+      node.textContent = key === "card" ? classSvmScoreText(summary, simple) : svmPercent(classificationMetric({ rank: summary.rank }, key));
       if (summary.status === "failed") node.title = I18N.t(summary.error);
     });
     if (summary.rank === state.classRank) {
-      var metrics = document.getElementById("svm-model-metrics");
-      if (metrics) fillClassSvmMetrics(metrics, summary);
-      requestClassSvmBoundary();
+      var metrics = document.getElementById(simple ? "simple-model-metrics" : "svm-model-metrics");
+      if (metrics) fillClassSvmMetrics(metrics, summary, simple);
+      requestClassSvmBoundary(simple);
     }
   }
 
@@ -2081,14 +2116,57 @@
     return panel;
   }
 
-  function classSvmBoundarySeries(mesh) {
-    var color = getThemeColors().text;
-    return { id: "svm-boundary", name: I18N.t("svmBoundary"), type: "custom", coordinateSystem: "cartesian2d",
+  function updateClassSimpleProgress() {
+    classSimpleProgressTime = Date.now();
+    var status = document.getElementById("simple-status"), progress = document.getElementById("simple-progress");
+    if (status) status.textContent = I18N.format("svmProgress", { completed: classSimple.completed, total: classSimple.total, failed: classSimple.failed }) +
+      " · " + I18N.t(classSimple.status === "running" ? "svmTraining" : "svmStatus_" + classSimple.status);
+    if (progress) { progress.max = classSimple.total || 1; progress.value = classSimple.completed; }
+  }
+
+  function buildClassSimpleControls() {
+    var panel = el("section", "svm-panel"); panel.setAttribute("aria-label", I18N.t("simpleTitle"));
+    var label = el("label", "svm-switch"), toggle = el("input"); toggle.type = "checkbox"; toggle.id = "simple-enable";
+    toggle.checked = classSimple.enabled;
+    toggle.disabled = state.result.meta.sissoIn.descDim !== 2 || state.result.classes.length !== 2;
+    toggle.addEventListener("change", function () {
+      if (toggle.checked) classSimple.start(state.texts, state.result.models.length, classSimple.config);
+      else { if (state.classSort.indexOf("simple-") === 0) state.classSort = "rank"; classSimple.disable(); }
+    });
+    label.appendChild(toggle); label.appendChild(el("span", "", I18N.t("simpleEnable"))); panel.appendChild(label);
+    panel.appendChild(el("p", "class-note", I18N.t(toggle.disabled ? "simpleOnlyBinary2D" : "simpleHelp")));
+    if (!classSimple.enabled) return panel;
+    if (!classSimpleDraft) classSimpleDraft = { family: classSimple.config.family, lambda: String(classSimple.config.lambda), dirty: false };
+    var controls = el("div", "svm-parameters"), note = el("p", "class-note", I18N.t(classSimpleDraft.dirty ? "simpleNeedsRetrain" : "simpleTemplateNote"));
+    function stage(key, value) { classSimpleDraft[key] = value; classSimpleDraft.dirty = true; note.textContent = I18N.t("simpleNeedsRetrain"); }
+    var family = classSelect(I18N.t("simpleFamily"), SimpleEngine.families.map(function (f) { return [f, I18N.t("simple_" + f)]; }), classSimpleDraft.family,
+      function (value) { stage("family", value); });
+    family.lastChild.id = "simple-family"; family.lastChild.disabled = classSimple.status === "running"; controls.appendChild(family);
+    var field = el("label", "field"); field.appendChild(el("span", "field__label", I18N.t("simpleLambda")));
+    var lambda = el("input", "input"); lambda.type = "number"; lambda.id = "simple-lambda"; lambda.value = classSimpleDraft.lambda;
+    lambda.min = "0.000001"; lambda.max = "1000000"; lambda.step = "any"; lambda.disabled = classSimple.status === "running";
+    lambda.addEventListener("input", function () { stage("lambda", lambda.value); }); field.appendChild(lambda); controls.appendChild(field);
+    var error = el("p", "class-label-error"); error.setAttribute("role", "alert");
+    controls.appendChild(classButton(I18N.t(classSimple.status === "running" ? "svmStop" : "svmRetrain"), function () {
+      if (classSimple.status === "running") { classSimple.stop(); return; }
+      try { classSimple.start(state.texts, state.result.models.length, SimpleEngine.options({ family: family.lastChild.value, lambda: lambda.value.trim() })); }
+      catch (e) { error.textContent = I18N.t(e.message); }
+    }));
+    panel.appendChild(controls); panel.appendChild(error); panel.appendChild(note);
+    var status = el("p", "class-note"); status.id = "simple-status"; status.setAttribute("role", "status"); panel.appendChild(status);
+    var progress = el("progress", "svm-progress"); progress.id = "simple-progress"; progress.setAttribute("aria-label", I18N.t("simpleTitle")); panel.appendChild(progress);
+    if (classSimple.error) panel.appendChild(el("p", "class-label-error", I18N.t(classSimple.error)));
+    return panel;
+  }
+
+  function classSvmBoundarySeries(mesh, simple) {
+    var color = simple ? getThemeColors().verify : getThemeColors().text;
+    return { id: simple ? "simple-boundary" : "svm-boundary", name: simple ? simpleTitle() + " · g = 0" : I18N.t("svmBoundary"), type: "custom", coordinateSystem: "cartesian2d",
       silent: true, clip: true, z: 4, data: mesh ? mesh.segments : [],
       encode: { x: [0, 2], y: [1, 3] }, itemStyle: { color: color },
       renderItem: function (params, api) {
         var a = api.coord([api.value(0), api.value(1)]), b = api.coord([api.value(2), api.value(3)]);
-        return { type: "line", shape: { x1: a[0], y1: a[1], x2: b[0], y2: b[1] }, style: { stroke: color, lineWidth: 2 } };
+        return { type: "line", shape: { x1: a[0], y1: a[1], x2: b[0], y2: b[1] }, style: { stroke: color, lineWidth: 2, lineDash: simple ? [7, 4] : [] } };
       } };
   }
 
@@ -2100,26 +2178,30 @@
     return SVMEngine.domain(points);
   }
 
-  function requestClassSvmBoundary() {
-    classSvmBoundaryKey = null;
-    if (!classSvm.enabled || !isClassification() || !state.classChart) return;
+  function requestClassSvmBoundary(simple) {
+    var controller = simple ? classSimple : classSvm;
+    if (simple) classSimpleBoundaryKey = null; else classSvmBoundaryKey = null;
+    if (!controller.enabled || !isClassification() || !state.classChart) return;
     var model = state.result.models.find(function (m) { return m.rank === state.classRank; }) || state.result.models[0];
     var geo = classificationGeometry(model);
-    classSvmBoundaryKey = classSvm.requestBoundary(model.rank, classificationSvmDomain(model, geo));
-    drawClassSvmBoundary();
+    var key = controller.requestBoundary(model.rank, classificationSvmDomain(model, geo));
+    if (simple) classSimpleBoundaryKey = key; else classSvmBoundaryKey = key;
+    drawClassSvmBoundary(simple);
   }
 
-  function drawClassSvmBoundary() {
-    if (!classSvm.enabled || !state.classChart || !classSvmBoundaryKey) return;
-    var mesh = classSvm.boundaries.get(classSvmBoundaryKey), note = document.getElementById("svm-boundary-note");
-    state.classChart.setOption({ series: [classSvmBoundarySeries(mesh)] });
-    var summary = classSvm.results.get(state.classRank);
-    if (note) note.textContent = I18N.t(classSvm.status === "error" || classSvm.boundaryErrors.has(classSvmBoundaryKey) ? "svmBoundaryError" :
-      summary && summary.status === "failed" ? "svmFailed" : mesh ? mesh.segments.length ? "svmBoundaryNote" : "svmNoBoundary" : "svmBoundaryPending");
+  function drawClassSvmBoundary(simple) {
+    var controller = simple ? classSimple : classSvm, key = simple ? classSimpleBoundaryKey : classSvmBoundaryKey;
+    if (!controller.enabled || !state.classChart || !key) return;
+    var mesh = controller.boundaries.get(key), note = document.getElementById(simple ? "simple-boundary-note" : "svm-boundary-note");
+    state.classChart.setOption({ series: [classSvmBoundarySeries(mesh, simple)] });
+    var summary = controller.results.get(state.classRank);
+    if (note) note.textContent = I18N.t(controller.status === "error" || controller.boundaryErrors.has(key) ? "svmBoundaryError" :
+      summary && summary.status === "failed" ? (simple ? "simpleFailed" : "svmFailed") : mesh ? mesh.segments.length ? (simple ? "simpleBoundaryNote" : "svmBoundaryNote") : (simple ? "simpleNoBoundary" : "svmNoBoundary") : (simple ? "simpleBoundaryPending" : "svmBoundaryPending"));
   }
 
   function sortedClassModels() {
-    return state.result.models.slice().sort(function (a, b) { return SVMEngine.compare(a, b, state.classSort, classSvm.results); });
+    var simple = state.classSort.indexOf("simple-") === 0;
+    return state.result.models.slice().sort(function (a, b) { return SVMEngine.compare(a, b, simple ? state.classSort.replace(/^simple-/, "svm-") : state.classSort, (simple ? classSimple : classSvm).results); });
   }
 
   function buildClassThumb(model) {
@@ -2185,6 +2267,10 @@
         var score = el("span", "class-card__score svm-card-score", classSvmScoreText(classSvm.results.get(model.rank)));
         score.dataset.svmRank = String(model.rank); score.dataset.svmKey = "card"; card.appendChild(score);
       }
+      if (classSimple.enabled) {
+        var simpleScore = el("span", "class-card__score svm-card-score", classSvmScoreText(classSimple.results.get(model.rank), true));
+        simpleScore.dataset.simpleRank = String(model.rank); simpleScore.dataset.simpleKey = "card"; card.appendChild(simpleScore);
+      }
       if (classThumbObserver) {
         card.__model = model; card.appendChild(el("span", "class-preview-placeholder skeleton"));
         classThumbObserver.observe(card);
@@ -2231,7 +2317,9 @@
     });
     root.appendChild(kpis);
     root.appendChild(buildClassSvmControls());
+    root.appendChild(buildClassSimpleControls());
     if (classSvm.enabled) updateClassSvmProgress();
+    if (classSimple.enabled) updateClassSimpleProgress();
     var controls = el("div", "class-browser-controls"), browserHeader = el("div", "class-browser-header");
     browserHeader.appendChild(el("h2", "", I18N.t("classificationCandidates")));
     var viewSwitch = el("div", "class-view-switch");
@@ -2253,6 +2341,16 @@
         svmColumns.push([key, caption]);
       });
     });
+    var simpleColumns = [];
+    if (classSimple.enabled) ["train", "verify"].forEach(function (ds) {
+      if (ds === "verify" && !res.verify) return;
+      SVMEngine.metrics.forEach(function (metric, i) {
+        var key = "simple-" + ds + "-" + metric;
+        var caption = simpleTitle() + " · " + I18N.t(ds === "train" ? "classTrain" : "classVerify") + " · " + I18N.t(["svmAccuracy", "svmBalancedAccuracy", "svmMacroF1"][i]);
+        sortOptions.push([key, caption, classSimple.status === "running" || ds === "verify" && !Classification.hasVerificationLabels(res)]);
+        simpleColumns.push([key, caption]);
+      });
+    });
     sortRow.appendChild(classSelect(I18N.t("sortBy"), sortOptions,
     state.classSort, function (v) { state.classSort = v; state.classPage = 0; renderClassification(); }));
     var rankExport = classButton(I18N.t("classificationExportRankShort"), function () {
@@ -2261,6 +2359,7 @@
       var nativeLossColumn = res.models.some(function (m) { return !!m.nativeLoss; });
       if (nativeLossColumn) rows[0].push("native_loss", "native_loss_value");
       if (classSvm.enabled) rows[0] = rows[0].concat(["svm_status", "svm_C", "svm_gamma", "svm_complexity"], svmColumns.map(function (c) { return c[0]; }), ["svm_verify_issue"]);
+      if (classSimple.enabled) rows[0] = rows[0].concat(["simple_status", "simple_family", "simple_lambda"], simpleColumns.map(function (c) { return c[0]; }), ["simple_verify_issue", "simple_formula"]);
       sortedClassModels().forEach(function (m) {
         var row = [m.rank, m.dataOverlap === null ? "" : m.dataOverlap, m.sizeOverlap === null ? "" : m.sizeOverlap].concat(m.descriptors.map(function (d) { return d.original; }));
         if (nativeLossColumn) row.push(m.nativeLoss ? m.nativeLoss.name : "", m.nativeLoss ? m.nativeLoss.value : "");
@@ -2271,6 +2370,12 @@
             score && score.fit ? score.fit.complexity : classSvm.config.complexity], svmColumns.map(function (c) {
               var value = SVMEngine.metric(score, c[0]); return value === null ? "" : value;
             }), [score && (score.error || score.verifyIssue) || ""]);
+        }
+        if (classSimple.enabled) {
+          var simpleScore = classSimple.results.get(m.rank);
+          row = row.concat([simpleScore ? simpleScore.status : "pending", classSimple.config.family, classSimple.config.lambda], simpleColumns.map(function (c) {
+            var value = classificationMetric(m, c[0]); return value === null ? "" : value;
+          }), [simpleScore && (simpleScore.error || simpleScore.verifyIssue) || "", simpleScore && simpleScore.fit ? SimpleEngine.formula(simpleScore.fit).text : ""]);
         }
         rows.push(row);
       });
@@ -2288,8 +2393,8 @@
     pager.lastChild.setAttribute("aria-label", I18N.t("classificationNext"));
     sortRow.appendChild(pager); controls.appendChild(sortRow);
     var browserFooter = el("div", "class-browser-caption");
-    browserFooter.appendChild(el("span", "class-note", I18N.t(classSvm.enabled ? "svmPreviewNote" : "classificationPreviewNote"))); browserFooter.appendChild(rankExport); controls.appendChild(browserFooter);
-    var layout = el("div", "class-layout" + (state.classView === "grid" ? " class-layout--gallery" : classSvm.enabled ? " class-layout--svm-table" : ""));
+    browserFooter.appendChild(el("span", "class-note", I18N.t(classifiersEnabled() ? "classifierPreviewNote" : "classificationPreviewNote"))); browserFooter.appendChild(rankExport); controls.appendChild(browserFooter);
+    var layout = el("div", "class-layout" + (state.classView === "grid" ? " class-layout--gallery" : classifiersEnabled() ? " class-layout--svm-table" : ""));
     var modelBrowser = el("aside", "class-model-browser"); modelBrowser.appendChild(controls); layout.appendChild(modelBrowser);
     if (state.classView === "grid") {
       var gallery = buildClassGallery(sorted.slice(state.classPage * 100, state.classPage * 100 + 100));
@@ -2305,7 +2410,7 @@
       hr.appendChild(th);
     });
     head.appendChild(hr); table.appendChild(head);
-    svmColumns.forEach(function (column) { hr.appendChild(el("th", "", column[1])); });
+    svmColumns.concat(simpleColumns).forEach(function (column) { hr.appendChild(el("th", "", column[1])); });
     var body = el("tbody");
     sorted.slice(state.classPage * 100, state.classPage * 100 + 100).forEach(function (m) {
       var row = el("tr", m.rank === state.classRank ? "is-selected" : "");
@@ -2316,9 +2421,10 @@
       cell.appendChild(b); row.appendChild(cell);
       row.appendChild(el("td", "", classificationScore(m.dataOverlap)));
       row.appendChild(el("td", "", classificationScore(m.sizeOverlap)));
-      svmColumns.forEach(function (column) {
-        var cell = el("td", "", svmPercent(SVMEngine.metric(classSvm.results.get(m.rank), column[0])));
-        cell.dataset.svmRank = String(m.rank); cell.dataset.svmKey = column[0]; row.appendChild(cell);
+      svmColumns.concat(simpleColumns).forEach(function (column) {
+        var cell = el("td", "", svmPercent(classificationMetric(m, column[0])));
+        if (column[0].indexOf("simple-") === 0) { cell.dataset.simpleRank = String(m.rank); cell.dataset.simpleKey = column[0]; }
+        else { cell.dataset.svmRank = String(m.rank); cell.dataset.svmKey = column[0]; } row.appendChild(cell);
       });
       body.appendChild(row);
     });
@@ -2336,6 +2442,10 @@
     if (classSvm.enabled) {
       var svmMetrics = el("div", "svm-model-metrics"); svmMetrics.id = "svm-model-metrics";
       fillClassSvmMetrics(svmMetrics, classSvm.results.get(model.rank)); detail.appendChild(svmMetrics);
+    }
+    if (classSimple.enabled) {
+      var simpleMetrics = el("div", "svm-model-metrics"); simpleMetrics.id = "simple-model-metrics";
+      fillClassSvmMetrics(simpleMetrics, classSimple.results.get(model.rank), true); detail.appendChild(simpleMetrics);
     }
     var datasets = [["train", I18N.t("classTrain")]];
     if (Classification.hasVerificationLabels(res)) { datasets.unshift(["both", I18N.t("classificationBoth")]); datasets.push(["verify", I18N.t("classVerify")]); }
@@ -2385,6 +2495,9 @@
     if (classSvm.enabled) {
       var boundaryNote = el("p", "class-note", I18N.t("svmBoundaryPending")); boundaryNote.id = "svm-boundary-note"; notes.appendChild(boundaryNote);
     }
+    if (classSimple.enabled) {
+      var simpleNote = el("p", "class-note", I18N.t("simpleBoundaryNote")); simpleNote.id = "simple-boundary-note"; notes.appendChild(simpleNote);
+    }
     var chart = el("div", "class-chart");
     chart.setAttribute("role", "img"); chart.setAttribute("aria-label", I18N.t("classificationSpace"));
     detail.appendChild(chart); detail.appendChild(notes); layout.appendChild(detail); root.appendChild(layout);
@@ -2416,7 +2529,8 @@
         data: hull.length > 2 ? coords.concat([coords[0]]) : coords });
     });
     state.classChart = echarts.init(chart);
-    var svmBounds = classSvm.enabled ? classificationSvmDomain(model, geo) : null;
+    var svmBounds = classifiersEnabled() ? classificationSvmDomain(model, geo) : null;
+    if (classSimple.enabled) series.push(classSvmBoundarySeries(null, true));
     if (classSvm.enabled) series.push(classSvmBoundarySeries(null));
     state.classChart.setOption({ animation: false, textStyle: { color: colors.text },
       legend: { type: "scroll", textStyle: { color: colors.text } },
@@ -2434,6 +2548,7 @@
           return v === -1 ? I18N.t("classificationUnlabeled") : classNames[v] || "";
         } : undefined }, splitLine: { lineStyle: { color: colors.grid } } }, series: series });
     if (classSvm.enabled) requestClassSvmBoundary();
+    if (classSimple.enabled) requestClassSvmBoundary(true);
     var samples = el("details", "class-samples");
     samples.appendChild(el("summary", "", I18N.t(model.svmPredictions ? "sissoppSamples" : "classificationSamples") + " (" + points.length + ")"));
     var sampleBox = el("div", "class-sample-scroll");
@@ -2486,7 +2601,7 @@
       if (isClassification()) [t, g, c, u].forEach(function (b) {
         if (b) { b.disabled = true; b.classList.remove("is-active"); }
       });
-      if (isClassification() && p) p.disabled = !classSvm.enabled;
+      if (isClassification() && p) p.disabled = !classifiersEnabled();
       if (p) p.classList.toggle("is-active", state.view === "pareto");
     } else {
       document.body.classList.remove("has-results");
@@ -2739,7 +2854,7 @@
   // guessed: positive always means validation performed worse than training.
   function deltaMetricDefinition(metricKey, metricLabelKey) {
     var label = "Δ" + I18N.t(metricLabelKey);
-    return I18N.format(metricKey === "r2" || metricKey === "rho" || metricKey.indexOf("svm-") === 0
+    return I18N.format(metricKey === "r2" || metricKey === "rho" || /^(svm|simple)-/.test(metricKey)
       ? "deltaDefInv" : "deltaDefDiff", { label: label });
   }
 
@@ -2747,9 +2862,9 @@
     if (isClassification()) {
       var svmCols = [];
       paretoDatasets().forEach(function (ds) {
-        SVM_PARETO_METRICS.forEach(function (d) {
+        paretoMetrics().forEach(function (d) {
           svmCols.push({ id: d.key + "-" + ds, numeric: true, metric: d.key, dataset: ds,
-            label: function () { return paretoAxisTitle({ dataset: ds, label: d.label, minimize: ds === "delta" }); },
+            label: function () { return paretoAxisTitle({ dataset: ds, metric: d.key, label: d.label, minimize: ds === "delta" }); },
             get: function (m) {
               var value = paretoMetricValue(m, ds, d.key);
               return ds === "delta" ? Math.abs(value) : value;
@@ -2899,7 +3014,7 @@
           // ↑/↓ arrows always point down there. The Pareto chart trades off the
           // gap MAGNITUDE (|Δ|), never its direction.
           var minim = isDeltaGroup || d.minimize;
-          var opt = el("option", null, (isDeltaGroup ? "|Δ" : "") + I18N.t(d.label) + (isDeltaGroup ? "|" : "") + (minim ? " ↓" : " ↑"));
+          var opt = el("option", null, (isClassification() ? classifierAxisPrefix(d.key) : "") + (isDeltaGroup ? "|Δ" : "") + I18N.t(d.label) + (isDeltaGroup ? "|" : "") + (minim ? " ↓" : " ↑"));
           opt.value = datasets[di] + "|" + d.key;
           if (isDeltaGroup) {
             opt.title = deltaAxisDefinition(d.key, d.label);
@@ -2930,7 +3045,7 @@
     $("#view-pareto-btn").classList.toggle("is-active", state.view === "pareto");
     $("#view-compare-btn").classList.toggle("is-active", state.view === "compare");
     $("#view-units-btn").classList.toggle("is-active", state.view === "units");
-    $("#view-pareto-btn").disabled = !res || isClassification() && !classSvm.enabled;
+    $("#view-pareto-btn").disabled = !res || isClassification() && !classifiersEnabled();
     $("#view-compare-btn").disabled = !res || isClassification();
     // The Units / dimension view hosts the dimension groups (needs SISSO.out)
     // AND the feature & descriptor usage tables (which only need the models),
@@ -3214,9 +3329,9 @@
   // per dataset, so a pasted comparison shows the task spread too.
   function batchModelText(m) {
     if (isClassification()) {
-      var summary = classSvm.results.get(m.rank);
+      var summary = (classSimple.enabled ? classSimple : classSvm).results.get(m.rank);
       return "model" + m.rank + "\n" + (summary && summary.status === "ready"
-        ? SVMEngine.formulaText(summary.fit, m.descriptors, state.result.classes)
+        ? (classSimple.enabled ? SimpleEngine : SVMEngine).formulaText(summary.fit, m.descriptors, state.result.classes)
         : m.descriptors.map(function (d, i) { return "d" + (i + 1) + " = " + d.original; }).join("\n"));
     }
     var lines = [];
@@ -3763,11 +3878,11 @@
     for (var fi = 0; fi < datasets.length; fi++) {
       if (datasets[fi] !== "train" && datasets[fi] !== "delta") { fallbackDs = datasets[fi]; break; }
     }
-    var svm = isClassification();
+    var svm = isClassification(), prefix = !classSvm.enabled && classSimple.enabled ? "simple-" : "svm-";
     var specs = [
-      paretoNormalizeAxis(state.paretoX, { dataset: "train", metric: svm ? "svm-accuracy" : "rmse" }),
-      paretoNormalizeAxis(state.paretoY, { dataset: fallbackDs, metric: svm ? "svm-balancedAccuracy" : "rmse" }),
-      paretoNormalizeAxis(state.paretoZ, { dataset: svm ? fallbackDs : "train", metric: svm ? "svm-macroF1" : "r2" }),
+      paretoNormalizeAxis(state.paretoX, { dataset: "train", metric: svm ? prefix + "accuracy" : "rmse" }),
+      paretoNormalizeAxis(state.paretoY, { dataset: fallbackDs, metric: svm ? prefix + "balancedAccuracy" : "rmse" }),
+      paretoNormalizeAxis(state.paretoZ, { dataset: svm ? fallbackDs : "train", metric: svm ? prefix + "macroF1" : "r2" }),
     ];
     // Preference pool of every (dataset, metric) combo present in this run,
     // used to replace any duplicate axis with the next free default.
@@ -3857,10 +3972,11 @@
 
   function paretoMetricValue(model, dataset, metric) {
     if (!isClassification()) return Core.metricValue(model, dataset, metric);
-    if (!classSvm.enabled) return NaN;
-    var summary = classSvm.results.get(model.rank), key = metric.slice(4);
-    var train = SVMEngine.metric(summary, "svm-train-" + key);
-    var verify = SVMEngine.metric(summary, "svm-verify-" + key);
+    var simple = metric.indexOf("simple-") === 0, controller = simple ? classSimple : classSvm;
+    if (!controller.enabled) return NaN;
+    var key = metric.replace(/^(svm|simple)-/, ""), source = simple ? "simple-" : "svm-";
+    var train = classificationMetric(model, source + "train-" + key);
+    var verify = classificationMetric(model, source + "verify-" + key);
     if (dataset === "delta") return train === null || verify === null ? NaN : train - verify;
     var value = dataset === "verify" ? verify : train;
     return value === null ? NaN : value;
@@ -3887,11 +4003,14 @@
   // Dataset-aware axis display name: "RMSE (Train) ↓" — reads the dataset the
   // axis actually points at, so any axis can sit on any dataset/pseudo-dataset.
   // Delta axes plot the magnitude and always show "↓" (smaller |Δ| is better).
+  function classifierAxisPrefix(metric) {
+    return metric && metric.indexOf("simple-") === 0 ? simpleTitle() + " · " : "SVM ";
+  }
   function paretoAxisTitle(def) {
     var label = def.dataset === "delta"
       ? "|Δ" + I18N.t(def.label) + "|"
       : I18N.t(def.label);
-    return (isClassification() ? "SVM " : "") + label + " (" + paretoDatasetLabel(def.dataset) + ") " +
+    return (isClassification() ? classifierAxisPrefix(def.metric) : "") + label + " (" + paretoDatasetLabel(def.dataset) + ") " +
       (def.minimize ? "↓" : "↑");
   }
 
@@ -4164,6 +4283,13 @@
     });
 
     var rows = Core.paretoExportRows(split.pts, split.ghosts, front, axes);
+    if (isClassification() && classSimple.enabled) {
+      rows[0].push("simple_family", "simple_lambda");
+      split.pts.concat(split.ghosts).forEach(function (p, i) {
+        var summary = classSimple.results.get(p.rank), fit = summary && summary.fit;
+        rows[i + 1].push(fit ? fit.family : classSimple.config.family, fit ? fit.lambda : classSimple.config.lambda);
+      });
+    }
     var mode = state.paretoMode === "3d" ? "3d" : "2d";
     var fileName = "sisso-pareto-" + mode + "-" + axes
       .map(function (a) { return a.code + "-" + a.dataset + "-" + a.metric; })
@@ -5051,8 +5177,10 @@
     var note = $("#pareto-svm-note");
     if (note) {
       note.hidden = !isClassification();
-      if (isClassification()) note.textContent = I18N.t("svmParetoNote") + " " + I18N.format("svmProgress", {
-        completed: classSvm.completed, total: classSvm.total, failed: classSvm.failed });
+      if (isClassification()) note.textContent = I18N.t("classifierParetoNote") + " " + [
+        classSvm.enabled ? "SVM: " + I18N.format("svmProgress", { completed: classSvm.completed, total: classSvm.total, failed: classSvm.failed }) : "",
+        classSimple.enabled ? simpleTitle() + ": " + I18N.format("svmProgress", { completed: classSimple.completed, total: classSimple.total, failed: classSimple.failed }) : ""
+      ].filter(Boolean).join(" · ");
     }
     if (state.paretoMode === "3d") { renderPareto3D(); return; }
     var computed = paretoComputed();
@@ -6411,6 +6539,7 @@
     }
     $("#btn-reset").addEventListener("click", function () {
       classSvm.reset(); classSvmBoundaryKey = null; classSvmDraft = null;
+      classSimple.reset(); classSimpleBoundaryKey = null; classSimpleDraft = null;
       state.files = {};
       state.inputType = null;
       state.cppFiles = null;
@@ -6530,7 +6659,7 @@
     });
     $("#view-pareto-btn").addEventListener("click", function () {
       if (!state.result) return;
-      if (isClassification() && !classSvm.enabled) return;
+      if (isClassification() && !classifiersEnabled()) return;
       state.view = "pareto";
       if (isClassification()) {
         $("#view-classification").hidden = true;

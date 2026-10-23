@@ -7,10 +7,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 // Emulate only the worker host surface. The actual browser bundle, projection
 // code, SVM engine and worker protocol all execute unmodified in this context.
-export function workerHarness() {
+export function workerHarness(engine) {
   const tasks = [], messages = [];
   const context = vm.createContext({
-    URL, location: { href: "http://localhost/js/sisso-svm-worker.js" },
+    URL, location: { href: "http://localhost/js/sisso-svm-worker.js" + (engine === "simple" ? "?engine=simple" : "") },
     console: { log() {}, warn() {}, error() {} },
     setTimeout(fn) { tasks.push(fn); return tasks.length; }, clearTimeout() {},
     postMessage(message) { messages.push(structuredClone(message)); },

@@ -1,13 +1,17 @@
 /* Loaded only after the user enables RBF-SVM. No remote computation. */
 "use strict";
-importScripts("sisso-core.js", "sisso-classification.js", "sisso-svm.js", "vendor/libsvm.js");
+var simple = new URL(self.location.href).searchParams.get("engine") === "simple";
+importScripts("sisso-core.js", "sisso-classification.js", "sisso-svm.js");
+if (simple) importScripts("sisso-evaluation.js", "sisso-simple-boundaries.js");
+else importScripts("vendor/libsvm.js");
+var engine = simple ? SissoSimpleBoundaries : SissoSVM;
 
 var batchToken = 0;
 self.onmessage = function (event) {
   var message = event.data;
   if (message.type === "boundary") {
     try {
-      var mesh = SissoSVM.boundary(message.fit, message.bounds, 128);
+      var mesh = engine.boundary(message.fit, message.bounds, 128);
       self.postMessage({ type: "boundary", id: message.id, key: message.key, mesh: mesh });
     } catch (error) {
       self.postMessage({ type: "boundaryError", id: message.id, key: message.key, error: error.message });
@@ -17,9 +21,10 @@ self.onmessage = function (event) {
   if (message.type !== "start") return;
   var token = ++batchToken, result, config, index = 0;
   try {
-    config = SissoSVM.options(message.options);
+    config = engine.options(message.options);
     result = SissoClassification.runPipeline(message.texts);
     if (result.meta.sissoIn.descDim !== 2) throw new Error("svmOnly2D");
+    if (simple && result.classes.length !== 2) throw new Error("simpleOnlyBinary2D");
   } catch (error) {
     self.postMessage({ type: "error", id: message.id, error: error.message });
     return;
@@ -28,7 +33,7 @@ self.onmessage = function (event) {
     if (token !== batchToken) return;
     if (index === result.models.length) { self.postMessage({ type: "done", id: message.id }); return; }
     var model = result.models[index++], summary;
-    try { summary = SissoSVM.trainModel(result, model, config, libsvm); }
+    try { summary = engine.trainModel(result, model, config, simple ? undefined : libsvm); }
     catch (error) { summary = { rank: model.rank, status: "failed", error: error.message }; }
     self.postMessage({ type: "model", id: message.id, summary: summary, completed: index });
     setTimeout(step, 0); // let boundary requests and cancellation run between fits

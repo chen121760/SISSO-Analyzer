@@ -1,7 +1,9 @@
 # SISSO-Analyzer
 
 Experimental branch: [fixed-size classification boundaries](docs/simple-boundaries-experiment.md)
-compares linear, parabolic and reciprocal rules using the existing Logistic solver.
+adds linear, parabolic and reciprocal classifiers alongside RBF-SVM on the
+classification page, using the existing Logistic solver. Enable either or both
+to compare scores, boundaries and formulas; both feed the Pareto workspace.
 
 Interactive web analyzer for [SISSO](https://github.com/rouyang2017/SISSO) and
 [SISSO++](https://gitlab.com/sissopp_developers/sissopp) results. Pure client-side —

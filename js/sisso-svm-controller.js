@@ -6,9 +6,10 @@
   "use strict";
   function create(callbacks) {
     callbacks = callbacks || {};
+    var engine = callbacks.engine || Engine;
     var worker = null, pending = new Set();
     var api = { enabled: false, status: "idle", id: 0, completed: 0, total: 0, failed: 0,
-      error: null, config: Engine.options(), results: new Map(), boundaries: new Map(), boundaryErrors: new Map() };
+      error: null, config: engine.options(), results: new Map(), boundaries: new Map(), boundaryErrors: new Map() };
     function notify(kind, summary) { if (callbacks.change) callbacks.change(kind, summary); }
     function terminate() {
       if (worker) { worker.terminate(); worker = null; }
@@ -18,7 +19,7 @@
     function ensureWorker() {
       if (worker) return worker;
       try {
-        var current = callbacks.workerFactory ? callbacks.workerFactory() : new root.Worker("js/sisso-svm-worker.js");
+        var current = callbacks.workerFactory ? callbacks.workerFactory() : new root.Worker(callbacks.workerURL || "js/sisso-svm-worker.js");
         worker = current;
         current.onerror = function (event) {
           if (event.preventDefault) event.preventDefault();
@@ -50,7 +51,7 @@
     };
     api.disable = function () { api.reset(); notify("disabled"); };
     api.start = function (texts, total, config) {
-      config = Engine.options(config);
+      config = engine.options(config);
       api.reset(); api.enabled = true; api.status = "running"; api.total = total; api.config = config;
       var current = ensureWorker();
       if (current) { current.postMessage({ type: "start", id: api.id, texts: texts, options: config }); notify("start"); }

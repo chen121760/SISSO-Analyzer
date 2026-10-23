@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { createRequire } from "node:module";
+import { workerHarness } from "./svm-harness.mjs";
 const require = createRequire(import.meta.url);
 const Simple = require("../js/sisso-simple-boundaries.js");
 const point = (x, y, label) => ({ coords: [x, y], classIndex: label, finite: true });
@@ -21,6 +22,12 @@ for (const family of Simple.families) {
     assert.ok(Math.abs(score - prediction.scores[1]) < 1e-10);
   }
   assert.equal(Simple.predict(fit, [NaN, 1]).status, "invalid");
+  const mesh = Simple.boundary(fit, [[-4, 4], [-5, 10]]);
+  assert.ok(mesh.segments.length > 0);
+  for (const segment of mesh.segments) {
+    if (family === "reciprocal") assert.ok(segment[0] * segment[2] > 0, "never connect across the reciprocal pole");
+    for (const p of [segment.slice(0, 2), segment.slice(2)]) assert.ok(Math.abs(Simple.predict(fit, p).scores[1]) < 1e-8, "curve endpoints solve the actual classifier score");
+  }
 }
 const fixed = Simple.fit(datasets.quadratic, "quadratic");
 const before = JSON.stringify(fixed);
@@ -39,4 +46,26 @@ const score = normalized.coefficients.reduce((sum, c, i) => sum + c * vm.runInNe
   u: 1e180 / huge.units[0], v: 3e180 / huge.units[1],
 }), 0);
 assert.ok(Math.abs(score - Simple.predict(huge, [1e180, 3e180]).scores[1]) < 1e-10);
+const vertical = Simple.boundary({ family: "quadratic", units: [1, 1], coefficients: [-1, 0, 1, 0] }, [[-2, 2], [-3, 3]]);
+assert.equal(vertical.segments.length, 2);
+assert.deepEqual(vertical.segments.map(s => s[0]).sort(), [-1, 1]);
+assert.throws(() => Simple.options({ lambda: 0 }), /simpleInvalidOptions/);
+assert.throws(() => Simple.boundary(fixed, [[1, 0], [0, 1]]), /simpleInvalidBounds/);
+const texts = { train: "name x y\na 1 0\nb 2 1\nc 3 2\nd 1 4\ne 2 5\nf 3 6\n", verify: "name x y\nv 0 4\n",
+  sissoin: "ptype=2\nntask=1\nnsample=(3,3)\nnsf=2\ndesc_dim=2\nisconvex=(1,1)\n", uspace: "x\ny\n",
+  top: "rank #data_overlap size_overlap feature_ID\n1 0 0 (1 2)\n", verifylabels: JSON.stringify({ class_order: ["low", "high"], rows: [{ id: "v", class: 1 }] }) };
+const result = require("../js/sisso-classification.js").runPipeline(texts);
+const summary = Simple.trainModel(result, result.models[0], { family: "reciprocal" });
+assert.equal(summary.train.n, 6);
+assert.equal(summary.verify, null);
+assert.equal(summary.verifyIssue, "simpleInvalidVerification", "do not score a reduced verification cohort");
+const worker = workerHarness("simple");
+worker.context.onmessage({ data: { type: "start", id: 1, texts, options: { family: "linear" } } });
+worker.drain();
+assert.equal(worker.context.libsvm, undefined, "simple-only training never loads LIBSVM");
+assert.equal(worker.messages.at(-1).type, "done");
+const message = worker.messages.find(m => m.type === "model");
+assert.equal(message.summary.status, "ready");
+worker.context.onmessage({ data: { type: "boundary", id: 1, key: "curve", fit: message.summary.fit, bounds: [[-1, 4], [-1, 7]] } });
+assert.ok(worker.messages.at(-1).mesh.segments.length > 0);
 console.log("PASS simple linear/parabolic/reciprocal boundaries, compact formula agreement, fixed training preprocessing, singularity guards and extreme units");
