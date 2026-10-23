@@ -94,6 +94,15 @@
     change: function (kind, summary) {
       if (!isClassification()) return;
       if (kind === "start" || kind === "disabled") classSvmDraft = null;
+      setNavState(true);
+      if (state.view === "pareto") {
+        if (!classSvm.enabled) { showClassification(); return; }
+        if (kind !== "model" || Date.now() - classSvmProgressTime >= 400) {
+          classSvmProgressTime = Date.now();
+          renderControls(); renderPareto();
+        }
+        return;
+      }
       if (kind === "model") {
         updateClassSvmScores(summary);
         if (Date.now() - classSvmProgressTime >= 400) updateClassSvmProgress();
@@ -214,7 +223,7 @@
   function refreshThemeDependentUI() {
     themeColors = null;
     if (!state.result) return;
-    if (isClassification()) { renderClassification(); return; }
+    if (isClassification() && state.view !== "pareto") { renderClassification(); return; }
     if (state.view === "grid") renderGrid();
     if (state.view === "pareto") renderPareto();
     if (state.currentModel && !$("#dialog-backdrop").hidden) {
@@ -280,11 +289,18 @@
     { key: "r2", label: "sortR2", minimize: false },
     { key: "rho", label: "sortRho", minimize: false },
   ];
+  var SVM_PARETO_METRICS = [
+    { key: "svm-accuracy", label: "svmAccuracy", minimize: false },
+    { key: "svm-balancedAccuracy", label: "svmBalancedAccuracy", minimize: false },
+    { key: "svm-macroF1", label: "svmMacroF1", minimize: false },
+  ];
+  function paretoMetrics() { return isClassification() ? SVM_PARETO_METRICS : PARETO_METRICS; }
   function paretoMetricDef(key) {
-    for (var i = 0; i < PARETO_METRICS.length; i++) {
-      if (PARETO_METRICS[i].key === key) return PARETO_METRICS[i];
+    var metrics = paretoMetrics();
+    for (var i = 0; i < metrics.length; i++) {
+      if (metrics[i].key === key) return metrics[i];
     }
-    return PARETO_METRICS[0];
+    return metrics[0];
   }
 
   // ---------------------------------------------------------------------------
@@ -678,7 +694,11 @@
     var btn = $("#btn-lang");
     if (btn) btn.textContent = I18N.getLocale() === "zh" ? "EN" : "中文";
     renderFileList();
-    if (isClassification()) { renderClassification(); renderRecentList(); return; }
+    if (isClassification()) {
+      if (state.view === "pareto") { renderControls(); renderPareto(); }
+      else renderClassification();
+      renderRecentList(); return;
+    }
     renderControls();
     renderCount();
     populateColorSelect();
@@ -1556,6 +1576,8 @@
       state.classSort = "rank";
       state.classView = "grid";
       state.classHullMode = "rebuilt";
+      state.filter = newEmptyFilter();
+      state.batchSel = { table: new Set(), pareto: new Set() };
       classGeometryCache.clear();
       state.view = "classification";
       closeDetail();
@@ -1960,6 +1982,38 @@
     container.appendChild(el("p", "class-note", "C = " + summary.fit.cost + " · γ = " + summary.fit.gamma.toPrecision(5) +
       " · " + I18N.t("svmComplexity") + " " + (summary.fit.complexity || 3) + "/5 · " + I18N.t("svmScoreNote")));
     if (summary.verifyIssue) container.appendChild(el("p", "class-note", I18N.t(summary.verifyIssue)));
+    var model = state.result.models.find(function (m) { return m.rank === summary.rank; });
+    var formula = el("details", "svm-formula");
+    formula.appendChild(el("summary", "btn btn--secondary", I18N.t("svmFormula")));
+    var text = SVMEngine.formulaText(summary.fit, model.descriptors, state.result.classes);
+    var code = el("pre", "class-formula", text);
+    code.tabIndex = 0;
+    var zoom = 100, zoomControls = el("div", "class-controls");
+    var zoomValue = el("span", "class-note", "100%");
+    zoomValue.setAttribute("aria-live", "polite");
+    function setZoom(value) {
+      zoom = Math.max(75, Math.min(200, value));
+      code.style.fontSize = (13 * zoom / 100) + "px";
+      zoomValue.textContent = zoom + "%";
+      zoomOut.disabled = zoom === 75;
+      zoomIn.disabled = zoom === 200;
+      zoomReset.disabled = zoom === 100;
+    }
+    var zoomOut = classButton(I18N.t("svmZoomOut"), function () { setZoom(zoom - 25); });
+    var zoomIn = classButton(I18N.t("svmZoomIn"), function () { setZoom(zoom + 25); });
+    var zoomReset = classButton(I18N.t("svmZoomReset"), function () { setZoom(100); });
+    zoomControls.appendChild(el("span", "class-note", I18N.t("svmFormulaZoom")));
+    [zoomOut, zoomValue, zoomIn, zoomReset].forEach(function (node) { zoomControls.appendChild(node); });
+    setZoom(100);
+    formula.appendChild(zoomControls);
+    formula.appendChild(code);
+    var actions = el("div", "class-controls");
+    actions.appendChild(classButton(I18N.t("svmCopyFormula"), function () { writeClipboard(text); }));
+    actions.appendChild(classButton(I18N.t("svmExportFormula"), function () {
+      downloadTextFile("sisso-rbf-svm-model-" + summary.rank + ".txt", text, "text/plain;charset=utf-8");
+    }));
+    formula.appendChild(actions);
+    container.appendChild(formula);
   }
 
   function updateClassSvmScores(summary) {
@@ -2399,6 +2453,15 @@
     sampleTable.appendChild(sb); sampleBox.appendChild(sampleTable); samples.appendChild(sampleBox); root.appendChild(samples);
   }
 
+  function showClassification() {
+    if (!isClassification()) return;
+    state.view = "classification";
+    $("#view-results").hidden = true;
+    $("#view-classification").hidden = false;
+    setNavState(true);
+    renderClassification();
+  }
+
   // Left-nav state: upload ("Load results") vs. loaded run + sub-views.
   function setNavState(hasResults) {
     var evaluationButton = $("#btn-evaluation");
@@ -2410,7 +2473,7 @@
     if (classNav) {
       classNav.hidden = !isClassification();
       classNav.disabled = !hasResults || !isClassification();
-      classNav.classList.toggle("is-active", hasResults && isClassification());
+      classNav.classList.toggle("is-active", hasResults && isClassification() && state.view === "classification");
     }
     if (hasResults) {
       document.body.classList.add("has-results");
@@ -2420,9 +2483,11 @@
       if (p) p.disabled = false; // available for train-only runs too; hidden in renderControls when no result
       if (c) c.disabled = false;
       if (u) u.disabled = false; // unit gating happens in renderControls
-      if (isClassification()) [t, g, p, c, u].forEach(function (b) {
+      if (isClassification()) [t, g, c, u].forEach(function (b) {
         if (b) { b.disabled = true; b.classList.remove("is-active"); }
       });
+      if (isClassification() && p) p.disabled = !classSvm.enabled;
+      if (p) p.classList.toggle("is-active", state.view === "pareto");
     } else {
       document.body.classList.remove("has-results");
       if (home) home.classList.add("is-active");
@@ -2441,6 +2506,7 @@
   function showResults() {
     $("#view-upload").hidden = true;
     $("#view-results").hidden = false;
+    $("#kpi-strip").hidden = false;
     $("#btn-reset").hidden = false;
     setNavState(true);
 
@@ -2673,11 +2739,25 @@
   // guessed: positive always means validation performed worse than training.
   function deltaMetricDefinition(metricKey, metricLabelKey) {
     var label = "Δ" + I18N.t(metricLabelKey);
-    return I18N.format(metricKey === "r2" || metricKey === "rho"
+    return I18N.format(metricKey === "r2" || metricKey === "rho" || metricKey.indexOf("svm-") === 0
       ? "deltaDefInv" : "deltaDefDiff", { label: label });
   }
 
   function buildTableColumns() {
+    if (isClassification()) {
+      var svmCols = [];
+      paretoDatasets().forEach(function (ds) {
+        SVM_PARETO_METRICS.forEach(function (d) {
+          svmCols.push({ id: d.key + "-" + ds, numeric: true, metric: d.key, dataset: ds,
+            label: function () { return paretoAxisTitle({ dataset: ds, label: d.label, minimize: ds === "delta" }); },
+            get: function (m) {
+              var value = paretoMetricValue(m, ds, d.key);
+              return ds === "delta" ? Math.abs(value) : value;
+            } });
+        });
+      });
+      return svmCols;
+    }
     var hasVerify = !!(state.result && state.result.verify);
     // Column order in the overview table: batch-check, rank, model formula,
     // ACTIONS, then the dataset metric columns — the row actions
@@ -2811,9 +2891,10 @@
       for (var di = 0; di < datasets.length; di++) {
         var isDeltaGroup = datasets[di] === "delta";
         var group = el("optgroup");
-        group.label = isDeltaGroup ? I18N.t("paretoDeltaGroup") : datasetLabel(datasets[di]);
-        for (var mi = 0; mi < PARETO_METRICS.length; mi++) {
-          var d = PARETO_METRICS[mi];
+        group.label = isDeltaGroup ? I18N.t(isClassification() ? "svmDeltaGroup" : "paretoDeltaGroup") : datasetLabel(datasets[di]);
+        var metrics = paretoMetrics();
+        for (var mi = 0; mi < metrics.length; mi++) {
+          var d = metrics[mi];
           // Delta is defined "smaller = better" for all four metrics, so the
           // ↑/↓ arrows always point down there. The Pareto chart trades off the
           // gap MAGNITUDE (|Δ|), never its direction.
@@ -2849,12 +2930,12 @@
     $("#view-pareto-btn").classList.toggle("is-active", state.view === "pareto");
     $("#view-compare-btn").classList.toggle("is-active", state.view === "compare");
     $("#view-units-btn").classList.toggle("is-active", state.view === "units");
-    $("#view-pareto-btn").disabled = !res;
-    $("#view-compare-btn").disabled = !res;
+    $("#view-pareto-btn").disabled = !res || isClassification() && !classSvm.enabled;
+    $("#view-compare-btn").disabled = !res || isClassification();
     // The Units / dimension view hosts the dimension groups (needs SISSO.out)
     // AND the feature & descriptor usage tables (which only need the models),
     // so it is available for every analysed run.
-    $("#view-units-btn").disabled = !res;
+    $("#view-units-btn").disabled = !res || isClassification();
     $("#table-wrap").hidden = state.view !== "table";
     $("#grid-wrap").hidden = state.view !== "grid";
     $("#pareto-wrap").hidden = state.view !== "pareto";
@@ -3069,6 +3150,7 @@
   var renderSeq = 0;
   function renderModels() {
     if (!state.result) return;
+    if (isClassification()) return;
     var vis = visibleModels();
     var seq = ++renderSeq;
 
@@ -3131,6 +3213,12 @@
   // A multi-task model lists its per-task formulas and carries one metric line
   // per dataset, so a pasted comparison shows the task spread too.
   function batchModelText(m) {
+    if (isClassification()) {
+      var summary = classSvm.results.get(m.rank);
+      return "model" + m.rank + "\n" + (summary && summary.status === "ready"
+        ? SVMEngine.formulaText(summary.fit, m.descriptors, state.result.classes)
+        : m.descriptors.map(function (d, i) { return "d" + (i + 1) + " = " + d.original; }).join("\n"));
+    }
     var lines = [];
     var formulas = modelFormulaLines(m);
     formulas.forEach(function (row, i) {
@@ -3633,13 +3721,14 @@
   // Keeping "delta" out of Core.availableDatasets avoids making it a real
   // dataset anywhere else (compare matrix, default axes, etc.).
   function paretoDatasets() {
+    if (isClassification()) return Classification.hasVerificationLabels(state.result) ? ["train", "verify", "delta"] : ["train"];
     var ds = Core.availableDatasets(state.result);
     if (state.result && state.result.verify) ds = ds.concat(["delta"]);
     return ds;
   }
 
   function paretoIsMetric(k) {
-    return PARETO_METRICS.some(function (d) { return d.key === k; });
+    return paretoMetrics().some(function (d) { return d.key === k; });
   }
 
   // Migrate a legacy/external axis value into a {dataset, metric} spec valid
@@ -3674,15 +3763,16 @@
     for (var fi = 0; fi < datasets.length; fi++) {
       if (datasets[fi] !== "train" && datasets[fi] !== "delta") { fallbackDs = datasets[fi]; break; }
     }
+    var svm = isClassification();
     var specs = [
-      paretoNormalizeAxis(state.paretoX, { dataset: "train", metric: "rmse" }),
-      paretoNormalizeAxis(state.paretoY, { dataset: fallbackDs, metric: "rmse" }),
-      paretoNormalizeAxis(state.paretoZ, { dataset: "train", metric: "r2" }),
+      paretoNormalizeAxis(state.paretoX, { dataset: "train", metric: svm ? "svm-accuracy" : "rmse" }),
+      paretoNormalizeAxis(state.paretoY, { dataset: fallbackDs, metric: svm ? "svm-balancedAccuracy" : "rmse" }),
+      paretoNormalizeAxis(state.paretoZ, { dataset: svm ? fallbackDs : "train", metric: svm ? "svm-macroF1" : "r2" }),
     ];
     // Preference pool of every (dataset, metric) combo present in this run,
     // used to replace any duplicate axis with the next free default.
     var pool = [];
-    PARETO_METRICS.forEach(function (d) {
+    paretoMetrics().forEach(function (d) {
       datasets.forEach(function (ds) { pool.push({ dataset: ds, metric: d.key }); });
     });
     var used = [], next = 0;
@@ -3748,18 +3838,32 @@
       var pt = { rank: m.rank, m: m };
       var ok = true;
       for (var i = 0; i < defs.length; i++) {
-        var v = Core.metricValue(m, defs[i].dataset, defs[i].metric);
+        var v = paretoMetricValue(m, defs[i].dataset, defs[i].metric);
         if (!Number.isFinite(v)) { ok = false; break; }
         if (defs[i].dataset === "delta") v = Math.abs(v);
         pt[defs[i].code] = v;
       }
-      if (ok) pts.push(pt);
+      if (ok) {
+        if (isClassification()) pt.formulaOriginal = m.descriptors.map(function (d, i) { return "d" + (i + 1) + " = " + d.original; }).join("; ");
+        pts.push(pt);
+      }
     });
     return { defs: defs, pts: pts };
   }
 
   function paretoComputed() {
     return paretoCollectPoints(paretoCurrentAxisDefs());
+  }
+
+  function paretoMetricValue(model, dataset, metric) {
+    if (!isClassification()) return Core.metricValue(model, dataset, metric);
+    if (!classSvm.enabled) return NaN;
+    var summary = classSvm.results.get(model.rank), key = metric.slice(4);
+    var train = SVMEngine.metric(summary, "svm-train-" + key);
+    var verify = SVMEngine.metric(summary, "svm-verify-" + key);
+    if (dataset === "delta") return train === null || verify === null ? NaN : train - verify;
+    var value = dataset === "verify" ? verify : train;
+    return value === null ? NaN : value;
   }
 
   // Non-dominated (Pareto-optimal) set for the chosen "better" directions.
@@ -3787,7 +3891,7 @@
     var label = def.dataset === "delta"
       ? "|Δ" + I18N.t(def.label) + "|"
       : I18N.t(def.label);
-    return label + " (" + paretoDatasetLabel(def.dataset) + ") " +
+    return (isClassification() ? "SVM " : "") + label + " (" + paretoDatasetLabel(def.dataset) + ") " +
       (def.minimize ? "↓" : "↑");
   }
 
@@ -3995,7 +4099,8 @@
       entries.push({ m: p.m, box: box });
       tr.appendChild(el("td", "num", String(p.rank)));
       var fcTd = el("td", "formula-cell");
-      setFormulaContent(fcTd, p.m.formulaOriginal);
+      if (isClassification()) fcTd.textContent = p.formulaOriginal;
+      else setFormulaContent(fcTd, p.m.formulaOriginal);
       tr.appendChild(fcTd);
       defs.forEach(function (d) {
         tr.appendChild(el("td", "num", fmt(p[d.code], 4)));
@@ -4942,6 +5047,13 @@
   function renderPareto() {
     var res = state.result;
     if (!res) return;
+    coerceParetoAxes();
+    var note = $("#pareto-svm-note");
+    if (note) {
+      note.hidden = !isClassification();
+      if (isClassification()) note.textContent = I18N.t("svmParetoNote") + " " + I18N.format("svmProgress", {
+        completed: classSvm.completed, total: classSvm.total, failed: classSvm.failed });
+    }
     if (state.paretoMode === "3d") { renderPareto3D(); return; }
     var computed = paretoComputed();
     var defs = computed.defs; // x, y
@@ -5447,6 +5559,11 @@
   }
 
   function openDetail(rank) {
+    if (isClassification()) {
+      state.classRank = rank;
+      showClassification();
+      return;
+    }
     var res = state.result;
     var m = null;
     for (var i = 0; i < res.models.length; i++) {
@@ -6413,10 +6530,21 @@
     });
     $("#view-pareto-btn").addEventListener("click", function () {
       if (!state.result) return;
+      if (isClassification() && !classSvm.enabled) return;
       state.view = "pareto";
+      if (isClassification()) {
+        $("#view-classification").hidden = true;
+        $("#view-results").hidden = false;
+        $("#kpi-strip").hidden = true;
+        $("#warning").hidden = true;
+        $("#empty-state").hidden = true;
+        setNavState(true);
+        renderFilterSummary();
+      }
       renderControls();
       renderPareto();
     });
+    $("#view-classification-btn").addEventListener("click", showClassification);
     $("#view-compare-btn").addEventListener("click", function () {
       if (!state.result) return;
       state.view = "compare";

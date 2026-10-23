@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import vm from "node:vm";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -76,3 +77,20 @@ try {
 } finally { multiNative.free(); }
 assert.ok(Engine.boundary(multiFit.fit, [[-4, 4], [-4, 4]], 48).segments.length > 0);
 console.log("PASS all six pairwise decision functions and voting agree with native four-class LIBSVM");
+
+// Evaluate the exported numeric expressions as an independent deployment check.
+for (const fit of [known, trained.fit, multiFit.fit]) {
+  const text = Engine.formulaText(fit, [{ original: "x" }, { original: "y" }], ["A", "B", "C", "D"]);
+  const expressions = text.split("\n").filter(line => /^f_.*\(d1,d2\) = /.test(line)).map(line => line.split(" = ")[1]);
+  const evaluate = Engine.decisionFunction(fit);
+  for (const point of [[0, 0], [1.3, -2.1], [-.5, .7]]) {
+    const z = Engine.transform(point, fit.scaler);
+    expressions.forEach((expression, i) => {
+      const value = vm.runInNewContext(expression.replaceAll("exp(", "Math.exp(").replaceAll("^2", "**2"), { z1: z[0], z2: z[1] });
+      assert.ok(Math.abs(value - evaluate(point).values[i]) < 1e-12);
+    });
+  }
+  assert.ok(text.includes("0 = \"A\""));
+  assert.ok(text.includes(evaluate.labels.join(", ")));
+}
+console.log("PASS exported binary/multiclass formulas reproduce decision values and retain class mapping and tie order");

@@ -23,6 +23,10 @@ import { regressionEntries, multiTaskEntries, classificationEntries, classificat
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SVM_FIT = {
+  serialized: "svm_type c_svc\nkernel_type rbf\ngamma 0.5\nnr_class 2\ntotal_sv 2\nrho 0.2\nlabel 0 1\nnr_sv 1 1\nSV\n2 1:0 2:0\n-1 1:1 2:0\n",
+  scaler: { units: [1, 1], means: [0, 0], scales: [1, 1] }, cost: 1, gamma: .5, complexity: 3,
+};
 
 let failures = 0;
 function check(cond, label) {
@@ -154,6 +158,7 @@ function bootApp() {
   const window = {
     document,
     localStorage,
+    navigator: { clipboard: { writeText(text) { window.__clipboardText = text; return Promise.resolve(); } } },
     getComputedStyle: () => ({ getPropertyValue: () => "" }),
     matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
     addEventListener: () => {},
@@ -200,6 +205,7 @@ function bootApp() {
     '  classificationGeometry: classificationGeometry, buildClassThumb: buildClassThumb,',
     '  classGeometryCache: classGeometryCache,',
     '  classSvm: classSvm, sortedClassModels: sortedClassModels,',
+    '  paretoComputed: paretoComputed, paretoSplit: paretoSplit, applyModelState: applyModelState,',
     '  saveVerificationLabels: saveVerificationLabels,',
     '};\n',
   ].join("\n");
@@ -208,7 +214,7 @@ function bootApp() {
     // eslint-disable-next-line no-new-func
     const fn = new Function(
       "window", "document", "self", "localStorage", "console", "setTimeout",
-      "clearTimeout", "URL", "Blob", "File", "FileReader", "echarts", "Worker", "getComputedStyle",
+      "clearTimeout", "URL", "Blob", "File", "FileReader", "echarts", "Worker", "getComputedStyle", "navigator",
       code + "\n//# sourceURL=" + name
     );
     const testConsole = { ...console, warn(...args) {
@@ -216,7 +222,7 @@ function bootApp() {
     } };
     fn(window, document, window, localStorage, testConsole, window.setTimeout,
       window.clearTimeout, window.URL, window.Blob, window.File,
-      window.FileReader, window.echarts, window.Worker, window.getComputedStyle);
+      window.FileReader, window.echarts, window.Worker, window.getComputedStyle, window.navigator);
   };
 
   // Same order as index.html.
@@ -722,7 +728,7 @@ attempt("RBF-SVM: opt-in UI, scores, sorting, cancellation and run/label invalid
   check(toggle && !toggle.checked && workers.length === 0, "SVM: disabled by default with no background worker");
   toggle.checked = true; toggle.dispatch("change");
   check(svmApp.classSvm.enabled && workers.length === 1 && workers[0].sent[0].type === "start", "SVM: enabling starts all-model training");
-  const score = (rank, train, verify) => ({ rank, status: "ready", fit: { serialized: "test-model", cost: 1, gamma: .5 },
+  const score = (rank, train, verify) => ({ rank, status: "ready", fit: SVM_FIT,
     train: { n: 6, correct: train * 6, accuracy: train, balancedAccuracy: train, macroF1: train },
     verify: { n: 1, correct: verify, accuracy: verify, balancedAccuracy: verify, macroF1: verify } });
   workers[0].emit({ type: "model", completed: 1, summary: score(1, 1, 0) });
@@ -735,6 +741,77 @@ attempt("RBF-SVM: opt-in UI, scores, sorting, cancellation and run/label invalid
   batchWorker.emit({ type: "model", completed: 2, summary: score(2, .5, 1) });
   batchWorker.emit({ type: "done" });
   check(all(root()).some((n) => n.textContent.includes("100.00%")), "SVM: trained scores are displayed on model cards/detail");
+  const formula = find(n => n.className === "svm-formula");
+  check(formula && all(formula).some(n => n.tagName === "PRE" && n.textContent.includes("f_0_1(d1,d2) =") && n.textContent.includes('0 = "low"')),
+    "SVM formula: displays numeric decision function, scaling and original class mapping");
+  const formulaCode = all(formula).find(n => n.tagName === "PRE");
+  const zoomIn = all(formula).find(n => n.tagName === "BUTTON" && n.textContent === svmWindow.I18N.t("svmZoomIn"));
+  const zoomOut = all(formula).find(n => n.tagName === "BUTTON" && n.textContent === svmWindow.I18N.t("svmZoomOut"));
+  const zoomReset = all(formula).find(n => n.tagName === "BUTTON" && n.textContent === svmWindow.I18N.t("svmZoomReset"));
+  const formulaBeforeZoom = formulaCode.textContent;
+  zoomIn.click();
+  check(formulaCode.style.fontSize === "16.25px" && all(formula).some(n => n.textContent === "125%"),
+    "SVM formula: zoom increases text size and shows the current percentage");
+  for (let i = 0; i < 8; i++) zoomIn.click();
+  check(zoomIn.disabled && formulaCode.style.fontSize === "26px", "SVM formula: zoom stops at 200%");
+  for (let i = 0; i < 8; i++) zoomOut.click();
+  check(zoomOut.disabled && formulaCode.style.fontSize === "9.75px", "SVM formula: zoom stops at 75%");
+  zoomReset.click();
+  check(zoomReset.disabled && formulaCode.style.fontSize === "13px" && formulaCode.textContent === formulaBeforeZoom,
+    "SVM formula: reset restores 100% without changing coefficients");
+  all(formula).find(n => n.tagName === "BUTTON" && n.textContent === svmWindow.I18N.t("svmExportFormula")).click();
+  check(svmWindow.__lastBlob.parts[0].includes("z1 =") && svmWindow.__lastBlob.parts[0].includes("Boundary: f_0_1 = 0"),
+    "SVM formula: text download includes preprocessing and class rule");
+  all(formula).find(n => n.tagName === "BUTTON" && n.textContent === svmWindow.I18N.t("svmCopyFormula")).click();
+  check(svmWindow.__clipboardText === svmWindow.__lastBlob.parts[0], "SVM formula: copy and download contain the same complete formula");
+
+  check(!svmReg("#view-pareto-btn").disabled, "SVM Pareto: enabling SVM unlocks existing navigation");
+  svmReg("#view-pareto-btn").click();
+  check(svmApp.state.view === "pareto" && root().hidden && !svmReg("#view-results").hidden,
+    "SVM Pareto: navigation reveals the shared Pareto workspace");
+  check(all(svmReg("#pareto-x")).filter(n => n.tagName === "OPTION").every(n => n.value.includes("|svm-")),
+    "SVM Pareto: axes expose SVM scores instead of regression errors");
+  let points = svmApp.paretoComputed();
+  check(points.defs.every(d => !d.minimize) && points.pts[0].x === 1 && points.pts[1].y === 1,
+    "SVM Pareto: training and validation scores use maximize directions");
+  svmApp.exportParetoCsv();
+  let csv = svmWindow.__lastBlob.parts[0];
+  check(csv.includes("svm-balancedAccuracy") && csv.includes("d1 =") && csv.trim().split("\r\n").length === 3,
+    "SVM Pareto: export includes both candidates, descriptors and selected metric identities");
+  check(all(svmReg("#pareto-table-wrap")).filter(n => n.tagName === "TR").length === 3,
+    "SVM Pareto: competing train/validation scores retain both nondominated candidates");
+  const dominated = score(3, .2, .1);
+  const failed = { rank: 4, status: "failed", error: "svmInvalidCoordinates" };
+  svmApp.state.result.models.push({ ...svmApp.state.result.models[0], rank: 3 }, { ...svmApp.state.result.models[0], rank: 4 });
+  svmApp.classSvm.results.set(3, dominated); svmApp.classSvm.results.set(4, failed);
+  svmApp.renderPareto();
+  check(svmApp.paretoComputed().pts.length === 3 && all(svmReg("#pareto-table-wrap")).filter(n => n.tagName === "TR").length === 3,
+    "SVM Pareto: failed fits are omitted and dominated scores stay off the front");
+  svmApp.state.filter = { active: true, numeric: { "svm-accuracy-train": { min: .8, max: null } } };
+  svmApp.renderPareto();
+  check(svmApp.paretoSplit(svmApp.paretoComputed().pts).ghosts.length === 2,
+    "SVM Pareto: shared numeric filter reads SVM scores and ghosts failing candidates");
+  svmApp.state.filter = { active: false, numeric: {} };
+  svmApp.applyModelState(1, { excluded: true });
+  svmApp.exportParetoCsv();
+  check(svmWindow.__lastBlob.parts[0].includes(",0,1"), "SVM Pareto: excluded candidates export as ghosts, not frontier members");
+  svmApp.applyModelState(1, { excluded: false });
+  svmReg("#pareto-mode-btn").click();
+  points = svmApp.paretoComputed();
+  check(points.defs.length === 3 && points.pts.every(p => Number.isFinite(p.z)), "SVM Pareto: 3D uses the same completed fit scores");
+  svmApp.state.paretoX = { dataset: "delta", metric: "svm-accuracy" };
+  svmApp.renderPareto();
+  points = svmApp.paretoComputed();
+  check(points.defs[0].minimize && points.pts.find(p => p.rank === 2).x === .5, "SVM Pareto: absolute train-validation gap is minimized");
+  svmApp.state.filter = { active: true, numeric: { "svm-accuracy-delta": { min: null, max: .2 } } };
+  check(svmApp.paretoSplit(points.pts).pts.length === 1,
+    "SVM Pareto: gap filters use absolute values even when verification beats training");
+  svmApp.state.filter = { active: false, numeric: {} };
+  svmApp.state.result.models.splice(2); svmApp.classSvm.results.delete(3); svmApp.classSvm.results.delete(4);
+  svmApp.state.paretoMode = "2d";
+  svmApp.openDetail(2);
+  check(svmApp.state.view === "classification" && svmApp.state.classRank === 2 && !root().hidden && svmReg("#view-results").hidden,
+    "SVM Pareto: inspecting a point returns to its classification detail and formula");
   svmApp.state.classSort = "svm-verify-accuracy"; svmApp.renderClassification();
   check(svmApp.sortedClassModels()[0].rank === 2, "SVM: validation-score ordering is descending and independent of official rank");
   svmApp.state.classView = "table"; svmApp.renderClassification();
@@ -769,6 +846,33 @@ attempt("RBF-SVM: opt-in UI, scores, sorting, cancellation and run/label invalid
   svmApp.classSvm.start(svmApp.state.texts, 2, {});
   svmReg("#btn-reset").dispatch("click");
   check(workers.at(-1).stopped && !svmApp.classSvm.enabled && svmApp.classSvm.results.size === 0, "SVM: resetting a run terminates fitting and clears derived results");
+});
+
+attempt("SVM Pareto: train-only axes, partial fits and invalidation", () => {
+  const { app: a, reg: r, window: w } = bootApp();
+  a.processTexts({ ...CLASS_TEXTS, verifylabels: undefined });
+  a.state.paretoX = { dataset: "verify", metric: "rmse" };
+  a.classSvm.start(a.state.texts, 2, {});
+  r("#view-pareto-btn").click();
+  check(a.paretoComputed().pts.length === 0, "SVM Pareto: a fresh job never reuses previous scores");
+  a.state.paretoMode = "3d"; a.renderControls(); a.renderPareto();
+  let points = a.paretoComputed();
+  check(points.defs.length === 3 && points.defs.every(d => d.dataset === "train") && new Set(points.defs.map(d => d.metric)).size === 3,
+    "SVM Pareto: unlabeled verification falls back to three distinct training axes");
+  const worker = w.__workers.at(-1);
+  worker.onmessage({ data: { id: a.classSvm.id, type: "model", completed: 1, summary: {
+    rank: 1, status: "ready", fit: SVM_FIT, verify: null,
+    train: { n: 6, correct: 6, accuracy: 1, balancedAccuracy: 1, macroF1: 1 },
+  } } });
+  a.classSvm.stop();
+  check(a.paretoComputed().pts.length === 1 && r("#pareto-count").textContent.includes("1"),
+    "SVM Pareto: cancellation keeps completed scores on a partial front");
+  a.classSvm.start(a.state.texts, 2, {});
+  check(a.paretoComputed().pts.length === 0 && r("#pareto-count").textContent.includes("0"),
+    "SVM Pareto: retraining clears the visible old front immediately");
+  a.classSvm.disable();
+  check(a.state.view === "classification" && r("#view-results").hidden && r("#view-pareto-btn").disabled,
+    "SVM Pareto: disabling returns to classification and removes stale access");
 });
 
 attempt("Integration: SVM and post-evaluation workers coexist and invalidate on reload", () => {
@@ -863,7 +967,7 @@ for (const [label, entries, dim] of [
     app.classSvm.start(app.state.texts, app.state.result.models.length, {});
     const worker = window.__workers.at(-1), rank = app.state.result.models[0].rank;
     worker.onmessage({ data: { id: app.classSvm.id, type: "model", completed: 1, summary: {
-      rank, status: "ready", fit: { serialized: "fixture", cost: 1, gamma: .5, complexity: 3 },
+      rank, status: "ready", fit: SVM_FIT,
       train: { n: 6, correct: 6, accuracy: 1, balancedAccuracy: 1, macroF1: 1 },
       verify: { n: 1, correct: 1, accuracy: 1, balancedAccuracy: 1, macroF1: 1 },
     } } });

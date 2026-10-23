@@ -147,6 +147,7 @@
 .class-model-header h2 { margin: 0; font-size: 22px; }
 .class-model-score { font-size: 12px; color: var(--color-text-soft); }
 .class-formula { font-size: 13px; margin: 8px 0; }
+.svm-formula .class-formula { max-height: 24rem; overflow: auto; }
 .class-detail > .class-controls { gap: 10px; margin: 16px 0 8px; }
 .class-chart-caption { border-top: 1px solid var(--color-border); padding-top: 8px; }
 .class-chart-caption .class-note { font-size: 12px; margin: 3px 0; }

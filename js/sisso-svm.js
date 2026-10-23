@@ -175,6 +175,15 @@
       for (var c = 1; c < n; c++) if (votes[c] > votes[winner]) winner = c;
       return { values: values, predicted: labels[winner] };
     }
+    evaluate.equations = [];
+    for (var a = 0; a < n; a++) for (var b = a + 1; b < n; b++) {
+      var terms = [];
+      for (var p = starts[a]; p < starts[a] + counts[a]; p++) terms.push({ coefficient: coefficients[p][b - 1], vector: vectors[p] });
+      for (var q = starts[b]; q < starts[b] + counts[b]; q++) terms.push({ coefficient: coefficients[q][a], vector: vectors[q] });
+      evaluate.equations.push({ labels: [labels[a], labels[b]], rho: rho[evaluate.equations.length], terms: terms });
+    }
+    evaluate.gamma = gamma;
+    evaluate.labels = labels;
     evaluate.pairs = pairs;
     return evaluate;
   }
@@ -250,6 +259,23 @@
     return { segments: segments, bounds: bounds, resolution: resolution, kind: "decision-zero", pairs: evaluate.pairs };
   }
 
+  function formulaText(fit, descriptors, classes) {
+    var decision = decisionFunction(fit), lines = [];
+    (descriptors || []).forEach(function (d, i) { lines.push("d" + (i + 1) + " = " + d.original); });
+    for (var d = 0; d < 2; d++) lines.push("z" + (d + 1) + " = (d" + (d + 1) + " / (" + fit.scaler.units[d] + ") - (" + fit.scaler.means[d] + ")) / (" + fit.scaler.scales[d] + ")");
+    lines.push("gamma = " + decision.gamma);
+    lines.push("Class IDs (zero-based): " + decision.labels.map(function (id) { return id + " = " + (classes && classes[id] ? JSON.stringify(classes[id]) : "Category " + (id + 1)); }).join(", "));
+    decision.equations.forEach(function (eq) {
+      var name = "f_" + eq.labels.join("_");
+      lines.push("", name + "(d1,d2) = " + eq.terms.map(function (t) {
+        return "(" + t.coefficient + ") * exp(-(" + decision.gamma + ") * ((z1 - (" + t.vector[0] + "))^2 + (z2 - (" + t.vector[1] + "))^2))";
+      }).join(" + ") + " - (" + eq.rho + ")");
+      lines.push(name + " > 0: vote for " + eq.labels[0] + "; otherwise: vote for " + eq.labels[1] + ". Boundary: " + name + " = 0.");
+    });
+    lines.push("", "Prediction: most votes wins; tied votes use this class order: " + decision.labels.join(", ") + ".");
+    return lines.join("\n");
+  }
+
   function metric(summary, key) {
     var m = /^svm-(train|verify)-(accuracy|balancedAccuracy|macroF1)$/.exec(key);
     return m && summary && summary.status === "ready" && summary[m[1]] ? summary[m[1]][m[2]] : null;
@@ -263,5 +289,5 @@
   }
 
   return { options: options, trainModel: trainModel, measure: measure, transform: transform,
-    domain: domain, boundary: boundary, decisionFunction: decisionFunction, metric: metric, compare: compare, metrics: METRICS };
+    domain: domain, boundary: boundary, decisionFunction: decisionFunction, formulaText: formulaText, metric: metric, compare: compare, metrics: METRICS };
 });

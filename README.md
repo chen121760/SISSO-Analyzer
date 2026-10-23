@@ -214,6 +214,22 @@ coordinates suppress its verification scores instead of silently dropping rows.
 
 Fits and scores are held for the current analysis only. Turning SVM off,
 loading another run or refreshing clears them; enabling SVM is always manual.
+After training, expand **Full RBF-SVM decision formula** in a model's detail to
+view, copy or export its numeric decision functions. The text includes the SISSO
+descriptors, training-only standardization, every support-vector term, class
+mapping and multiclass voting/tie rules.
+The formula viewer scrolls and supports 75–200% text zoom with a reset button;
+zoom changes the display only and preserves the copied/exported coefficients.
+
+While SVM is enabled, **Pareto front** supports training/verification accuracy,
+balanced accuracy and Macro-F1 in 2D or 3D, as well as absolute train–verification
+gaps. Scores are maximized and absolute gaps minimized. Numeric filters, excluded
+models and CSV export use the same scores as the plot; incomplete or failed
+scores are omitted. Training or cancelled jobs may show a partial front. Click
+a point or row to return to that candidate's classification detail. Verification
+axes require complete labels. Selecting models on verification scores still
+requires a held-out test for final performance claims.
+
 Serve this folder over HTTP as described below so the local worker can load.
 The pinned browser library and licenses are in [`js/vendor`](js/vendor/README.md);
 no CDN, backend or package installation is needed.
