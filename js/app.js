@@ -13,6 +13,8 @@
   var echarts = window.echarts;
   var HealthCheck = window.HealthCheck;
   var Classification = window.SissoClassification;
+  var SVMEngine = window.SissoSVM;
+  var PlusPlus = window.SissoPlusPlus;
 
   // ---------------------------------------------------------------------------
   // State
@@ -20,6 +22,8 @@
   var state = {
     files: {},      // role -> {name, file}
     inputType: null,
+    cppFiles: null,
+    cppDimension: null,
     texts: {},      // role -> raw text (captured at analyze time)
     result: null,   // pipeline result
     classChart: null,
@@ -83,6 +87,20 @@
   var COLS_PREF_KEY = "sisso-table-cols";
   var classGeometryCache = new Map();
   var classThumbObserver = null;
+  var classSvmBoundaryKey = null;
+  var classSvmProgressTime = 0;
+  var classSvmDraft = null;
+  var classSvm = window.SissoSVMController.create({
+    change: function (kind, summary) {
+      if (!isClassification()) return;
+      if (kind === "start" || kind === "disabled") classSvmDraft = null;
+      if (kind === "model") {
+        updateClassSvmScores(summary);
+        if (Date.now() - classSvmProgressTime >= 400) updateClassSvmProgress();
+      } else renderClassification();
+    },
+    boundary: function (key) { if (key === classSvmBoundaryKey) drawClassSvmBoundary(); },
+  });
   var errorHistCache = null; // last histogram layout (for bar-width refit on resize)
 
   // ---------------------------------------------------------------------------
@@ -250,6 +268,8 @@
       match: function (n) { return /^desc_D00[12]\.dat$/i.test(n); } },
     { role: "classhull", i18n: "fileClassHull", optional: true,
       match: function (n) { return /^convex2D_hull$/i.test(n); } },
+    { role: "sissopp", i18n: "fileSissoPlusPlus", optional: true,
+      match: function (n) { return /^sissopp-import\.json$/i.test(n); } },
   ];
 
   // Pareto metrics: label key + whether smaller-is-better.
@@ -371,7 +391,7 @@
 
   function defaultRoleFileName(role) {
     var names = { train: "train.dat", verify: "verify.dat", uspace: "Uspace.expressions",
-      coeff: "top1D00_coeff", top: "top1D00", sissoin: "SISSO.in", sissoout: "SISSO.out" };
+      coeff: "top1D00_coeff", top: "top1D00", sissoin: "SISSO.in", sissoout: "SISSO.out", sissopp: "sissopp-import.json" };
     return names[role] || (role + ".txt");
   }
 
@@ -403,6 +423,7 @@
       // favourite / excluded per model (compact; empty for untouched models,
       // absent in projects saved before this feature existed)
       modelStates: Core.modelStatesToJSON(res.modelStates),
+      evaluation: state.evaluation || null,
     };
   }
 
@@ -449,6 +470,8 @@
     var roleTexts = {};
     var ok = true;
     state.files = {};
+    state.cppFiles = null;
+    state.cppDimension = null;
     FILE_ROLES.forEach(function (r) {
       var rec = p.files[r.role];
       if (rec && typeof rec.text === "string") {
@@ -463,7 +486,7 @@
     if (!ok) { toast(I18N.t("errProject")); return; }
     state.projectId = p.id || null;
     try {
-      processTexts(roleTexts, { modelStates: p && p.modelStates });
+      processTexts(roleTexts, { modelStates: p && p.modelStates, evaluation: p && p.evaluation });
       if (!silent) toast(I18N.t("loadedOk"));
     } catch (err) {
       console.error(err);
@@ -983,6 +1006,11 @@
   }
 
   function hasAllRequired() {
+    if (state.cppFiles) {
+      return state.cppFiles.some(function (e) { return /^sisso\.json$/i.test(basename(e.path)); }) &&
+        state.cppFiles.some(function (e) { return /\.csv$/i.test(e.path); }) &&
+        state.cppFiles.some(function (e) { var m = PlusPlus.modelName(e.path); return m && m[1].toLowerCase() === "train"; });
+    }
     return ["train", "uspace", "top"].every(function (r) { return state.files[r]; }) &&
       !!(state.files.coeff || (state.inputType === 2 && state.files.sissoin));
   }
@@ -1016,6 +1044,8 @@
     setTimeout(function () {
       try {
         state.files = {};
+        state.cppFiles = null;
+        state.cppDimension = null;
         DEMO_DEFS.forEach(function (def) {
           if (data[def.key] === undefined) return;
           state.files[def.role] = {
@@ -1209,6 +1239,10 @@
   async function ingest(items) {
     var files = [];
     var candidates = [];
+    var cppCandidates = [];
+    function collectCpp(name, file, path) {
+      if (PlusPlus && PlusPlus.isCandidate(name)) cppCandidates.push({ path: String(path || name).replace(/\\/g, "/"), file: file });
+    }
     function offer(role, name, file, path) {
       if (!role) return;
       path = String(path || name).replace(/\\/g, "/").replace(/^\/+/, "");
@@ -1232,6 +1266,7 @@
         try {
           var expanded = await expandArchive(f);
           expanded.forEach(function (e) {
+            collectCpp(e.name, e.file, e.path);
             var r = classify(e.name);
             offer(r, e.name, e.file, e.path);
           });
@@ -1245,8 +1280,24 @@
         continue;
       }
       var role2 = classify(name);
+      collectCpp(name, f, f.webkitRelativePath || f.sissoPath);
       offer(role2, name, f, f.webkitRelativePath || f.sissoPath);
     }
+    var nativeUpload = candidates.some(function (c) { return c.role === "train"; });
+    // A native run can contain notes or nested examples named sisso.json.
+    // Its train.dat keeps that upload on the established SISSO import path.
+    var newCpp = !nativeUpload && cppCandidates.some(function (e) { return /^sisso\.json$/i.test(basename(e.path)) || !!PlusPlus.modelName(e.path); });
+    if (newCpp || state.cppFiles && cppCandidates.length && !nativeUpload) {
+      var cppByPath = new Map((state.cppFiles || []).map(function (e) { return [e.path, e]; }));
+      cppCandidates.forEach(function (e) { cppByPath.set(e.path, e); });
+      state.cppFiles = Array.from(cppByPath.values());
+      state.files = {};
+      state.inputType = null;
+      clearHealthPanels();
+      renderFileList(); renderRunButton();
+      return;
+    }
+    if (nativeUpload) { state.cppFiles = null; state.cppDimension = null; }
     var runRoots = candidates.filter(function (c) { return c.role === "train"; }).sort(function (a, b) {
       return a.depth - b.depth || a.path.localeCompare(b.path);
     }).map(function (c) { return c.path.slice(0, c.path.lastIndexOf("/") + 1); });
@@ -1266,8 +1317,36 @@
   function renderFileList() {
     var list = $("#file-list");
     list.innerHTML = "";
+    var cppOptions = $("#sissopp-options");
+    if (cppOptions) cppOptions.hidden = !state.cppFiles;
+    var nativeNote = $("[data-i18n='verifyOptionalNote']");
+    if (nativeNote) nativeNote.hidden = !!state.cppFiles;
+    if (state.cppFiles) {
+      var cppEntries = state.cppFiles;
+      try { cppEntries = PlusPlus.selectRun(cppEntries).entries; } catch (_) { /* Partial upload; report on Analyze. */ }
+      var dimensions = Array.from(new Set(cppEntries.map(function (e) { var m = PlusPlus.modelName(e.path); return m && m[1].toLowerCase() === "train" ? Number(m[2]) : null; }).filter(function (d) { return d !== null; }))).sort(function (a, b) { return a - b; });
+      if (!dimensions.includes(state.cppDimension)) state.cppDimension = dimensions[dimensions.length - 1] || null;
+      var dimensionSelect = $("#sissopp-dimension");
+      if (dimensionSelect) {
+        dimensionSelect.innerHTML = "";
+        dimensions.forEach(function (d) { var option = el("option", "", d + "D"); option.value = String(d); dimensionSelect.appendChild(option); });
+        dimensionSelect.value = String(state.cppDimension || "");
+      }
+      [
+        ["sisso.json", cppEntries.filter(function (e) { return /^sisso\.json$/i.test(basename(e.path)); }).length],
+        [I18N.t("sissoppData"), state.cppFiles.filter(function (e) { return /\.csv$/i.test(e.path); }).length],
+        [I18N.t("sissoppModels"), cppEntries.filter(function (e) { return !!PlusPlus.modelName(e.path); }).length],
+      ].forEach(function (pair) {
+        var item = el("li", "file-item");
+        item.appendChild(el("span", "file-item__dot " + (pair[1] ? "is-ok" : "is-missing")));
+        item.appendChild(el("span", "file-item__name", pair[0] + (pair[1] ? " · " + pair[1] : "")));
+        list.appendChild(item);
+      });
+      return;
+    }
     var classRun = isClassification() || state.inputType === 2;
     FILE_ROLES.forEach(function (r) {
+      if (r.role === "sissopp") return;
       if (["trainlabels", "verifylabels", "classdesc", "classhull"].includes(r.role) && !classRun && !state.files[r.role]) return;
       var required = r.role === "coeff" ? !classRun : r.role === "sissoin" ? classRun : !!r.required;
       var item = el("li", "file-item");
@@ -1386,16 +1465,28 @@
 
     try {
       var roleTexts = {};
-      roleTexts.train = await readFileAsText(state.files.train.file);
-      roleTexts.uspace = await readFileAsText(state.files.uspace.file);
-      if (state.files.coeff) roleTexts.coeff = await readFileAsText(state.files.coeff.file);
-      roleTexts.top = await readFileAsText(state.files.top.file);
-      if (state.files.verify) roleTexts.verify = await readFileAsText(state.files.verify.file);
-      if (state.files.sissoin) roleTexts.sissoin = await readFileAsText(state.files.sissoin.file);
-      if (state.files.sissoout) roleTexts.sissoout = await readFileAsText(state.files.sissoout.file);
-      for (var role of ["trainlabels", "verifylabels", "classdesc", "classhull"]) {
-        if (state.files[role]) roleTexts[role] = await readFileAsText(state.files[role].file);
+      if (state.cppFiles) {
+        var cppInput = await Promise.all(state.cppFiles.map(async function (e) {
+          var modelFile = PlusPlus.modelName(e.path);
+          return { path: e.path, text: modelFile && Number(modelFile[2]) !== state.cppDimension ? "" : await readFileAsText(e.file) };
+        }));
+        roleTexts = PlusPlus.prepare(cppInput, state.cppDimension).texts;
+        state.files = {};
+        Object.keys(roleTexts).forEach(function (role) { state.files[role] = { name: defaultRoleFileName(role), file: new File([roleTexts[role]], defaultRoleFileName(role)) }; });
+      } else {
+        roleTexts.train = await readFileAsText(state.files.train.file);
+        roleTexts.uspace = await readFileAsText(state.files.uspace.file);
+        if (state.files.coeff) roleTexts.coeff = await readFileAsText(state.files.coeff.file);
+        roleTexts.top = await readFileAsText(state.files.top.file);
+        if (state.files.verify) roleTexts.verify = await readFileAsText(state.files.verify.file);
+        if (state.files.sissoin) roleTexts.sissoin = await readFileAsText(state.files.sissoin.file);
+        if (state.files.sissoout) roleTexts.sissoout = await readFileAsText(state.files.sissoout.file);
+        for (var role of ["trainlabels", "verifylabels", "classdesc", "classhull"]) {
+          if (state.files[role]) roleTexts[role] = await readFileAsText(state.files[role].file);
+        }
+        if (state.files.sissopp) roleTexts.sissopp = await readFileAsText(state.files.sissopp.file);
       }
+      var cppMeta = PlusPlus ? PlusPlus.metadata(roleTexts.sissopp) : null;
 
       // a fresh analyze run starts a brand-new project identity
       state.projectId = null;
@@ -1421,6 +1512,8 @@
         sissoOut: roleTexts.sissoout,
         trainlabels: roleTexts.trainlabels, verifylabels: roleTexts.verifylabels,
         classdesc: roleTexts.classdesc, classhull: roleTexts.classhull,
+        verifyTaskIndices: cppMeta ? cppMeta.verifyTaskIndices : undefined,
+        logRegression: !!(cppMeta && cppMeta.logRegression),
       });
       if (state.health.level === "error") {
         renderHealthReport(state.health, $("#health-block"));
@@ -1446,8 +1539,12 @@
   // saved project. `init` may carry { modelStates } so favourites/exclusions
   // saved inside a project JSON are restored onto the freshly rebuilt models.
   function processTexts(roleTexts, init) {
+    if (window.SissoEvaluationUI) window.SissoEvaluationUI.close();
+    state.evaluation = init && init.evaluation || null;
+    classSvm.reset(); classSvmBoundaryKey = null; classSvmDraft = null;
     if (Classification && Classification.isClassification(roleTexts)) {
       var classified = Classification.runPipeline(roleTexts);
+      if (PlusPlus) PlusPlus.decorate(classified, roleTexts.sissopp);
       classified.modelStates = Core.normalizeModelStates(init && init.modelStates,
         new Set(classified.models.map(function (m) { return m.rank; })));
       state.result = classified;
@@ -1489,6 +1586,8 @@
     // SISSO.out, and the coefficient file only stores the interleaved blocks.
     if (roleTexts.sissoin !== undefined) files.sissoInText = roleTexts.sissoin;
     if (roleTexts.sissoout !== undefined) files.sissoOutText = roleTexts.sissoout;
+    var cppMeta = PlusPlus ? PlusPlus.metadata(roleTexts.sissopp) : null;
+    if (cppMeta) { files.verifyTaskIndices = cppMeta.verifyTaskIndices; files.logRegression = cppMeta.logRegression; }
 
     // keep the raw texts so the project can be saved / re-exported later
     state.texts = {};
@@ -1497,6 +1596,7 @@
     });
 
     state.result = Core.runPipeline(files);
+    if (PlusPlus) PlusPlus.decorate(state.result, roleTexts.sissopp);
     // Single source of truth for per-model favourite / excluded flags. A saved
     // project may bring one along (pruned to the ranks that still exist);
     // otherwise every model starts unflagged.
@@ -1585,6 +1685,8 @@
     return !!(state.result && state.result.taskType === "classification");
   }
 
+  function classificationScore(value) { return value === null || value === undefined ? "—" : String(value); }
+
   function classButton(text, action, disabled) {
     var b = el("button", "btn btn--secondary", text);
     b.type = "button";
@@ -1629,6 +1731,14 @@
 
   function saveVerificationLabels(labels) {
     var text = Classification.verificationLabelText(state.result, labels);
+    if (state.result.meta.sourceEngine === "SISSO++") {
+      // Keep project/worker labels aligned with the normalized input tables;
+      // the visible sample names and explicit label export use original IDs.
+      var importedIds = new Map(state.result.meta.sissoPlusPlus.sampleNames.map(function (pair) { return [pair[1], pair[0]]; }));
+      var labelDoc = JSON.parse(text);
+      labelDoc.rows.forEach(function (row) { row.id = importedIds.get(row.id); });
+      text = JSON.stringify(labelDoc);
+    }
     state.result.verify.labels = labels.slice();
     state.texts.verifylabels = text;
     state.files.verifylabels = { name: "verify_labels.json", file: null };
@@ -1636,6 +1746,7 @@
     state.classLabelDraft = null;
     classGeometryCache.clear();
     state.classDataset = Classification.hasVerificationLabels(state.result) ? "both" : "train";
+    if (classSvm.enabled) classSvm.start(state.texts, state.result.models.length, classSvm.config);
     renderClassification(); persistSession();
     document.getElementById("verification-label-open").focus();
     storeProjectLocally().then(function (saved) {
@@ -1808,6 +1919,155 @@
     return manager;
   }
 
+  function svmPercent(value) { return Number.isFinite(value) ? (value * 100).toFixed(2) + "%" : "—"; }
+
+  function classSvmScoreText(summary) {
+    if (!summary) return I18N.t("svmPending");
+    if (summary.status === "failed") return I18N.t("svmFailed");
+    return I18N.t("svmTrainShort") + " " + svmPercent(summary.train.accuracy) +
+      (summary.verify ? " · " + I18N.t("svmVerifyShort") + " " + svmPercent(summary.verify.accuracy) : "");
+  }
+
+  function updateClassSvmProgress() {
+    classSvmProgressTime = Date.now();
+    var status = document.getElementById("svm-status"), progress = document.getElementById("svm-progress");
+    if (status) status.textContent = I18N.format("svmProgress", { completed: classSvm.completed, total: classSvm.total, failed: classSvm.failed }) +
+      (classSvm.status === "running" ? " · " + I18N.t("svmTraining") : " · " + I18N.t("svmStatus_" + classSvm.status));
+    if (progress) { progress.max = classSvm.total || 1; progress.value = classSvm.completed; }
+  }
+
+  function fillClassSvmMetrics(container, summary) {
+    container.innerHTML = "";
+    if (!summary || summary.status === "failed") {
+      container.appendChild(el("p", "class-note" + (summary ? " class-label-error" : ""),
+        summary ? I18N.t("svmFailed") + ": " + I18N.t(summary.error) : I18N.t("svmPending")));
+      return;
+    }
+    var table = el("table", "class-table svm-metrics"), head = el("tr");
+    ["classificationDataset", "svmAccuracy", "svmBalancedAccuracy", "svmMacroF1", "svmCorrect"].forEach(function (key) {
+      head.appendChild(el("th", "", I18N.t(key)));
+    });
+    var thead = el("thead"); thead.appendChild(head); table.appendChild(thead);
+    var tbody = el("tbody");
+    ["train", "verify"].forEach(function (ds) {
+      if (ds === "verify" && !state.result.verify) return;
+      var row = el("tr"), score = summary[ds];
+      row.appendChild(el("th", "", I18N.t(ds === "train" ? "classTrain" : "classVerify")));
+      SVMEngine.metrics.forEach(function (key) { row.appendChild(el("td", "", svmPercent(score && score[key]))); });
+      row.appendChild(el("td", "", score ? score.correct + " / " + score.n : "—")); tbody.appendChild(row);
+    });
+    table.appendChild(tbody); container.appendChild(table);
+    container.appendChild(el("p", "class-note", "C = " + summary.fit.cost + " · γ = " + summary.fit.gamma.toPrecision(5) +
+      " · " + I18N.t("svmComplexity") + " " + (summary.fit.complexity || 3) + "/5 · " + I18N.t("svmScoreNote")));
+    if (summary.verifyIssue) container.appendChild(el("p", "class-note", I18N.t(summary.verifyIssue)));
+  }
+
+  function updateClassSvmScores(summary) {
+    var root = $("#view-classification");
+    root.querySelectorAll('[data-svm-rank="' + summary.rank + '"]').forEach(function (node) {
+      node.textContent = node.dataset.svmKey === "card" ? classSvmScoreText(summary) : svmPercent(SVMEngine.metric(summary, node.dataset.svmKey));
+      if (summary.status === "failed") node.title = I18N.t(summary.error);
+    });
+    if (summary.rank === state.classRank) {
+      var metrics = document.getElementById("svm-model-metrics");
+      if (metrics) fillClassSvmMetrics(metrics, summary);
+      requestClassSvmBoundary();
+    }
+  }
+
+  function buildClassSvmControls() {
+    var panel = el("section", "svm-panel"); panel.setAttribute("aria-label", I18N.t("svmTitle"));
+    var header = el("div", "svm-header"), label = el("label", "svm-switch");
+    var toggle = el("input"); toggle.type = "checkbox"; toggle.id = "svm-enable";
+    toggle.checked = classSvm.enabled; toggle.disabled = state.result.meta.sissoIn.descDim !== 2;
+    toggle.addEventListener("change", function () {
+      if (toggle.checked) classSvm.start(state.texts, state.result.models.length, classSvm.config);
+      else { if (state.classSort.indexOf("svm-") === 0) state.classSort = "rank"; classSvm.disable(); }
+    });
+    label.appendChild(toggle); label.appendChild(el("span", "", I18N.t("svmEnable"))); header.appendChild(label);
+    panel.appendChild(header);
+    panel.appendChild(el("p", "class-note", I18N.t(toggle.disabled ? "svmOnly2D" : "svmHelp")));
+    if (!classSvm.enabled) return panel;
+    if (!classSvmDraft) classSvmDraft = { cost: String(classSvm.config.cost), gamma: String(classSvm.config.gamma),
+      complexity: String(classSvm.config.complexity), dirty: false };
+    var controls = el("div", "svm-parameters");
+    var draftNote = el("p", "class-note", classSvmDraft.dirty ? I18N.t("svmNeedsRetrain") : I18N.t("svmComplexityHelp"));
+    function stage(key, value) { classSvmDraft[key] = value; classSvmDraft.dirty = true; draftNote.textContent = I18N.t("svmNeedsRetrain"); }
+    var complexityField = classSelect(I18N.t("svmComplexity"), [1, 2, 3, 4, 5].map(function (level) {
+      return [String(level), I18N.t("svmComplexity_" + level)];
+    }), classSvmDraft.complexity, function (value) { stage("complexity", value); });
+    var complexity = complexityField.lastChild; complexity.id = "svm-complexity";
+    complexity.disabled = classSvm.status === "running"; controls.appendChild(complexityField);
+    function inputField(caption, id, value, type) {
+      var field = el("label", "field"); field.appendChild(el("span", "field__label", caption));
+      var input = el("input", "input"); input.id = id; input.type = type; input.value = value;
+      input.disabled = classSvm.status === "running";
+      if (type === "number") { input.min = "0.000001"; input.max = "1000000"; input.step = "any"; }
+      input.addEventListener("input", function () { stage(id.slice(4), input.value); });
+      field.appendChild(input); controls.appendChild(field); return input;
+    }
+    var cost = inputField("C", "svm-cost", classSvmDraft.cost, "number");
+    var gamma = inputField(I18N.t("svmGamma"), "svm-gamma", classSvmDraft.gamma, "text");
+    var error = el("p", "class-label-error"); error.id = "svm-options-error"; error.setAttribute("role", "alert");
+    controls.appendChild(classButton(I18N.t(classSvm.status === "running" ? "svmStop" : "svmRetrain"), function () {
+      if (classSvm.status === "running") { classSvm.stop(); return; }
+      try {
+        var config = SVMEngine.options({ cost: cost.value.trim(), gamma: gamma.value.trim(), complexity: complexity.value });
+        classSvm.start(state.texts, state.result.models.length, config);
+      } catch (e) { error.textContent = I18N.t(e.message); cost.setAttribute("aria-describedby", error.id); gamma.setAttribute("aria-describedby", error.id); }
+    }));
+    panel.appendChild(controls); panel.appendChild(error); panel.appendChild(draftNote);
+    var status = el("p", "class-note"); status.id = "svm-status"; status.setAttribute("role", "status");
+    panel.appendChild(status);
+    var progress = el("progress", "svm-progress"); progress.id = "svm-progress";
+    progress.setAttribute("aria-label", I18N.t("svmTitle")); progress.max = classSvm.total || 1; progress.value = classSvm.completed;
+    panel.appendChild(progress);
+    if (classSvm.error) panel.appendChild(el("p", "class-label-error", I18N.t(classSvm.error)));
+    if (state.result.verify && !Classification.hasVerificationLabels(state.result)) panel.appendChild(el("p", "class-note", I18N.t("svmVerificationLabels")));
+    return panel;
+  }
+
+  function classSvmBoundarySeries(mesh) {
+    var color = getThemeColors().text;
+    return { id: "svm-boundary", name: I18N.t("svmBoundary"), type: "custom", coordinateSystem: "cartesian2d",
+      silent: true, clip: true, z: 4, data: mesh ? mesh.segments : [],
+      encode: { x: [0, 2], y: [1, 3] }, itemStyle: { color: color },
+      renderItem: function (params, api) {
+        var a = api.coord([api.value(0), api.value(1)]), b = api.coord([api.value(2), api.value(3)]);
+        return { type: "line", shape: { x1: a[0], y1: a[1], x2: b[0], y2: b[1] }, style: { stroke: color, lineWidth: 2 } };
+      } };
+  }
+
+  function classificationSvmDomain(model, geo) {
+    var points = [];
+    classificationDatasets().forEach(function (ds) { points = points.concat(geo[ds]); });
+    var hulls = state.classHullMode === "official" && model.hulls ? model.hulls : geo.hulls;
+    hulls.forEach(function (hull) { hull.forEach(function (p) { points.push({ coords: p }); }); });
+    return SVMEngine.domain(points);
+  }
+
+  function requestClassSvmBoundary() {
+    classSvmBoundaryKey = null;
+    if (!classSvm.enabled || !isClassification() || !state.classChart) return;
+    var model = state.result.models.find(function (m) { return m.rank === state.classRank; }) || state.result.models[0];
+    var geo = classificationGeometry(model);
+    classSvmBoundaryKey = classSvm.requestBoundary(model.rank, classificationSvmDomain(model, geo));
+    drawClassSvmBoundary();
+  }
+
+  function drawClassSvmBoundary() {
+    if (!classSvm.enabled || !state.classChart || !classSvmBoundaryKey) return;
+    var mesh = classSvm.boundaries.get(classSvmBoundaryKey), note = document.getElementById("svm-boundary-note");
+    state.classChart.setOption({ series: [classSvmBoundarySeries(mesh)] });
+    var summary = classSvm.results.get(state.classRank);
+    if (note) note.textContent = I18N.t(classSvm.status === "error" || classSvm.boundaryErrors.has(classSvmBoundaryKey) ? "svmBoundaryError" :
+      summary && summary.status === "failed" ? "svmFailed" : mesh ? mesh.segments.length ? "svmBoundaryNote" : "svmNoBoundary" : "svmBoundaryPending");
+  }
+
+  function sortedClassModels() {
+    return state.result.models.slice().sort(function (a, b) { return SVMEngine.compare(a, b, state.classSort, classSvm.results); });
+  }
+
   function buildClassThumb(model) {
     var NS = "http://www.w3.org/2000/svg", W = 300, H = 180, pad = 14;
     var svg = document.createElementNS(NS, "svg");
@@ -1866,7 +2126,11 @@
       card.setAttribute("aria-pressed", String(model.rank === state.classRank));
       card.setAttribute("aria-label", I18N.t("classificationModel") + " " + model.rank);
       card.appendChild(el("span", "class-card__title", I18N.t("classificationModel") + " " + model.rank));
-      card.appendChild(el("span", "class-card__score", I18N.t("classificationOverlap") + ": " + model.dataOverlap + " · " + model.sizeOverlap));
+      card.appendChild(el("span", "class-card__score", I18N.t("classificationOverlap") + ": " + classificationScore(model.dataOverlap) + " · " + classificationScore(model.sizeOverlap)));
+      if (classSvm.enabled) {
+        var score = el("span", "class-card__score svm-card-score", classSvmScoreText(classSvm.results.get(model.rank)));
+        score.dataset.svmRank = String(model.rank); score.dataset.svmKey = "card"; card.appendChild(score);
+      }
       if (classThumbObserver) {
         card.__model = model; card.appendChild(el("span", "class-preview-placeholder skeleton"));
         classThumbObserver.observe(card);
@@ -1886,7 +2150,7 @@
     if (!isClassification()) return;
     var res = state.result, info = res.meta.sissoIn;
     if (!Classification.hasVerificationLabels(res)) state.classDataset = "train";
-    var classNames = res.classes.map(function (_, i) { return I18N.format("classificationCategory", { n: i + 1 }); });
+    var classNames = res.classes.map(function (value, i) { return I18N.format("classificationCategory", { n: i + 1 }) + (res.meta.sourceEngine === "SISSO++" ? " [" + value + "]" : ""); });
     var root = $("#view-classification");
     var oldGallery = root.querySelector(".class-gallery");
     var galleryScroll = oldGallery && Number(oldGallery.dataset.page) === state.classPage ? oldGallery.scrollTop : 0;
@@ -1894,7 +2158,7 @@
     if (classThumbObserver) { classThumbObserver.disconnect(); classThumbObserver = null; }
     root.innerHTML = "";
     var ctx = $("#app-context");
-    ctx.textContent = I18N.t("classificationTitle") + " · " + info.descDim + "D";
+    ctx.textContent = resultSourceLabel(res) + I18N.t("classificationTitle") + " · " + info.descDim + "D";
     ctx.hidden = false;
     var heading = el("header", "class-header"), intro = el("div");
     intro.appendChild(el("h1", "", I18N.t("classificationTitle"))).id = "class-title";
@@ -1912,6 +2176,8 @@
       kpis.appendChild(card);
     });
     root.appendChild(kpis);
+    root.appendChild(buildClassSvmControls());
+    if (classSvm.enabled) updateClassSvmProgress();
     var controls = el("div", "class-browser-controls"), browserHeader = el("div", "class-browser-header");
     browserHeader.appendChild(el("h2", "", I18N.t("classificationCandidates")));
     var viewSwitch = el("div", "class-view-switch");
@@ -1921,17 +2187,43 @@
     });
     browserHeader.appendChild(viewSwitch); controls.appendChild(browserHeader);
     var sortRow = el("div", "class-browser-sort");
-    sortRow.appendChild(classSelect(I18N.t("sortBy"), [["rank", I18N.t("colRank")],
-      ["dataOverlap", I18N.t("classificationOverlap")], ["sizeOverlap", I18N.t("classificationSize")]],
+    var sortOptions = [["rank", I18N.t("colRank")],
+      ["dataOverlap", I18N.t("classificationOverlap")], ["sizeOverlap", I18N.t("classificationSize")]];
+    var svmColumns = [];
+    if (classSvm.enabled) ["train", "verify"].forEach(function (ds) {
+      if (ds === "verify" && !res.verify) return;
+      SVMEngine.metrics.forEach(function (metric, i) {
+        var key = "svm-" + ds + "-" + metric;
+        var caption = I18N.t(ds === "train" ? "svmTrainShort" : "svmVerifyShort") + " · " + I18N.t(["svmAccuracy", "svmBalancedAccuracy", "svmMacroF1"][i]);
+        sortOptions.push([key, caption, classSvm.status === "running" || ds === "verify" && !Classification.hasVerificationLabels(res)]);
+        svmColumns.push([key, caption]);
+      });
+    });
+    sortRow.appendChild(classSelect(I18N.t("sortBy"), sortOptions,
     state.classSort, function (v) { state.classSort = v; state.classPage = 0; renderClassification(); }));
     var rankExport = classButton(I18N.t("classificationExportRankShort"), function () {
       var rows = [["rank", "official_data_overlap", "official_size_overlap", "descriptor_1"]];
       if (info.descDim === 2) rows[0].push("descriptor_2");
-      res.models.forEach(function (m) { rows.push([m.rank, m.dataOverlap, m.sizeOverlap].concat(m.descriptors.map(function (d) { return d.original; }))); });
+      var nativeLossColumn = res.models.some(function (m) { return !!m.nativeLoss; });
+      if (nativeLossColumn) rows[0].push("native_loss", "native_loss_value");
+      if (classSvm.enabled) rows[0] = rows[0].concat(["svm_status", "svm_C", "svm_gamma", "svm_complexity"], svmColumns.map(function (c) { return c[0]; }), ["svm_verify_issue"]);
+      sortedClassModels().forEach(function (m) {
+        var row = [m.rank, m.dataOverlap === null ? "" : m.dataOverlap, m.sizeOverlap === null ? "" : m.sizeOverlap].concat(m.descriptors.map(function (d) { return d.original; }));
+        if (nativeLossColumn) row.push(m.nativeLoss ? m.nativeLoss.name : "", m.nativeLoss ? m.nativeLoss.value : "");
+        if (classSvm.enabled) {
+          var score = classSvm.results.get(m.rank);
+          row = row.concat([score ? score.status : "pending", score && score.fit ? score.fit.cost : classSvm.config.cost,
+            score && score.fit ? score.fit.gamma : classSvm.config.gamma,
+            score && score.fit ? score.fit.complexity : classSvm.config.complexity], svmColumns.map(function (c) {
+              var value = SVMEngine.metric(score, c[0]); return value === null ? "" : value;
+            }), [score && (score.error || score.verifyIssue) || ""]);
+        }
+        rows.push(row);
+      });
       downloadTextFile("sisso-classification-rankings.csv", Core.rowsToCsv(rows), "text/csv;charset=utf-8");
     });
     rankExport.title = I18N.t("classificationExportRankings");
-    var sorted = res.models.slice().sort(function (a, b) { return a[state.classSort] - b[state.classSort] || a.rank - b.rank; });
+    var sorted = sortedClassModels();
     var pages = Math.ceil(sorted.length / 100);
     state.classPage = Math.min(state.classPage, pages - 1);
     var pager = el("div", "class-pager");
@@ -1942,8 +2234,8 @@
     pager.lastChild.setAttribute("aria-label", I18N.t("classificationNext"));
     sortRow.appendChild(pager); controls.appendChild(sortRow);
     var browserFooter = el("div", "class-browser-caption");
-    browserFooter.appendChild(el("span", "class-note", I18N.t("classificationPreviewNote"))); browserFooter.appendChild(rankExport); controls.appendChild(browserFooter);
-    var layout = el("div", "class-layout" + (state.classView === "grid" ? " class-layout--gallery" : ""));
+    browserFooter.appendChild(el("span", "class-note", I18N.t(classSvm.enabled ? "svmPreviewNote" : "classificationPreviewNote"))); browserFooter.appendChild(rankExport); controls.appendChild(browserFooter);
+    var layout = el("div", "class-layout" + (state.classView === "grid" ? " class-layout--gallery" : classSvm.enabled ? " class-layout--svm-table" : ""));
     var modelBrowser = el("aside", "class-model-browser"); modelBrowser.appendChild(controls); layout.appendChild(modelBrowser);
     if (state.classView === "grid") {
       var gallery = buildClassGallery(sorted.slice(state.classPage * 100, state.classPage * 100 + 100));
@@ -1955,10 +2247,11 @@
     var head = el("thead"), hr = el("tr");
     ["colRank", "classificationOverlap", "classificationSize"].forEach(function (key) {
       var th = el("th", "", I18N.t(key));
-      if (key !== "colRank") th.title = I18N.t("classificationScoreNote");
+      if (key !== "colRank") th.title = I18N.t(res.meta.sourceEngine === "SISSO++" ? "sissoppClassificationNote" : "classificationScoreNote");
       hr.appendChild(th);
     });
     head.appendChild(hr); table.appendChild(head);
+    svmColumns.forEach(function (column) { hr.appendChild(el("th", "", column[1])); });
     var body = el("tbody");
     sorted.slice(state.classPage * 100, state.classPage * 100 + 100).forEach(function (m) {
       var row = el("tr", m.rank === state.classRank ? "is-selected" : "");
@@ -1967,8 +2260,12 @@
       b.setAttribute("aria-label", I18N.t("classificationModel") + " " + m.rank);
       b.setAttribute("aria-pressed", String(m.rank === state.classRank));
       cell.appendChild(b); row.appendChild(cell);
-      row.appendChild(el("td", "", String(m.dataOverlap)));
-      row.appendChild(el("td", "", String(m.sizeOverlap)));
+      row.appendChild(el("td", "", classificationScore(m.dataOverlap)));
+      row.appendChild(el("td", "", classificationScore(m.sizeOverlap)));
+      svmColumns.forEach(function (column) {
+        var cell = el("td", "", svmPercent(SVMEngine.metric(classSvm.results.get(m.rank), column[0])));
+        cell.dataset.svmRank = String(m.rank); cell.dataset.svmKey = column[0]; row.appendChild(cell);
+      });
       body.appendChild(row);
     });
     table.appendChild(body); tableBox.appendChild(table); modelBrowser.appendChild(tableBox);
@@ -1979,9 +2276,13 @@
     if (state.classHullMode === "official" && !model.hulls) state.classHullMode = "rebuilt";
     var modelHeader = el("div", "class-model-header");
     modelHeader.appendChild(el("h2", "", I18N.t("classificationModel") + " " + model.rank));
-    modelHeader.appendChild(el("span", "class-model-score", I18N.t("classificationOverlap") + ": " + model.dataOverlap + " · " + I18N.t("classificationSize") + ": " + model.sizeOverlap));
+    modelHeader.appendChild(el("span", "class-model-score", I18N.t("classificationOverlap") + ": " + classificationScore(model.dataOverlap) + " · " + I18N.t("classificationSize") + ": " + classificationScore(model.sizeOverlap)));
     detail.appendChild(modelHeader);
     model.descriptors.forEach(function (d, i) { detail.appendChild(el("pre", "class-formula", "d" + (i + 1) + " = " + d.original)); });
+    if (classSvm.enabled) {
+      var svmMetrics = el("div", "svm-model-metrics"); svmMetrics.id = "svm-model-metrics";
+      fillClassSvmMetrics(svmMetrics, classSvm.results.get(model.rank)); detail.appendChild(svmMetrics);
+    }
     var datasets = [["train", I18N.t("classTrain")]];
     if (Classification.hasVerificationLabels(res)) { datasets.unshift(["both", I18N.t("classificationBoth")]); datasets.push(["verify", I18N.t("classVerify")]); }
     var dsControls = el("div", "class-controls");
@@ -2017,6 +2318,9 @@
     var finite = points.filter(function (p) { return p.finite; });
     if (finite.length !== points.length) detail.appendChild(el("p", "warning", I18N.format("classificationNonfinite", { n: points.length - finite.length })));
     var notes = el("div", "class-chart-caption");
+    if (res.meta.sourceEngine === "SISSO++") notes.appendChild(el("p", "class-note", I18N.t("sissoppClassificationNote")));
+    if (model.nativeLoss) notes.appendChild(el("p", "class-note", "SISSO++ " + model.nativeLoss.name + ": " + fmt(model.nativeLoss.value, 6)));
+    if (model.nativeTestLoss) notes.appendChild(el("p", "class-note", "SISSO++ " + model.nativeTestLoss.name + ": " + fmt(model.nativeTestLoss.value, 6)));
     if (model.official && state.classDataset !== "verify" && state.classHullMode === "official") {
       var no = model.official.filter(function (p) { return p.classified === "NO"; }).length;
       notes.appendChild(el("p", "class-note", "SISSO classified? YES: " + (model.official.length - no) + " · NO: " + no + ". " + I18N.t("classificationOfficialNote")));
@@ -2024,6 +2328,9 @@
     if (Classification.hasVerificationLabels(res)) notes.appendChild(el("p", "class-note", I18N.t("classificationDatasetNote")));
     notes.appendChild(el("p", "class-note", I18N.t(state.classHullMode === "official" ? "classificationHullNote" : "classificationRebuiltNote")));
     if (state.classHullMode === "rebuilt" && info.isconvex.includes(0)) notes.appendChild(el("p", "class-note", I18N.t("classificationEnvelopeNote")));
+    if (classSvm.enabled) {
+      var boundaryNote = el("p", "class-note", I18N.t("svmBoundaryPending")); boundaryNote.id = "svm-boundary-note"; notes.appendChild(boundaryNote);
+    }
     var chart = el("div", "class-chart");
     chart.setAttribute("role", "img"); chart.setAttribute("aria-label", I18N.t("classificationSpace"));
     detail.appendChild(chart); detail.appendChild(notes); layout.appendChild(detail); root.appendChild(layout);
@@ -2055,6 +2362,8 @@
         data: hull.length > 2 ? coords.concat([coords[0]]) : coords });
     });
     state.classChart = echarts.init(chart);
+    var svmBounds = classSvm.enabled ? classificationSvmDomain(model, geo) : null;
+    if (classSvm.enabled) series.push(classSvmBoundarySeries(null));
     state.classChart.setOption({ animation: false, textStyle: { color: colors.text },
       legend: { type: "scroll", textStyle: { color: colors.text } },
       tooltip: { trigger: "item", renderMode: "richText", formatter: function (p) {
@@ -2063,24 +2372,27 @@
       } },
       grid: { top: 65, left: 65, right: 30, bottom: 65 },
       dataZoom: [{ type: "inside", filterMode: "none" }, { type: "slider", height: 18, bottom: 12 }],
-      xAxis: { type: "value", name: "d1", scale: true, axisLabel: { color: colors.text }, splitLine: { lineStyle: { color: colors.grid } } },
+      xAxis: { type: "value", name: "d1", scale: true, min: svmBounds ? svmBounds[0][0] : undefined,
+        max: svmBounds ? svmBounds[0][1] : undefined, axisLabel: { color: colors.text }, splitLine: { lineStyle: { color: colors.grid } } },
       yAxis: { type: "value", name: info.descDim === 2 ? "d2" : I18N.t("classificationCategories"), scale: true,
+        min: svmBounds ? svmBounds[1][0] : undefined, max: svmBounds ? svmBounds[1][1] : undefined,
         minInterval: info.descDim === 1 ? 1 : 0, axisLabel: { color: colors.text, formatter: info.descDim === 1 ? function (v) {
           return v === -1 ? I18N.t("classificationUnlabeled") : classNames[v] || "";
         } : undefined }, splitLine: { lineStyle: { color: colors.grid } } }, series: series });
+    if (classSvm.enabled) requestClassSvmBoundary();
     var samples = el("details", "class-samples");
-    samples.appendChild(el("summary", "", I18N.t("classificationSamples") + " (" + points.length + ")"));
+    samples.appendChild(el("summary", "", I18N.t(model.svmPredictions ? "sissoppSamples" : "classificationSamples") + " (" + points.length + ")"));
     var sampleBox = el("div", "class-sample-scroll");
     var sampleTable = el("table", "class-table");
     var sh = el("thead"), shr = el("tr");
     var headings = [I18N.t("classificationDataset"), I18N.t("classificationSample"), I18N.t("classificationCategories"), "d1"];
     if (info.descDim === 2) headings.push("d2");
-    headings.push("SISSO classified?");
+    headings.push(model.svmPredictions ? I18N.t("sissoppSvmClass") : "SISSO classified?");
     headings.forEach(function (h) { shr.appendChild(el("th", "", h)); }); sh.appendChild(shr); sampleTable.appendChild(sh);
     var sb = el("tbody");
     points.forEach(function (p) {
       var row = el("tr");
-      [I18N.t(p.dataset === "train" ? "classTrain" : "classVerify"), p.name, p.classIndex === null ? "—" : classNames[p.classIndex]].concat(p.coords, [p.classified || "—"]).forEach(function (v) {
+      [I18N.t(p.dataset === "train" ? "classTrain" : "classVerify"), p.name, p.classIndex === null ? "—" : classNames[p.classIndex]].concat(p.coords, [model.svmPredictions ? (p.svmPrediction === undefined ? "—" : p.svmPrediction) : p.classified || "—"]).forEach(function (v) {
         row.appendChild(el("td", "", String(v)));
       }); sb.appendChild(row);
     });
@@ -2089,6 +2401,8 @@
 
   // Left-nav state: upload ("Load results") vs. loaded run + sub-views.
   function setNavState(hasResults) {
+    var evaluationButton = $("#btn-evaluation");
+    if (evaluationButton) evaluationButton.disabled = !hasResults;
     var t = $("#view-table-btn"), g = $("#view-grid-btn"), p = $("#view-pareto-btn"),
         c = $("#view-compare-btn"), u = $("#view-units-btn");
     var home = $("#btn-nav-home");
@@ -2118,6 +2432,12 @@
     }
   }
 
+  function resultSourceLabel(res) {
+    if (!res.meta.sourceEngine) return "";
+    var synthetic = res.meta.sissoPlusPlus && res.meta.sissoPlusPlus.config && res.meta.sissoPlusPlus.config._synthetic;
+    return res.meta.sourceEngine + (synthetic ? " · " + I18N.t("sissoppSynthetic") : "") + " · ";
+  }
+
   function showResults() {
     $("#view-upload").hidden = true;
     $("#view-results").hidden = false;
@@ -2127,7 +2447,7 @@
     var res = state.result;
     var ctx = $("#app-context");
     if (ctx) {
-      var label = res.meta.targetName || "";
+      var label = resultSourceLabel(res) + (res.meta.targetName || "");
       if (res.meta.sissoIn && res.meta.sissoIn.descDim !== null) label += " · " + res.meta.sissoIn.descDim + "D";
       if (res.meta.multiTask) label += " · MT ×" + res.meta.ntask;
       ctx.textContent = label;
@@ -2155,7 +2475,7 @@
     var strip = $("#kpi-strip");
     strip.innerHTML = "";
     var info = res.meta.sissoIn || null;
-    var fromIn = I18N.t("projectFromSissoIn");
+    var fromIn = I18N.t(res.meta.sourceEngine === "SISSO++" ? "sissoppFromInput" : "projectFromSissoIn");
     var kpis;
     if (res.meta.multiTask) {
       // MT-SISSO: train.dat holds every task stacked, and there is no verify.dat.
@@ -2166,6 +2486,7 @@
         [I18N.t("kpiTrain"), res.meta.nTrain],
         [I18N.t("kpiTasks"), res.meta.ntask],
       ];
+      if (res.verify) kpis.push([I18N.t("kpiVerify"), res.meta.nVerify]);
     } else {
       kpis = [
         [I18N.t("kpiModels"), res.meta.nModels],
@@ -2259,7 +2580,7 @@
     if (key === "verify") return I18N.t("detailVerify");
     if (key === "delta") return I18N.t("detailDeltaShort");
     var task = state.result ? Core.datasetTask(state.result, key) : null;
-    if (task) return I18N.format("dsTask", { n: task.index });
+    if (task) return state.result.meta.sourceEngine === "SISSO++" ? task.label : I18N.format("dsTask", { n: task.index });
     return I18N.t(isMultiTask() ? "dsPooled" : "detailTrain");
   }
 
@@ -2826,9 +3147,12 @@
       });
     });
     if (Number.isFinite(m.overallRmse)) {
-      lines.push("RMSE_sisso_overall: " + fmtBatchMetric(m.overallRmse));
-      lines.push("MaxAE_sisso_overall: " + fmtBatchMetric(m.overallMaxae));
+      var overallTag = state.result.meta.sissoPlusPlus && state.result.meta.sissoPlusPlus.logRegression ? "pooled_original_scale" : "sisso_overall";
+      lines.push("RMSE_" + overallTag + ": " + fmtBatchMetric(m.overallRmse));
+      lines.push("MaxAE_" + overallTag + ": " + fmtBatchMetric(m.overallMaxae));
     }
+    if (m.nativeLoss) lines.push("SISSO++_native_loss_train: " + m.nativeLoss.name + " = " + fmtBatchMetric(m.nativeLoss.value));
+    if (m.nativeTestLoss) lines.push("SISSO++_native_loss_verify: " + m.nativeTestLoss.name + " = " + fmtBatchMetric(m.nativeTestLoss.value));
     return lines.join("\n");
   }
 
@@ -4178,7 +4502,12 @@
     if (!wrap) return;
     if (!res.meta || !res.meta.units) {
       wrap.innerHTML = "";
-      if (empty) empty.hidden = false;
+      if (empty) {
+        var unitEmptyKey = res.meta && res.meta.sourceEngine === "SISSO++" ? "sissoppUnitsEmpty" : "unitsEmpty";
+        empty.setAttribute("data-i18n", unitEmptyKey);
+        empty.textContent = I18N.t(unitEmptyKey);
+        empty.hidden = false;
+      }
       return;
     }
     if (empty) empty.hidden = true;
@@ -5166,8 +5495,10 @@
     }
     var res = state.result;
     var tasks = res && res.tasks ? res.tasks : null;
+    if (m.nativeLoss) card("SISSO++ " + m.nativeLoss.name + " · " + datasetLabel("train"), m.nativeLoss.value, I18N.t("sissoppNativeLossHint"));
+    if (m.nativeTestLoss) card("SISSO++ " + m.nativeTestLoss.name + " · " + datasetLabel("verify"), m.nativeTestLoss.value, I18N.t("sissoppNativeLossHint"));
     if (tasks && tasks.length > 1) {
-      var pooled = ["train"];
+      var pooled = res.verify ? ["train", "verify"] : ["train"];
       pooled.forEach(function (ds) {
         if (!modelHasDataset(m, ds)) return;
         COL_METRICS.forEach(function (d) {
@@ -5195,7 +5526,7 @@
       // analyzer recomputes it from the per-task metrics as well, but only to
       // cross-check the interpretation (the health check reports any gap) — the
       // authoritative number is the one SISSO wrote, so that is what is shown.
-      if (Number.isFinite(m.rmseSisso)) {
+      if (Number.isFinite(m.rmseSisso) && !(res.meta.sissoPlusPlus && res.meta.sissoPlusPlus.logRegression)) {
         card(I18N.t("detailSissoOverall") + " · RMSE", m.rmseSisso, I18N.t("detailSissoOverallHint"));
         card(I18N.t("detailSissoOverall") + " · MaxAE", m.maxaeSisso, I18N.t("detailSissoOverallHint"));
       }
@@ -5867,6 +6198,19 @@
   // Event wiring
   // ---------------------------------------------------------------------------
   function bindEvents() {
+    var evaluationButton = $("#btn-evaluation");
+    if (evaluationButton) evaluationButton.addEventListener("click", function () {
+      if (!state.result || !window.SissoEvaluationUI) return;
+      closeDetail(); closeInspector();
+      window.SissoEvaluationUI.open(state.result, state.evaluation, function (settings) {
+        state.evaluation = settings; scheduleProjectSaveSoon();
+      });
+    });
+    // Switching to any existing page ends/cancels the separate evaluation job.
+    ["btn-reset", "btn-nav-home", "view-table-btn", "view-grid-btn", "view-pareto-btn", "view-compare-btn", "view-units-btn", "view-classification-btn", "btn-lang", "btn-theme"].forEach(function (id) {
+      var button = $("#" + id);
+      if (button) button.addEventListener("click", function () { if (window.SissoEvaluationUI) window.SissoEvaluationUI.close(); });
+    });
     // Prevent the browser from navigating away if a file is dropped outside
     // the dropzone (default action for file drops is to open the file).
     ["dragover", "drop"].forEach(function (ev) {
@@ -5939,6 +6283,8 @@
 
     // run / reset / home nav
     $("#btn-run").addEventListener("click", run);
+    var cppDimensionSelect = $("#sissopp-dimension");
+    if (cppDimensionSelect) cppDimensionSelect.addEventListener("change", function () { state.cppDimension = Number(cppDimensionSelect.value); clearHealthPanels(); });
     $("#btn-demo").addEventListener("click", loadDemo);
     // If the demo payload is missing (e.g. deployment without demo-data.js),
     // hide the demo strip so no dead button is shown.
@@ -5947,8 +6293,11 @@
       if (demoPanel) demoPanel.hidden = true;
     }
     $("#btn-reset").addEventListener("click", function () {
+      classSvm.reset(); classSvmBoundaryKey = null; classSvmDraft = null;
       state.files = {};
       state.inputType = null;
+      state.cppFiles = null;
+      state.cppDimension = null;
       state.texts = {};
       state.result = null;
       classGeometryCache.clear();

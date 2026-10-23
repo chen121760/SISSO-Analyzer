@@ -1,0 +1,15 @@
+# SYNTHETIC DEMONSTRATION — not an actual SISSO++ run
+# exp(c0) * (x)^a0
+# Property Label: $prop$; Unit of the Property: eV
+# LOG_RMSE: 0; Max AE: 0
+# Coefficients
+# Task a0 c0
+# all,2,0.6931471805599453,
+# Feature Rung, Units, and Expressions
+# 0; 0; AA; 0; x; $x$; x; x; x
+# Number of Samples Per Task
+# Task, n_samples
+# all,2
+# Sample ID, Property Value, Property Value (EST), Feature 0 Value
+A,2,2,1
+B,8,8,2

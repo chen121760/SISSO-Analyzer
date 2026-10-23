@@ -42,17 +42,18 @@
 
   function parseTop(text, dim) {
     var lines = String(text || "").trim().split(/\r?\n/);
+    var sissoPlusPlus = /\bSISSO\+\+\s*$/.test(lines[0]);
     if (!/rank\s+#data_overlap\s+size_overlap\s+feature_ID/i.test(lines[0])) {
       throw new Error("Expected classification top file: rank #data_overlap size_overlap feature_ID.");
     }
     var ranks = new Set();
     var models = lines.slice(1).filter(function (s) { return s.trim(); }).map(function (line, i) {
-      var m = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+\(\s*([\d\s]+)\s*\)\s*$/);
+      var m = line.match(/^\s*(\d+)\s+(\d+|NA)\s+(\S+)\s+\(\s*([\d\s]+)\s*\)\s*$/);
       if (!m) throw new Error("Invalid classification model row " + (i + 2) + ".");
-      var rank = Number(m[1]), overlap = Number(m[2]), size = number(m[3]);
+      var rank = Number(m[1]), overlap = sissoPlusPlus && m[2] === "NA" ? null : Number(m[2]), size = sissoPlusPlus && m[3] === "NA" ? null : number(m[3]);
       var ids = m[4].trim().split(/\s+/).map(Number);
       if (!Number.isSafeInteger(rank) || rank < 1 || ranks.has(rank) ||
-          !Number.isSafeInteger(overlap) || !Number.isFinite(size) || ids.length !== dim ||
+          !(Number.isSafeInteger(overlap) || sissoPlusPlus && overlap === null) || !(Number.isFinite(size) || sissoPlusPlus && size === null) || ids.length !== dim ||
           new Set(ids).size !== ids.length || ids.some(function (id) { return !Number.isSafeInteger(id) || id < 1; })) {
         throw new Error("Invalid rank, score or descriptor IDs in classification model row " + (i + 2) + ".");
       }
@@ -129,10 +130,12 @@
     return data.names.map(function (name, i) {
       var getter = Core.makeFeatureGetter(data.cols, features, i);
       var coords = functions.map(function (fn) { return fn(getter); });
-      return { name: name, index: i + 1, coords: coords,
+      var point = { name: name, index: i + 1, coords: coords,
         classIndex: data.labels ? data.labels[i] : null,
         finite: coords.every(Number.isFinite),
         classified: dataset === "train" && model.official ? model.official[i].classified : null };
+      if (model.svmPredictions) point.svmPrediction = model.svmPredictions[dataset] ? model.svmPredictions[dataset].get(name) : undefined;
+      return point;
     });
   }
 
@@ -307,11 +310,13 @@
     var rows = [["sample_id", "class_index", "class_label", "descriptor_1"]];
     if (result.meta.sissoIn.descDim === 2) rows[0].push("descriptor_2");
     rows[0].push("official_classified", "finite");
+    if (model.svmPredictions) rows[0].push("SISSO++_SVM_predicted_class");
     if (dataset === "both") rows[0].unshift("dataset");
     (dataset === "both" ? (hasVerificationLabels(result) ? ["train", "verify"] : ["train"]) : [dataset]).forEach(function (key) {
       projectModel(result, model, key).forEach(function (p) {
         var row = [p.name, p.classIndex === null ? "" : p.classIndex,
           p.classIndex === null ? "" : "Category " + (p.classIndex + 1)].concat(p.coords, [p.classified || "", p.finite]);
+        if (model.svmPredictions) row.push(p.svmPrediction === undefined ? "" : p.svmPrediction);
         if (dataset === "both") row.unshift(key);
         rows.push(row);
       });

@@ -18,7 +18,7 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/style.css?v=batch-evaluation-1" />
 </head>
 <body>
   <div class="shell">
@@ -83,6 +83,10 @@
         <button type="button" class="nav-item" id="view-classification-btn" disabled hidden>
           <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><circle cx="7" cy="7" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 13 5 8H11z" fill="none" stroke="currentColor" stroke-width="2"/></svg>
           <span data-i18n="classificationTitle">Classification</span>
+        </button>
+        <button type="button" class="nav-item" id="btn-evaluation" disabled>
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M4 4v16h16M8 15l4-6 4 3 4-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          <span data-i18n="postEvaluation">Post-evaluation</span>
         </button>
       </nav>
     </aside>
@@ -155,8 +159,8 @@
         <section id="view-upload" class="view view--upload" aria-labelledby="upload-title">
           <div class="upload-layout">
             <div class="upload-card">
-              <h1 class="upload-card__title" id="upload-title" data-i18n="uploadTitle">Load SISSO results</h1>
-              <p class="upload-card__subtitle" data-i18n="appSubtitle">Interactive analyzer for SISSO regression and classification results</p>
+              <h1 class="upload-card__title" id="upload-title" data-i18n="uploadTitle">Load SISSO / SISSO++ results</h1>
+              <p class="upload-card__subtitle" data-i18n="appSubtitle">Interactive analyzer for SISSO / SISSO++ regression and classification results</p>
 
               <a
                 class="sage-recommendation"
@@ -198,6 +202,11 @@
               </div>
 
               <ul class="file-list" id="file-list" aria-live="polite"></ul>
+              <div id="sissopp-options" hidden>
+                <label for="sissopp-dimension" data-i18n="sissoppDimension">SISSO++ model dimension</label>
+                <select id="sissopp-dimension"></select>
+                <p class="upload-card__note" data-i18n="sissoppHint">Load sisso.json, its data CSV, and models/train_dim_*_model_*.dat. Matching test model files preserve the test split.</p>
+              </div>
 
               <p class="upload-card__note" data-i18n="verifyOptionalNote">
                 verify.dat is optional — if omitted, only train metrics are shown.
@@ -419,6 +428,12 @@
   <script src="js/i18n.js?v=3"></script>
   <script src="js/sisso-core.js"></script>
   <script src="js/sisso-classification.js"></script>
+  <script src="js/sisso-evaluation.js"></script>
+  <script src="js/sisso-evaluation-batch.js"></script>
+  <script src="js/evaluation-ui.js"></script>
+  <script src="js/sisso-svm.js"></script>
+  <script src="js/sisso-svm-controller.js"></script>
+  <script src="js/sisso-plus-plus.js"></script>
   <script src="js/demo-data.js"></script>
   <script src="js/health-check.js"></script>
   <script src="js/app.js"></script>

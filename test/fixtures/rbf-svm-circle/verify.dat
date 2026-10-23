@@ -1,0 +1,5 @@
+name x z
+vin1 .1 -.05
+vin2 -.15 .1
+vout1 1.3 .3
+vout2 -.5 -1.3

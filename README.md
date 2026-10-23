@@ -1,6 +1,8 @@
 # SISSO-Analyzer
 
-Interactive web analyzer for [SISSO](https://github.com/rouyang2017/SISSO) results. Pure client-side — nothing is uploaded; all parsing and computation runs in the browser.
+Interactive web analyzer for [SISSO](https://github.com/rouyang2017/SISSO) and
+[SISSO++](https://gitlab.com/sissopp_developers/sissopp) results. Pure client-side —
+nothing is uploaded; all parsing and computation runs in the browser.
 
 **Live demo**: https://chen121760.github.io/SISSO-Analyzer/
 
@@ -25,6 +27,47 @@ classification result analysis** (`ptype=2`). Multi-objective and multi-task
 classification runs are not supported.
 
 ## Features
+
+### SISSO++ imports
+
+Load a SISSO++ run folder or archive containing `sisso.json`, its input data CSV,
+and `models/train_dim_N_model_K.dat`. Choose a descriptor dimension before
+Analyze. Matching `test_dim_N_model_K.dat` files establish the original test
+split; a random hold-out is never reconstructed from `leave_out_frac`.
+The data CSV can be shared through `../data.csv`, as in the current official
+default case, provided that CSV is included in the uploaded folder or files.
+
+Supported: single-task and multi-task ordinary/log regression (including explicit
+task-aware test predictions), and single-task 1D/2D classification with convex-hull,
+Davies–Bouldin, silhouette or Calinski–Harabasz losses. The importer
+accepts commented configuration files and fixed-zero-intercept coefficient
+rows. It checks sample IDs, targets, descriptor coordinates and regression
+predictions against the input CSV and model metadata before analysis. Saved
+projects retain the engine identity, original sample IDs and SVM predictions.
+
+Log-regression formulas retain the native multiplicative form. `LOG_RMSE` / `MSLE`
+remain separate native loss cards; the table's RMSE/MAE/MaxAE use the original
+target scale. Log models require positive targets and descriptor values.
+
+Classification preserves SISSO++ model order, available overlap counts and native SVM
+predicted classes. These classes are separate from SISSO's `classified? YES/NO`
+markers. The text model format does not supply `size_overlap`, so that field is
+shown as unavailable. Non-hull classification losses are preserved independently;
+no overlap count is invented for them. Hulls use the training samples only. The sample table and
+CSV expose a separate **SISSO++ SVM predicted class** column.
+
+Current limits: multi-task classification and classification above 2D are rejected
+with an explanation. Unknown calculation/loss formats are also rejected.
+Primary feature names must use letters, digits and underscores. Unit suffixes in
+CSV headers are accepted; the SISSO unit-matrix view requires a native unit
+matrix and is unavailable for these SISSO++ imports.
+
+Nine [synthetic examples](demo/sisso-plus-plus/README.md) follow the latest
+official source format verified at upstream commit
+[`43b9911`](https://gitlab.com/sissopp_developers/sissopp/-/commit/43b99110118a51b9f4983b02c8d781ae6f25456c).
+They are virtual importer fixtures, not a claim that SISSO++ was executed.
+
+### SISSO features
 
 - Load the SISSO result files by drag & drop, folder, or archive (`.zip` / `.tar.gz` / …).
 - Sortable overview table and thumbnail grid (rank, RMSE, MAE, MaxAE, R², Spearman's ρ) with favourites-only view.
@@ -101,11 +144,85 @@ descriptors. Optional `convex2D_hull` draws the original top1 vertices in file
 order. **NO means entry into another category domain; it is not a predicted
 class.** Engine boundary tolerances and near-zero hull edges can materially
 affect these statistics. The analyzer preserves the official geometry and
-scores separately from its training-sample reconstructions. It does not report
-prediction accuracy or assign classes to new samples.
+scores separately from its training-sample reconstructions. The separate
+**Post-evaluation** workspace can assign predictions using an explicitly selected
+training-domain rejection rule or an auxiliary Logistic classifier. Official
+YES/NO is never interpreted as prediction accuracy.
 
 Archives and folders containing a nested run (for example `_class_smoke/`) use
 the outer run's files; nested run evidence is kept out of that analysis.
+
+For classification T/F, confusion matrices, ROC/PR, probability diagnostics and
+regression residual/tail-error evaluation, see the
+[post-evaluation guide](docs/post-evaluation.md). It also documents local
+bootstrap intervals, imported fold predictions and independent-calibration
+conformal evaluation. Computation is local and cancellable.
+
+Use **Evaluate all candidates / 批量评价全部候选** to screen the full ranked
+model list with one fixed protocol, then sort accuracy, coverage, ROC AUC or AP.
+Classification evaluates geometry and auxiliary Logistic separately; selected
+candidate details remain available. Batch rankings are selection-validation
+results and require a held-out test before final performance claims.
+
+### Optional RBF-SVM classifier
+
+For **2D classification** runs, manually check **Enable RBF-SVM for all models**.
+The analyzer then trains a separate LIBSVM RBF C-SVC for every candidate using
+only that candidate's `d1` and `d2`. This feature is off by default. Computation
+runs locally in a Web Worker; the page stays usable and **Stop training**
+immediately cancels fitting while retaining completed scores.
+
+Each classifier standardizes its two coordinates using **training samples only**.
+All candidates share the chosen **C** (default `1`), **base γ** (default `scale`,
+i.e. inverse summed training variance after standardization), and **Boundary
+complexity** (levels 1–5, default 3). Complexity multiplies base γ by
+`4^(level - 3)` = `1/16, 1/4, 1, 4, 16`: higher levels allow more local,
+flexible boundaries. This changes the fitted classifier, not drawing resolution.
+Numeric C and base γ must be between `0.000001` and `1000000`. Settings are drafts
+until **Retrain all models** is clicked; the previous plot and scores remain
+visible with a reminder. Retraining replaces fits, scores and boundary caches.
+Multiclass runs use LIBSVM's one-versus-one C-SVC.
+
+The selected model's scatter plot overlays the dark **zero contour of the
+continuous decision function `f(d1,d2) = 0`**, computed from the fitted support
+vectors, coefficients, γ and ρ. In standardized coordinates `z`,
+`f(z) = Σ coefficient_i exp(-γ ||z - SV_i||²) - ρ`. The chart stays in the
+original d1/d2 units. Contours are found on demand using 128 × 128 samples,
+marching squares and refined edge roots; class IDs are not interpolated to
+construct the boundary. Multiclass runs show the active parts of pairwise
+`f_ij = 0` contours, excluding contours hidden within another winning category.
+Category colors, training/verification markers, SISSO hulls, and official overlap
+scores retain their existing meaning. A model predicting one category across
+the displayed range has no boundary in that range. Thumbnail cards retain the
+training hull previews and add SVM accuracy; open any model to see its boundary.
+
+Cards, the ranking table and model detail show **training** and, when fully
+labeled, **verification** scores. The table and detail provide **accuracy,
+balanced accuracy and Macro-F1**. Choose any score in **Sort by** after training
+finishes or stops: higher scores come first, ties use official rank, and missing
+or failed results go last. **Export ranks** follows this order and includes SVM
+status, C, resolved γ, complexity, scores as fractions, and any missing-score reason.
+
+Training scores are in-sample, not a generalization estimate. Verification
+samples/labels never affect fitting or scaling. Balanced accuracy averages
+recall over categories present in the evaluated dataset; Macro-F1 averages over
+all training categories with undefined F1 set to zero. Set verification classes
+with the existing **Set classes / Edit classes** controls when needed. Saving
+new verification labels while SVM is enabled discards old scores and retrains.
+Invalid training coordinates fail only that candidate; non-finite verification
+coordinates suppress its verification scores instead of silently dropping rows.
+
+Fits and scores are held for the current analysis only. Turning SVM off,
+loading another run or refreshing clears them; enabling SVM is always manual.
+Serve this folder over HTTP as described below so the local worker can load.
+The pinned browser library and licenses are in [`js/vendor`](js/vendor/README.md);
+no CDN, backend or package installation is needed.
+
+For a small reproducible nonlinear example, load all six files in
+[`test/fixtures/rbf-svm`](test/fixtures/rbf-svm). At the default settings, model 1
+has 100% training/verification accuracy, while model 2 has 50%.
+For a visibly curved, closed `f(d1,d2)=0` boundary and complexity controls, use
+the six files in [`test/fixtures/rbf-svm-circle`](test/fixtures/rbf-svm-circle).
 
 ## Multi-task runs (MT-SISSO)
 
@@ -183,6 +300,9 @@ Dependency-free Node scripts (no `package.json`, no `node_modules`):
 node test/mt_sisso.test.mjs     # MT-SISSO parsing / coefficients / aggregation
 node test/ui_smoke.test.mjs     # the real app.js driven through a DOM shim
 node test/classification.test.mjs # classification parsing, projections and official evidence
+node test/svm.test.mjs            # real RBF-SVM fits, leakage guards, metrics and boundary worker
+node test/svm_controller.test.mjs # opt-in, cancellation, stale jobs and boundary cache
+node test/svm_decision.test.mjs   # continuous f=0 roots, native decision agreement and complexity
 ```
 
 …plus the rest of `test/*.test.mjs`. The two suites above also use the
